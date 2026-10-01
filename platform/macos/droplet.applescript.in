@@ -1,0 +1,187 @@
+-- SPDX-License-Identifier: MIT
+
+-- @DROPLET_TOOL@: drop files on this app, or open it and choose them, to run the @DROPLET_TOOL@ command-line tool on
+-- them. 3sfrip rips 3DS games and sound archives into folders next to them, and a DSP firmware file (.cdc) dropped
+-- along with sound archives plays them. 3sfplay renders .mini3sf files to WAV files next to them. The app then shows
+-- what happened to each file and offers to open the output folders.
+--
+-- The tool is inside the app, in Contents/Resources. CMake makes 3sfrip.app and 3sfplay.app from this file.
+
+property toolName : "@DROPLET_TOOL@"
+
+on run
+	set theFiles to choose file with prompt "Choose the files for " & toolName & ":" with multiple selections allowed
+	showResults(runTool(theFiles))
+end run
+
+on open theFiles
+	showResults(runTool(theFiles))
+end open
+
+-- Pass all files to one invocation, as on Windows, so rips that share an output folder don't overwrite each other.
+-- 3sfrip identifies the firmware files itself. Returns {report, output folders}, with one report line per input.
+on runTool(theFiles)
+	set tool to POSIX path of (path to resource toolName)
+	set commandLine to quoted form of tool
+	set fileNames to {}
+	repeat with f in theFiles
+		set p to POSIX path of f
+		set commandLine to commandLine & " " & quoted form of p
+		set end of fileNames to lastPathComponent(p)
+	end repeat
+
+	-- The tool takes all the files in one run, so the progress bar only shows when it's done.
+	set progress total steps to 1
+	set progress completed steps to 0
+	if (count of fileNames) is 1 then
+		set progress description to toolName & ": " & item 1 of fileNames
+	else
+		set progress description to toolName & ": " & (count of fileNames) & " files"
+	end if
+
+	-- The tool's messages say which inputs failed, so its exit status isn't needed.
+	with timeout of 86400 seconds
+		set output to do shell script commandLine & " 2>&1 || true"
+	end timeout
+	set progress completed steps to 1
+
+	-- With more than one input, the tool starts the messages about each one with a line that holds the input's name
+	-- and a colon. With one, or when it stops before the inputs, all its messages go together.
+	set theLines to paragraphs of output
+	set sectionStarts to {}
+	set sectionNames to {}
+	repeat with k from 1 to count of theLines
+		set ln to item k of theLines
+		if (length of ln) > 1 and ln ends with ":" then
+			if fileNames contains (text 1 thru -2 of ln) then
+				set end of sectionStarts to k
+				set end of sectionNames to text 1 thru -2 of ln
+			end if
+		end if
+	end repeat
+	if (count of sectionStarts) is 0 then
+		set sectionStarts to {0}
+		set sectionNames to {""}
+	end if
+
+	set report to {}
+	set folders to {}
+	repeat with j from 1 to count of sectionStarts
+		set firstIndex to (item j of sectionStarts) + 1
+		set lastIndex to count of theLines
+		if j < (count of sectionStarts) then set lastIndex to (item (j + 1) of sectionStarts) - 1
+		set fileName to item j of sectionNames
+
+		-- The last line says what the tool did with the input, unless it wrote something: then the line before
+		-- "output:" does. A line starting with "error" means the input failed.
+		set sectionText to ""
+		if lastIndex is not less than firstIndex then
+			set sectionText to joinLines(items firstIndex thru lastIndex of theLines)
+		end if
+		set summary to lastLine(sectionText)
+		set failed to false
+		repeat with k from firstIndex to lastIndex
+			set ln to item k of theLines
+			if ln starts with "error" then set failed to true
+			if ln starts with "output: " then
+				if k > firstIndex then set summary to item (k - 1) of theLines
+				set outFolder to folderOf(text 9 thru -1 of ln)
+				if folders does not contain outFolder then set end of folders to outFolder
+			end if
+		end repeat
+
+		if failed then
+			set summary to errorMessage(sectionText)
+			if fileName is not "" and summary does not contain fileName then set summary to fileName & ": " & summary
+		end if
+		set end of report to summary
+	end repeat
+	return {report, folders}
+end runTool
+
+on showResults(results)
+	set {report, folders} to results
+	set shown to report
+	if (count of report) > 20 then
+		set shown to items 1 thru 20 of report
+		set end of shown to "and " & ((count of report) - 20) & " more"
+	end if
+	set reportText to joinLines(shown)
+
+	if (count of folders) is 0 then
+		display dialog reportText buttons {"OK"} default button 1 with title toolName with icon caution
+	else
+		if (count of folders) is 1 then
+			set openLabel to "Open Folder"
+		else
+			set openLabel to "Open Folders"
+		end if
+		set answer to display dialog reportText buttons {"OK", openLabel} default button 2 with title toolName
+		if button returned of answer is openLabel then
+			repeat with d in folders
+				do shell script "open " & quoted form of (d as text)
+			end repeat
+		end if
+	end if
+end showResults
+
+-- Returns the path itself for a folder, or else the folder the file is in.
+on folderOf(p)
+	try
+		do shell script "test -d " & quoted form of p
+		return p
+	on error
+		return do shell script "dirname " & quoted form of p
+	end try
+end folderOf
+
+on lastPathComponent(p)
+	if p ends with "/" then set p to text 1 thru -2 of p
+	set saved to AppleScript's text item delimiters
+	set AppleScript's text item delimiters to "/"
+	set parts to text items of p
+	set AppleScript's text item delimiters to saved
+	return item -1 of parts
+end lastPathComponent
+
+-- Returns the last error message and its indented continuation lines, or the last output line if no error was found.
+on errorMessage(t)
+	set theLines to paragraphs of t
+	set startIndex to 0
+	repeat with i from 1 to count of theLines
+		if item i of theLines starts with "error" then set startIndex to i
+	end repeat
+	if startIndex is 0 then return lastLine(t)
+
+	set whole to item startIndex of theLines
+	repeat with i from startIndex + 1 to count of theLines
+		set ln to item i of theLines
+		if ln does not start with " " then exit repeat
+		set whole to whole & " " & trimmed(ln)
+	end repeat
+	return whole
+end errorMessage
+
+on trimmed(s)
+	repeat while s starts with " "
+		if (length of s) is 1 then return ""
+		set s to text 2 thru -1 of s
+	end repeat
+	return s
+end trimmed
+
+on lastLine(t)
+	set theLines to paragraphs of t
+	repeat with i from (count of theLines) to 1 by -1
+		if (item i of theLines) is not "" then return item i of theLines
+	end repeat
+	return t
+end lastLine
+
+on joinLines(theList)
+	set saved to AppleScript's text item delimiters
+	set AppleScript's text item delimiters to return
+	set joined to theList as text
+	set AppleScript's text item delimiters to saved
+	return joined
+end joinLines

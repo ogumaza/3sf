@@ -1,0 +1,64 @@
+# SPDX-License-Identifier: MIT
+
+# Builds 3SF and runs ctest on every supported platform whenever main changes. The Windows jobs and the macOS ARM64
+# job build the foobar2000 component as well. Windows builds use clang-cl, which makes faster code than MSVC; the MSVC
+# job keeps 3SF building with MSVC too.
+# Changes to documentation alone don't start a run.
+name: CI
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ["**.md", "docs/**", "LICENSE"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A newer push cancels the run it replaces.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x64 (GCC)
+            os: ubuntu-24.04
+          - name: Linux x64 (Clang)
+            os: ubuntu-24.04
+            cmake: -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
+          - name: Windows x64 (clang-cl)
+            os: windows-2025
+            cmake: -A x64 -T ClangCL
+            foobar2000: true
+          - name: Windows x86 (clang-cl)
+            os: windows-2025
+            cmake: -A Win32 -T ClangCL
+            foobar2000: true
+          - name: Windows x64 (MSVC)
+            os: windows-2025
+            cmake: -A x64
+            foobar2000: true
+          - name: macOS ARM64 (Apple Clang)
+            os: macos-15
+            foobar2000: true
+          - name: macOS x64 (Apple Clang)
+            os: macos-15-intel
+    steps:
+      - uses: actions/checkout@v7
+      - name: Download the foobar2000 SDK
+        if: matrix.foobar2000
+        uses: ./.github/actions/foobar2000-sdk
+      - name: Configure
+        run: cmake -S . -B build ${{ matrix.cmake }} ${{ matrix.foobar2000 && '-DFOOBAR2000_SDK_DIR=sdk' || '' }}
+      - name: Build
+        run: cmake --build build --config Release --parallel
+      - name: Test
+        run: ctest --test-dir build --build-config Release --output-on-failure --parallel 4

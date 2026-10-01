@@ -1,0 +1,29 @@
+# SPDX-License-Identifier: MIT
+
+# Downloads the foobar2000 SDK from foobar2000.org, checks its SHA-256 and unpacks it into sdk/ in the workspace, for
+# building the foobar2000 component. The SDK isn't stored in this repository. The version is pinned, so that a new SDK
+# can't break CI without warning: to move to a newer one, change SDK_VERSION and SDK_SHA256 below and check that the
+# component still builds. It runs on Windows and macOS runners: 7-Zip unpacks the SDK on Windows, and tar (bsdtar,
+# which reads 7z archives) on macOS.
+name: foobar2000 SDK
+description: Download the foobar2000 SDK and unpack it into sdk/
+runs:
+  using: composite
+  steps:
+    - name: Download the foobar2000 SDK
+      shell: pwsh
+      env:
+        SDK_VERSION: "2026-09-17"
+        SDK_SHA256: 24fa95ed66b42624f593fd4b94c5efb08ae81dfebb92b79fe69c8cd170961e48
+      run: |
+        $url = "https://www.foobar2000.org/downloads/SDK-$env:SDK_VERSION.7z"
+        Write-Host "SDK: $url"
+        Invoke-WebRequest -UseBasicParsing $url -OutFile sdk.7z
+        $hash = (Get-FileHash -Algorithm SHA256 sdk.7z).Hash.ToLowerInvariant()
+        if ($hash -ne $env:SDK_SHA256) { throw "the SDK's SHA-256 is $hash, not $env:SDK_SHA256" }
+        if ($IsWindows) {
+          7z x sdk.7z -osdk | Out-Null
+        } else {
+          New-Item -ItemType Directory -Force sdk | Out-Null
+          tar -xf sdk.7z -C sdk
+        }

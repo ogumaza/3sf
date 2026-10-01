@@ -1,0 +1,145 @@
+# SPDX-License-Identifier: MIT
+
+# A vX.Y.Z tag publishes a release. X.Y.Z must match CMakeLists.txt, with notes in docs/release-notes/X.Y.Z.md.
+# Builds the Windows programs and foobar2000 component with clang-cl and attaches three downloads:
+#   3sf-X.Y.Z-win-x64.zip               3sfrip and 3sfplay for 64-bit Windows, with README.md and the licences
+#   3sf-X.Y.Z-win32.zip                 the same for 32-bit Windows
+#   foo_input_3sf-X.Y.Z.fb2k-component  the component for 64-bit and 32-bit foobar2000: the 32-bit DLL at the top
+#                                       level and the 64-bit one in x64/, with the licences
+# Manual runs (Actions > Release > Run workflow) build the same files as an artifact without publishing a release.
+# The build downloads the foobar2000 SDK from foobar2000.org (.github/actions/foobar2000-sdk).
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # The version, and for a tag, the checks that it and its notes match.
+  version:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - id: version
+        name: Read the version
+        run: |
+          version=$(sed -n 's/^project(threesf VERSION \([0-9][0-9.]*\) .*/\1/p' CMakeLists.txt)
+          if [ -z "$version" ]; then
+            echo "::error::no version in CMakeLists.txt's project()"
+            exit 1
+          fi
+          if [ "$GITHUB_REF_TYPE" = tag ] && [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "::error::the tag is $GITHUB_REF_NAME, but CMakeLists.txt says $version (tag v$version)"
+            exit 1
+          fi
+          if [ ! -f "docs/release-notes/$version.md" ]; then
+            echo "::error::docs/release-notes/$version.md is missing"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  windows:
+    needs: version
+    name: Windows ${{ matrix.arch }}
+    runs-on: windows-2025
+    strategy:
+      matrix:
+        include:
+          - arch: x64
+            package: win-x64
+          - arch: Win32
+            package: win32
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/foobar2000-sdk
+
+      - name: Build
+        run: |
+          cmake -S . -B build -A ${{ matrix.arch }} -T ClangCL -DFOOBAR2000_SDK_DIR="${{ github.workspace }}/sdk"
+          cmake --build build --config Release --parallel --target 3sfrip 3sfplay foo_input_3sf
+
+      # Each program reports the version, and Windows shows it in the file's properties.
+      - name: Check the version
+        shell: pwsh
+        run: |
+          $version = '${{ needs.version.outputs.version }}'
+          foreach ($tool in '3sfrip', '3sfplay') {
+            $said = (& "build/Release/$tool.exe" --version) -join ''
+            if ($said -ne "$tool $version") { throw "$tool --version says '$said', not '$tool $version'" }
+          }
+          foreach ($file in 'build/Release/3sfrip.exe', 'build/Release/3sfplay.exe',
+                            'build/plugins/foobar2000/Release/foo_input_3sf.dll') {
+            $info = (Get-Item $file).VersionInfo
+            if ($info.ProductVersion -ne $version -or $info.FileVersion -ne $version) {
+              throw "$file has version '$($info.FileVersion)' / '$($info.ProductVersion)', not $version"
+            }
+          }
+
+      - name: Collect
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force out | Out-Null
+          Copy-Item build/Release/3sfrip.exe, build/Release/3sfplay.exe out/
+          Copy-Item build/plugins/foobar2000/Release/foo_input_3sf.dll out/
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.package }}
+          path: out/
+
+  # zip, run on Linux, writes the names in the packages with forward slashes, which foobar2000 needs in a component.
+  package:
+    needs: [version, windows]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+
+      - name: Package
+        run: |
+          mkdir -p dist
+          for package in win-x64 win32; do
+            mkdir -p "stage/$package"
+            cp "artifacts/$package/3sfrip.exe" "artifacts/$package/3sfplay.exe" README.md LICENSE THIRD-PARTY-NOTICES.md \
+              "stage/$package/"
+            (cd "stage/$package" && zip -q -X "../../dist/3sf-$VERSION-$package.zip" *)
+          done
+          mkdir -p stage/component/x64
+          cp artifacts/win32/foo_input_3sf.dll stage/component/
+          cp artifacts/win-x64/foo_input_3sf.dll stage/component/x64/
+          cp LICENSE THIRD-PARTY-NOTICES.md stage/component/
+          (cd stage/component && zip -q -X -r "../../dist/foo_input_3sf-$VERSION.fb2k-component" .)
+          for file in dist/*; do
+            echo "$file:"
+            unzip -l "$file"
+          done
+
+      - name: Publish the release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --title "3SF $VERSION" \
+            --notes-file "docs/release-notes/$VERSION.md"
+
+      - name: Keep the files (a run started by hand)
+        if: github.ref_type != 'tag'
+        uses: actions/upload-artifact@v7
+        with:
+          name: 3sf-${{ env.VERSION }}
+          path: dist/

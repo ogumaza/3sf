@@ -1,0 +1,76 @@
+# SPDX-License-Identifier: MIT
+
+# Builds the foobar2000 component (foo_input_3sf) for 32-bit and 64-bit foobar2000 on Windows, with clang-cl, and for
+# foobar2000 on macOS, and uploads one .fb2k-component with all three: the 32-bit DLL at the top level, the 64-bit
+# DLL in x64/ and the Mac bundle (Apple Silicon and Intel) in mac/. Runs only when started by hand (Actions >
+# foobar2000 component > Run workflow), so it uses no Actions minutes otherwise. The foobar2000 SDK is downloaded from
+# foobar2000.org at build time (.github/actions/foobar2000-sdk); it isn't stored in this repository.
+name: foobar2000 component
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/foobar2000-sdk
+
+      - name: Build (x64)
+        run: |
+          cmake -S . -B build-x64 -A x64 -T ClangCL -DFOOBAR2000_SDK_DIR="${{ github.workspace }}/sdk"
+          cmake --build build-x64 --config Release --target foo_input_3sf
+
+      - name: Build (Win32)
+        run: |
+          cmake -S . -B build-win32 -A Win32 -T ClangCL -DFOOBAR2000_SDK_DIR="${{ github.workspace }}/sdk"
+          cmake --build build-win32 --config Release --target foo_input_3sf
+
+      - name: Collect the DLLs
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force pkg/x64 | Out-Null
+          Copy-Item build-win32/plugins/foobar2000/Release/foo_input_3sf.dll pkg/
+          Copy-Item build-x64/plugins/foobar2000/Release/foo_input_3sf.dll pkg/x64/
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: windows
+          path: pkg/
+
+  # This job puts the package together, because zip keeps the bundle's file permissions and an artifact wouldn't.
+  macos:
+    needs: windows
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/foobar2000-sdk
+
+      - name: Build (Apple Silicon and Intel)
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DFOOBAR2000_SDK_DIR="${{ github.workspace }}/sdk" \
+            "-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64" -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
+          cmake --build build --target foo_input_3sf --parallel
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: windows
+          path: pkg
+
+      - name: Package
+        run: |
+          mkdir -p pkg/mac
+          cp -R build/plugins/foobar2000/foo_input_3sf.component pkg/mac/
+          cp LICENSE THIRD-PARTY-NOTICES.md pkg/
+          cd pkg && zip -q -r ../foo_input_3sf.fb2k-component .
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: foo_input_3sf
+          path: foo_input_3sf.fb2k-component
