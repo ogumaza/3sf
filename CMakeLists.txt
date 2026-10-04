@@ -3,7 +3,7 @@
 cmake_minimum_required(VERSION 3.20)
 # Shared version for 3sfrip, 3sfplay, the foobar2000 component, Windows file properties and macOS bundles
 # (threesf_add_version below). For a release, update it here and add notes in docs/release-notes/.
-project(threesf VERSION 0.9.0 LANGUAGES CXX)
+project(threesf VERSION 1.0.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -24,7 +24,7 @@ if (WIN32 AND NOT MSVC)
 endif()
 if (NOT MSVC AND CMAKE_SIZEOF_VOID_P EQUAL 4 AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(i.86|x86|x86_64|AMD64)$")
     message(FATAL_ERROR "3SF doesn't support 32-bit x86 builds with ${compiler_name}: their samples would differ "
-                        "from every other build's. Build a 64-bit program instead, or on Windows use clang-cl or "
+                        "from other builds. Build for 64-bit instead, or on Windows use clang-cl or "
                         "MSVC, which build 32-bit x86 with SSE2.")
 endif()
 if (NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
@@ -98,6 +98,7 @@ add_library(threesf_common INTERFACE
     src/common/ascii.h
     src/common/bytes.h
     src/common/common_types.h
+    src/common/memory_image.h
     src/common/quiet_stdout.h
 )
 target_include_directories(threesf_common INTERFACE src)
@@ -271,8 +272,7 @@ if (NOT THREESF_FLAC)
 endif()
 target_link_libraries(threesf_audio_out PRIVATE ${THREESF_FLAC})
 
-# Gives a program the version: THREESF_VERSION in its code, and on Windows a version resource, whose version and
-# description Explorer shows in the file's properties.
+# Sets THREESF_VERSION and, on Windows, adds the version resource shown in Explorer's file properties.
 function(threesf_add_version target description)
     target_compile_definitions(${target} PRIVATE THREESF_VERSION="${threesf_VERSION}")
     if (WIN32)
@@ -362,9 +362,17 @@ add_executable(teakra_dsp_test tests/teakra_dsp_test.cpp)
 target_link_libraries(teakra_dsp_test PRIVATE threesf_dsp)
 target_compile_options(teakra_dsp_test PRIVATE ${THREESF_WARNINGS})
 
-add_executable(teakra_jit_test tests/teakra_jit_test.cpp)
+add_executable(teakra_jit_test tests/teakra_jit_test.cpp tests/teakra_programs.h)
 target_link_libraries(teakra_jit_test PRIVATE threesf_dsp)
 target_compile_options(teakra_jit_test PRIVATE ${THREESF_WARNINGS})
+
+add_executable(teakra_state_test tests/teakra_state_test.cpp tests/teakra_programs.h)
+target_link_libraries(teakra_state_test PRIVATE threesf_dsp)
+target_compile_options(teakra_state_test PRIVATE ${THREESF_WARNINGS})
+
+add_executable(snapshot_test tests/snapshot_test.cpp)
+target_link_libraries(snapshot_test PRIVATE threesf_common)
+target_compile_options(snapshot_test PRIVATE ${THREESF_WARNINGS})
 
 add_executable(csar_test tests/csar_test.cpp)
 target_link_libraries(csar_test PRIVATE threesf_csar)
@@ -384,6 +392,8 @@ add_test(NAME kernel COMMAND kernel_test)
 add_test(NAME teakra_bounds COMMAND teakra_bounds_test)
 add_test(NAME teakra_dsp COMMAND teakra_dsp_test)
 add_test(NAME teakra_jit COMMAND teakra_jit_test)
+add_test(NAME teakra_state COMMAND teakra_state_test)
+add_test(NAME snapshot COMMAND snapshot_test)
 add_test(NAME csar COMMAND csar_test)
 add_test(NAME file_names COMMAND file_names_test)
 add_test(NAME rip COMMAND rip_test)

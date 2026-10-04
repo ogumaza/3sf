@@ -18,9 +18,11 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "arm/cpu.h"
+#include "common/memory_image.h"
 
 namespace threesf::horizon
 {
@@ -60,11 +62,38 @@ class Kernel;
 class Thread;
 class Service;
 
-// Anything a handle can refer to. The kernel tells the kinds apart with dynamic_pointer_cast.
+// Anything a handle can refer to. The kernel tells the kinds apart with dynamic_pointer_cast, and makes them with
+// Kernel::Make, which keeps track of them for snapshots.
 class Object : public std::enable_shared_from_this<Object>
 {
 public:
     virtual ~Object() = default;
+
+    // A copy of the object, and copying one back into it, for snapshots (Kernel::Save). Pointers to other objects stay
+    // as they are in the copy.
+    virtual std::unique_ptr<Object> Clone() const = 0;
+    virtual void Assign(const Object& from) = 0;
+
+protected:
+    Object() = default;
+    Object(const Object&) = default;
+    Object& operator=(const Object&) = default;
+};
+
+// Implements Clone and Assign for `Derived`, a kind of `Root` (Object or Service), by copying it.
+template <typename Derived, typename Base, typename Root = Object>
+class Cloneable : public Base
+{
+public:
+    std::unique_ptr<Root> Clone() const override
+    {
+        return std::make_unique<Derived>(static_cast<const Derived&>(*this));
+    }
+
+    void Assign(const Root& from) override
+    {
+        static_cast<Derived&>(*this) = static_cast<const Derived&>(from);
+    }
 };
 
 // An object a thread can wait on with WaitSynchronization.
@@ -87,7 +116,7 @@ enum class ResetType : uint32_t
     kPulse = 2
 };
 
-class Event final : public WaitObject
+class Event final : public Cloneable<Event, WaitObject>
 {
 public:
     bool ShouldWait(const Thread*) const override
@@ -110,7 +139,7 @@ public:
     std::function<void()> on_signal_;
 };
 
-class Mutex final : public WaitObject
+class Mutex final : public Cloneable<Mutex, WaitObject>
 {
 public:
     bool ShouldWait(const Thread* thread) const override;
@@ -120,7 +149,7 @@ public:
     uint32_t lock_count_ = 0;
 };
 
-class Semaphore final : public WaitObject
+class Semaphore final : public Cloneable<Semaphore, WaitObject>
 {
 public:
     bool ShouldWait(const Thread*) const override
@@ -137,7 +166,7 @@ public:
     int32_t max_count_ = 0;
 };
 
-class Timer final : public WaitObject
+class Timer final : public Cloneable<Timer, WaitObject>
 {
 public:
     bool ShouldWait(const Thread*) const override
@@ -159,15 +188,15 @@ public:
     uint64_t generation_ = 0; // bumped to cancel pending expiries
 };
 
-class AddressArbiter final : public Object
+class AddressArbiter final : public Cloneable<AddressArbiter, Object>
 {
 };
 
-class ResourceLimit final : public Object
+class ResourceLimit final : public Cloneable<ResourceLimit, Object>
 {
 };
 
-class SharedMemory final : public Object
+class SharedMemory final : public Cloneable<SharedMemory, Object>
 {
 public:
     uint32_t size_ = 0;
@@ -176,7 +205,7 @@ public:
 };
 
 // A client session to an HLE service.
-class Session final : public Object
+class Session final : public Cloneable<Session, Object>
 {
 public:
     std::shared_ptr<Service> service_;
@@ -191,7 +220,7 @@ enum class ThreadStatus
     kDead
 };
 
-class Thread final : public WaitObject
+class Thread final : public Cloneable<Thread, WaitObject>
 {
 public:
     bool ShouldWait(const Thread*) const override
@@ -219,7 +248,8 @@ public:
     uint64_t wait_generation_ = 0; // bumped on every wake to cancel stale timeouts
 };
 
-// An HLE service. Handlers read and write the IPC command buffer of the calling thread.
+// An HLE service. Handlers read and write the IPC command buffer of the calling thread. The kernel makes them with
+// Kernel::MakeService, which keeps track of them for snapshots.
 class Service
 {
 public:
@@ -227,6 +257,15 @@ public:
 
     // Handles one request. The command buffer is at `cmdbuf` in guest memory.
     virtual void HandleRequest(Kernel& kernel, uint32_t cmdbuf) = 0;
+
+    // A copy of the service, and copying one back into it, for snapshots (see Object).
+    virtual std::unique_ptr<Service> Clone() const = 0;
+    virtual void Assign(const Service& from) = 0;
+
+protected:
+    Service() = default;
+    Service(const Service&) = default;
+    Service& operator=(const Service&) = default;
 };
 
 struct KernelConfig
@@ -281,6 +320,24 @@ public:
     void SignalEvent(Event& event);
     Handle AddHandle(std::shared_ptr<Object> object);
 
+    // Makes a kernel object, or a service, and keeps track of it for snapshots. Every object and service is made this
+    // way.
+    template <typename T>
+    std::shared_ptr<T> Make()
+    {
+        auto object = std::make_shared<T>();
+        objects_.push_back(object);
+        return object;
+    }
+
+    template <typename T, typename... Args>
+    std::shared_ptr<T> MakeService(Args&&... args)
+    {
+        auto service = std::make_shared<T>(std::forward<Args>(args)...);
+        services_made_.push_back(service);
+        return service;
+    }
+
     template <typename T>
     std::shared_ptr<T> Get(Handle handle)
     {
@@ -329,7 +386,60 @@ public:
     // the services don't emulate.
     std::function<void(const std::string&)> log_;
 
+    // Host memory the kernel maps: what MapRegion mapped, and memory blocks' own storage. A region stays where it is
+    // while the kernel or a snapshot holds it.
+    struct Region
+    {
+        std::unique_ptr<uint8_t[]> bytes;
+        uint32_t size = 0;
+    };
+
+    // Snapshot of the kernel between runs: objects and services, scheduler, handles, timed events, kernel-owned memory
+    // and its mapping, and the CPU. It keeps the objects alive and stores copies of their values. Pointers into kernel
+    // memory restrict restoration to this kernel. The System saves FCRAM and the DSP separately.
+    struct Snapshot
+    {
+        using ObjectCopy = std::pair<std::shared_ptr<Object>, std::unique_ptr<Object>>;
+        using ServiceCopy = std::pair<std::shared_ptr<Service>, std::unique_ptr<Service>>;
+
+        std::vector<ObjectCopy> objects;
+        std::vector<ServiceCopy> services;
+
+        uint64_t ticks = 0;
+        uint64_t pending_cycles = 0;
+        std::multimap<uint64_t, std::function<void()>> events;
+        std::vector<std::shared_ptr<Thread>> threads;
+        Thread* current = nullptr;
+        uint32_t next_thread_id = 0;
+        uint64_t ready_counter = 0;
+        bool yielded = false;
+        std::vector<uint32_t> free_tls;
+        uint32_t tls_count = 0;
+        bool exited = false;
+        std::string error;
+        std::map<Handle, std::shared_ptr<Object>> handles;
+        Handle next_handle = 0;
+
+        std::vector<std::shared_ptr<Region>> regions; // kept alive so the mapping's pointers remain valid
+        std::vector<MemoryImage> region_images;
+        std::vector<bool> fcram_used;
+        uint32_t heap_size = 0;
+        uint32_t linear_size = 0;
+        arm::Memory::Snapshot memory;
+        arm::Cpu::Snapshot cpu;
+
+        // Approximate memory use, excluding pages shared with `previous`. Each object counts as a few hundred bytes.
+        std::size_t Bytes(const Snapshot* previous) const;
+    };
+
+    // Takes a snapshot between runs, sharing the memory pages that haven't changed since `previous`.
+    std::shared_ptr<Snapshot> Save(const Snapshot* previous);
+    void Restore(const Snapshot& snapshot);
+
 private:
+    // Makes a region of `size` zeroed bytes.
+    uint8_t* NewRegion(uint32_t size);
+
     std::shared_ptr<Object> GetObject(Handle handle);
     bool CloseHandle(Handle handle);
     void Schedule(uint64_t time, std::function<void()> fn);
@@ -362,6 +472,7 @@ private:
     uint32_t SendSyncRequest(Thread& thread, Handle handle);
     uint32_t AllocateTls();
 
+    // Save and Restore copy every field below that changes after the system starts: add a new one there too.
     KernelConfig cfg_;
     arm::Memory mem_;
     arm::Cpu cpu_;
@@ -390,8 +501,12 @@ private:
     std::map<std::string, std::shared_ptr<Service>> services_;
     std::map<std::string, std::shared_ptr<Service>> ports_;
 
+    // Every object and service made, which snapshots copy while they're alive.
+    std::vector<std::weak_ptr<Object>> objects_;
+    std::vector<std::weak_ptr<Service>> services_made_;
+
     // Memory
-    std::vector<std::unique_ptr<uint8_t[]>> regions_; // the memory MapRegion mapped, and memory blocks' own storage
+    std::vector<std::shared_ptr<Region>> regions_;
     uint8_t* fcram_ = nullptr;
     uint32_t fcram_size_ = 0;
     std::vector<bool> fcram_used_; // per 4 KiB page, for linear allocations

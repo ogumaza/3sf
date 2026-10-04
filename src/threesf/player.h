@@ -97,6 +97,21 @@ public:
         return set_;
     }
 
+    // Snapshot of the player between emulation steps. Unchanged memory pages are shared with the previous snapshot. It
+    // holds pointers into this player's emulation and can only be restored to this player, before the next Start.
+    class Snapshot;
+
+    // Takes a snapshot, sharing pages with `previous` (best the latest snapshot). Returns nullptr when the player isn't
+    // playing, or if saving failed, which leaves the player as it was.
+    std::shared_ptr<const Snapshot> Save(const Snapshot* previous = nullptr);
+
+    // Restores `snapshot`, including any audio waiting to be delivered. Returns false if the snapshot belongs to
+    // another player or an earlier run, or if restoration fails (see Error()).
+    bool Restore(const Snapshot& snapshot);
+
+    // Approximate memory used by `snapshot`, excluding pages shared with `previous`.
+    static std::size_t SnapshotBytes(const Snapshot& snapshot, const Snapshot* previous);
+
 private:
     bool Fail(const std::string& message);
     bool StartImpl();
@@ -112,6 +127,7 @@ private:
     std::size_t consumed_ = 0;    // samples of Output() already handed out (two per frame)
     uint64_t dropped_ = 0;        // samples dropped from the front of Output() since the sound started
     uint64_t finished_frame_ = 0; // see FinishedFrame
+    uint64_t run_ = 0;            // counts Start calls, so that a snapshot goes with the run it was taken in
 };
 
 } // namespace threesf

@@ -32,8 +32,8 @@ public:
         TickComponents();
     }
 
-    // The ticks that can be counted before one may produce an event, so that a run of that many
-    // instructions needs no component ticked (the JIT runs its blocks within it).
+    // Number of ticks before the next possible event. The JIT limits its blocks to this budget, so
+    // components need no updates during a block.
     u64 BudgetLeft() const {
         return budget - pending;
     }
@@ -77,6 +77,13 @@ public:
 
     void RegisterCallbacks(Callbacks* callbacks) {
         registered_callbacks.push_back(std::move(callbacks));
+    }
+
+    // Saves or loads the counted ticks and the budget (see state.h). The components save their
+    // own state.
+    template <typename Archive>
+    void Serialize(Archive& ar) {
+        ar(pending, budget);
     }
 
 private:

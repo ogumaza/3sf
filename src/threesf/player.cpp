@@ -32,6 +32,18 @@ constexpr uint64_t kBootTimeout = 10 * horizon::kArmClock;
 
 } // namespace
 
+class Player::Snapshot
+{
+public:
+    uint64_t run = 0;
+    State state = State::kIdle;
+    uint64_t finished_frame = 0;
+    uint64_t dropped = 0;         // samples produced before `pending`
+    std::vector<int16_t> pending; // samples produced but not handed out yet
+    std::shared_ptr<ArchivePlayer::Snapshot> archive;
+    std::shared_ptr<horizon::System::Snapshot> system;
+};
+
 Player::Player() = default;
 Player::~Player() = default;
 
@@ -106,6 +118,8 @@ bool Player::Start()
 
 bool Player::StartImpl()
 {
+    run_++;
+
     if (set_.archive)
     {
         system_.reset();
@@ -273,6 +287,94 @@ std::size_t Player::Render(int16_t* out, std::size_t frames)
     }
 
     return frames;
+}
+
+std::shared_ptr<const Player::Snapshot> Player::Save(const Snapshot* previous)
+{
+    if ((state_ != State::kPlaying && state_ != State::kFinished) || (!archive_ && !system_))
+    {
+        return nullptr;
+    }
+
+    if (previous && previous->run != run_)
+    {
+        previous = nullptr;
+    }
+
+    auto snapshot = std::make_shared<Snapshot>();
+    snapshot->run = run_;
+    snapshot->state = state_;
+    snapshot->finished_frame = finished_frame_;
+    const std::vector<int16_t>& buf = Output();
+    snapshot->pending.assign(buf.begin() + static_cast<std::ptrdiff_t>(consumed_), buf.end());
+    snapshot->dropped = dropped_ + consumed_;
+    try
+    {
+        if (archive_)
+        {
+            snapshot->archive = archive_->Save(previous ? previous->archive.get() : nullptr);
+        }
+        else
+        {
+            snapshot->system = system_->Save(previous ? previous->system.get() : nullptr);
+        }
+    }
+    catch (const std::exception&)
+    {
+        // Saving only reads the emulation's state, so playback goes on without the snapshot.
+        return nullptr;
+    }
+
+    return snapshot;
+}
+
+std::size_t Player::SnapshotBytes(const Snapshot& snapshot, const Snapshot* previous)
+{
+    std::size_t bytes = snapshot.pending.size() * sizeof(int16_t);
+    if (snapshot.archive)
+    {
+        bytes += ArchivePlayer::SnapshotBytes(*snapshot.archive, previous ? previous->archive.get() : nullptr);
+    }
+
+    if (snapshot.system)
+    {
+        bytes += horizon::System::SnapshotBytes(*snapshot.system, previous ? previous->system.get() : nullptr);
+    }
+
+    return bytes;
+}
+
+bool Player::Restore(const Snapshot& snapshot)
+{
+    if (snapshot.run != run_ || (archive_ ? !snapshot.archive : !system_ || !snapshot.system))
+    {
+        return false;
+    }
+
+    try
+    {
+        if (archive_)
+        {
+            archive_->Restore(*snapshot.archive);
+        }
+        else
+        {
+            system_->Restore(*snapshot.system);
+        }
+    }
+    catch (const std::exception& e)
+    {
+        return Fail(std::string("restoring the emulation's state failed: ") + e.what());
+    }
+
+    Output() = snapshot.pending;
+    consumed_ = 0;
+    dropped_ = snapshot.dropped;
+    finished_frame_ = snapshot.finished_frame;
+    state_ = snapshot.state;
+    error_.clear();
+
+    return true;
 }
 
 long long Player::LengthMs() const

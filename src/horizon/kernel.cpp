@@ -95,6 +95,21 @@ void RemoveFromWaitLists(Thread& thread)
     thread.arbiter_ = nullptr;
 }
 
+// Releases references to threads waiting on `object` and, if it's a thread, to objects it waits on. These shared
+// pointers form cycles that must be broken before the objects can be freed.
+void ForgetWaits(Object& object)
+{
+    if (auto* w = dynamic_cast<WaitObject*>(&object))
+    {
+        w->waiters_.clear();
+    }
+
+    if (auto* t = dynamic_cast<Thread*>(&object))
+    {
+        t->wait_objects_.clear();
+    }
+}
+
 } // namespace
 
 bool Mutex::ShouldWait(const Thread* thread) const
@@ -138,10 +153,12 @@ Kernel::Kernel(const KernelConfig& config) : cfg_(config), cpu_(mem_)
 
 Kernel::~Kernel()
 {
-    // A waiting thread and the objects it waits on hold shared pointers to each other, so neither would be freed.
-    for (const std::shared_ptr<Thread>& thread : threads_)
+    for (const std::weak_ptr<Object>& weak : objects_)
     {
-        RemoveFromWaitLists(*thread);
+        if (std::shared_ptr<Object> object = weak.lock())
+        {
+            ForgetWaits(*object);
+        }
     }
 }
 
@@ -164,10 +181,20 @@ void Kernel::Log(const char* fmt, ...) const
 }
 
 // --------------------------------------------------------------------------------------------- Memory
+uint8_t* Kernel::NewRegion(uint32_t size)
+{
+    auto region = std::make_shared<Region>();
+    region->bytes = std::make_unique<uint8_t[]>(size);
+    region->size = size;
+    regions_.push_back(region);
+
+    return region->bytes.get();
+}
+
 uint8_t* Kernel::MapRegion(uint32_t vaddr, uint32_t size)
 {
     size = (size + arm::Memory::kPageMask) & ~arm::Memory::kPageMask;
-    uint8_t* p = regions_.emplace_back(std::make_unique<uint8_t[]>(size)).get();
+    uint8_t* p = NewRegion(size);
     mem_.Map(vaddr, p, size);
 
     return p;
@@ -337,6 +364,133 @@ uint32_t Kernel::AllocateTls()
     return a;
 }
 
+// --------------------------------------------------------------------------------------------- Snapshots
+std::shared_ptr<Kernel::Snapshot> Kernel::Save(const Snapshot* previous)
+{
+    auto snapshot = std::make_shared<Snapshot>();
+
+    std::erase_if(objects_, [](const std::weak_ptr<Object>& o) { return o.expired(); });
+    for (const std::weak_ptr<Object>& weak : objects_)
+    {
+        std::shared_ptr<Object> object = weak.lock();
+        std::unique_ptr<Object> copy = object->Clone();
+        snapshot->objects.emplace_back(std::move(object), std::move(copy));
+    }
+
+    std::erase_if(services_made_, [](const std::weak_ptr<Service>& s) { return s.expired(); });
+    for (const std::weak_ptr<Service>& weak : services_made_)
+    {
+        std::shared_ptr<Service> service = weak.lock();
+        std::unique_ptr<Service> copy = service->Clone();
+        snapshot->services.emplace_back(std::move(service), std::move(copy));
+    }
+
+    snapshot->ticks = ticks_;
+    snapshot->pending_cycles = pending_cycles_;
+    snapshot->events = events_;
+    snapshot->threads = threads_;
+    snapshot->current = current_;
+    snapshot->next_thread_id = next_thread_id_;
+    snapshot->ready_counter = ready_counter_;
+    snapshot->yielded = yielded_;
+    snapshot->free_tls = free_tls_;
+    snapshot->tls_count = tls_count_;
+    snapshot->exited = exited_;
+    snapshot->error = error_;
+    snapshot->handles = handles_;
+    snapshot->next_handle = next_handle_;
+
+    snapshot->regions = regions_;
+    for (std::size_t i = 0; i < regions_.size(); i++)
+    {
+        const MemoryImage* before = previous && i < previous->region_images.size() &&
+                                            previous->regions[i] == regions_[i]
+                                        ? &previous->region_images[i]
+                                        : nullptr;
+        snapshot->region_images.emplace_back(regions_[i]->bytes.get(), regions_[i]->size, before);
+    }
+
+    snapshot->fcram_used = fcram_used_;
+    snapshot->heap_size = heap_size_;
+    snapshot->linear_size = linear_size_;
+    snapshot->memory = mem_.Save(previous ? &previous->memory : nullptr);
+    snapshot->cpu = cpu_.Save();
+
+    return snapshot;
+}
+
+std::size_t Kernel::Snapshot::Bytes(const Snapshot* previous) const
+{
+    std::size_t bytes = (objects.size() + services.size()) * 256 + events.size() * 64;
+    for (std::size_t i = 0; i < region_images.size(); i++)
+    {
+        const bool same = previous && i < previous->regions.size() && previous->regions[i] == regions[i];
+        bytes += region_images[i].BytesNotIn(same ? &previous->region_images[i] : nullptr);
+    }
+
+    if (!previous || previous->memory.runs != memory.runs)
+    {
+        bytes += memory.runs->size() * sizeof(arm::Memory::Snapshot::Run);
+    }
+
+    return bytes;
+}
+
+void Kernel::Restore(const Snapshot& snapshot)
+{
+    // Release references between objects absent from this snapshot. Other snapshots may keep them alive and restore
+    // their saved values later.
+    for (const std::weak_ptr<Object>& weak : objects_)
+    {
+        std::shared_ptr<Object> object = weak.lock();
+        if (object && std::ranges::find(snapshot.objects, object, &Snapshot::ObjectCopy::first) == snapshot.objects.end())
+        {
+            ForgetWaits(*object);
+        }
+    }
+
+    objects_.clear();
+    for (const auto& [object, copy] : snapshot.objects)
+    {
+        object->Assign(*copy);
+        objects_.push_back(object);
+    }
+
+    services_made_.clear();
+    for (const auto& [service, copy] : snapshot.services)
+    {
+        service->Assign(*copy);
+        services_made_.push_back(service);
+    }
+
+    ticks_ = snapshot.ticks;
+    pending_cycles_ = snapshot.pending_cycles;
+    events_ = snapshot.events;
+    threads_ = snapshot.threads;
+    current_ = snapshot.current;
+    next_thread_id_ = snapshot.next_thread_id;
+    ready_counter_ = snapshot.ready_counter;
+    yielded_ = snapshot.yielded;
+    free_tls_ = snapshot.free_tls;
+    tls_count_ = snapshot.tls_count;
+    exited_ = snapshot.exited;
+    error_ = snapshot.error;
+    handles_ = snapshot.handles;
+    next_handle_ = snapshot.next_handle;
+
+    regions_ = snapshot.regions;
+    for (std::size_t i = 0; i < regions_.size(); i++)
+    {
+        snapshot.region_images[i].Restore(regions_[i]->bytes.get());
+    }
+
+    fcram_used_ = snapshot.fcram_used;
+    heap_size_ = snapshot.heap_size;
+    linear_size_ = snapshot.linear_size;
+    mem_.Restore(snapshot.memory);
+    cpu_.Restore(snapshot.cpu);
+}
+
 // --------------------------------------------------------------------------------------------- Handles and objects
 Handle Kernel::AddHandle(std::shared_ptr<Object> object)
 {
@@ -381,7 +535,7 @@ void Kernel::RegisterPort(const std::string& name, std::shared_ptr<Service> serv
 
 Handle Kernel::CreateSessionHandle(std::shared_ptr<Service> service)
 {
-    auto s = std::make_shared<Session>();
+    auto s = Make<Session>();
     s->service_ = std::move(service);
 
     return AddHandle(s);
@@ -396,7 +550,7 @@ void Kernel::CreateMainThread(uint32_t entry, uint32_t stack_top, int32_t priori
 
 uint32_t Kernel::CreateThread(Handle& out, uint32_t entry, uint32_t arg, uint32_t stack_top, int32_t priority)
 {
-    auto t = std::make_shared<Thread>();
+    auto t = Make<Thread>();
     t->id_ = next_thread_id_++;
     t->priority_ = priority;
     t->context_.r[0] = arg;
@@ -944,7 +1098,7 @@ void Kernel::HandleSvc(Thread& thread, uint32_t number)
 
     case 0x13: // CreateMutex
         {
-            auto m = std::make_shared<Mutex>();
+            auto m = Make<Mutex>();
             if (r[1])
             {
                 m->holder_ = &thread;
@@ -982,7 +1136,7 @@ void Kernel::HandleSvc(Thread& thread, uint32_t number)
 
     case 0x15: // CreateSemaphore
         {
-            auto s = std::make_shared<Semaphore>();
+            auto s = Make<Semaphore>();
             s->count_ = static_cast<int32_t>(r[1]);
             s->max_count_ = static_cast<int32_t>(r[2]);
             r[0] = kResultSuccess;
@@ -1016,7 +1170,7 @@ void Kernel::HandleSvc(Thread& thread, uint32_t number)
 
     case 0x17: // CreateEvent
         {
-            auto e = std::make_shared<Event>();
+            auto e = Make<Event>();
             e->reset_type_ = static_cast<ResetType>(r[1]);
             r[0] = kResultSuccess;
             r[1] = AddHandle(e);
@@ -1057,7 +1211,7 @@ void Kernel::HandleSvc(Thread& thread, uint32_t number)
 
     case 0x1a: // CreateTimer
         {
-            auto t = std::make_shared<Timer>();
+            auto t = Make<Timer>();
             t->reset_type_ = static_cast<ResetType>(r[1]);
             r[0] = kResultSuccess;
             r[1] = AddHandle(t);
@@ -1124,13 +1278,13 @@ void Kernel::HandleSvc(Thread& thread, uint32_t number)
                 break;
             }
 
-            auto block = std::make_shared<SharedMemory>();
+            auto block = Make<SharedMemory>();
             block->size_ = r[2];
             block->source_address_ = r[1];
             if (r[1] == 0)
             {
                 // The kernel keeps the memory, since its pages stay mapped after the block's handle is closed.
-                block->storage_ = regions_.emplace_back(std::make_unique<uint8_t[]>(r[2])).get();
+                block->storage_ = NewRegion(r[2]);
             }
 
             r[0] = kResultSuccess;
@@ -1187,7 +1341,7 @@ void Kernel::HandleSvc(Thread& thread, uint32_t number)
 
     case 0x21: // CreateAddressArbiter
         r[0] = kResultSuccess;
-        r[1] = AddHandle(std::make_shared<AddressArbiter>());
+        r[1] = AddHandle(Make<AddressArbiter>());
         break;
 
     case 0x22: // ArbitrateAddress(handle, address, type, value, ns = r4:r5)
@@ -1396,7 +1550,7 @@ void Kernel::HandleSvc(Thread& thread, uint32_t number)
 
     case 0x38: // GetResourceLimit
         r[0] = kResultSuccess;
-        r[1] = AddHandle(std::make_shared<ResourceLimit>());
+        r[1] = AddHandle(Make<ResourceLimit>());
         break;
 
     case 0x39: // GetResourceLimitLimitValues(values, handle, names, count)

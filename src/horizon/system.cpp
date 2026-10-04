@@ -108,4 +108,35 @@ System::System(const ProcessImage& image, const KernelConfig& config)
 
 System::~System() = default;
 
+struct System::Snapshot
+{
+    Fcram::Snapshot fcram;
+    dsp::TeakraDsp::Snapshot dsp;
+    std::shared_ptr<Kernel::Snapshot> kernel;
+};
+
+std::shared_ptr<System::Snapshot> System::Save(const Snapshot* previous)
+{
+    auto snapshot = std::make_shared<Snapshot>();
+    snapshot->fcram = fcram_->Save(previous ? &previous->fcram : nullptr);
+    snapshot->dsp = dsp_->Save(previous ? &previous->dsp : nullptr);
+    snapshot->kernel = kernel_->Save(previous ? previous->kernel.get() : nullptr);
+
+    return snapshot;
+}
+
+std::size_t System::SnapshotBytes(const Snapshot& snapshot, const Snapshot* previous)
+{
+    return snapshot.fcram.Bytes(previous ? &previous->fcram : nullptr) +
+           snapshot.dsp.Bytes(previous ? &previous->dsp : nullptr) +
+           snapshot.kernel->Bytes(previous ? previous->kernel.get() : nullptr);
+}
+
+void System::Restore(const Snapshot& snapshot)
+{
+    fcram_->Restore(snapshot.fcram);
+    dsp_->Restore(snapshot.dsp);
+    kernel_->Restore(*snapshot.kernel);
+}
+
 } // namespace threesf::horizon

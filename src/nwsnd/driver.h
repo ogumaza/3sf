@@ -145,6 +145,19 @@ public:
     // 0x174540
     void UpdateAllVoices();
 
+    // Active voices and copies of their values. Keeps the voices alive so pointers elsewhere in the snapshot remain
+    // valid.
+    struct Snapshot
+    {
+        std::list<std::shared_ptr<Voice>> pool;
+        std::vector<Voice> values; // of the voices in `pool`, in its order
+        std::list<Voice*> list;
+    };
+
+    // Saves state between frames, after freed voices have been released.
+    Snapshot Save() const;
+    void Restore(const Snapshot& snapshot);
+
 private:
     friend class Voice;
 
@@ -152,8 +165,8 @@ private:
     void Release(Voice* v);
 
     Engine& engine_;
-    std::list<std::unique_ptr<Voice>> pool_;
-    std::vector<std::unique_ptr<Voice>> graveyard_;
+    std::list<std::shared_ptr<Voice>> pool_;
+    std::vector<std::shared_ptr<Voice>> graveyard_;
     std::list<Voice*> list_; // lowest priority first; oldest first among equals
 };
 
@@ -267,10 +280,22 @@ public:
         graveyard_.clear();
     }
 
+    // The channels in use and their values, for a snapshot of the engine (see VoiceManager::Snapshot).
+    struct Snapshot
+    {
+        std::list<std::shared_ptr<Channel>> pool;
+        std::vector<Channel> values; // of the channels in `pool`, in its order
+        std::list<Channel*> active_list;
+    };
+
+    // Saves state between frames, after freed channels have been released.
+    Snapshot Save() const;
+    void Restore(const Snapshot& snapshot);
+
 private:
     Engine& engine_;
-    std::list<std::unique_ptr<Channel>> pool_;
-    std::vector<std::unique_ptr<Channel>> graveyard_;
+    std::list<std::shared_ptr<Channel>> pool_;
+    std::vector<std::shared_ptr<Channel>> graveyard_;
     std::list<Channel*> active_list_;
 };
 

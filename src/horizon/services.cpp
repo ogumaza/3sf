@@ -28,7 +28,7 @@ namespace
 {
 
 // A service that logs each command the first time it sees it and replies with success (and zeroed outputs).
-class StubService : public Service
+class StubService : public Cloneable<StubService, Service, Service>
 {
 public:
     explicit StubService(std::string name) : name_(std::move(name))
@@ -42,13 +42,13 @@ private:
     std::set<uint32_t> logged_;
 };
 
-class ErrfService : public Service
+class ErrfService : public Cloneable<ErrfService, Service, Service>
 {
 public:
     void HandleRequest(Kernel& kernel, uint32_t cmdbuf) override;
 };
 
-class SrvService : public Service
+class SrvService : public Cloneable<SrvService, Service, Service>
 {
 public:
     void HandleRequest(Kernel& kernel, uint32_t cmdbuf) override;
@@ -58,7 +58,7 @@ private:
     std::map<std::string, std::shared_ptr<Service>> stubs_;
 };
 
-class FsService : public Service
+class FsService : public Cloneable<FsService, Service, Service>
 {
 public:
     explicit FsService(std::shared_ptr<RomFs> romfs) : romfs_(std::move(romfs))
@@ -73,7 +73,7 @@ private:
 };
 
 // dsp::DSP, on the Teakra DSP.
-class DspService : public Service
+class DspService : public Cloneable<DspService, Service, Service>
 {
 public:
     explicit DspService(dsp::TeakraDsp& dsp);
@@ -82,7 +82,7 @@ public:
     void Attach(Kernel& kernel);
 
 private:
-    dsp::TeakraDsp& dsp_;
+    dsp::TeakraDsp* dsp_; // a pointer, so that the service can be copied into a snapshot
     Kernel* kernel_ = nullptr;
     std::array<std::shared_ptr<Event>, 3> pipe_events_{};
     std::shared_ptr<Event> interrupt_zero_, interrupt_one_;
@@ -91,7 +91,7 @@ private:
     std::set<uint32_t> logged_;
 };
 
-class CfgService : public Service
+class CfgService : public Cloneable<CfgService, Service, Service>
 {
 public:
     void HandleRequest(Kernel& kernel, uint32_t cmdbuf) override;
@@ -100,7 +100,7 @@ private:
     std::set<uint32_t> logged_;
 };
 
-class AptService : public Service
+class AptService : public Cloneable<AptService, Service, Service>
 {
 public:
     void HandleRequest(Kernel& kernel, uint32_t cmdbuf) override;
@@ -166,7 +166,7 @@ void SrvService::HandleRequest(Kernel& kernel, uint32_t cmdbuf)
         {
             if (!notification_)
             {
-                notification_ = std::make_shared<Semaphore>();
+                notification_ = kernel.Make<Semaphore>();
                 notification_->max_count_ = 64;
             }
 
@@ -190,7 +190,7 @@ void SrvService::HandleRequest(Kernel& kernel, uint32_t cmdbuf)
                 if (!stub)
                 {
                     kernel.Log("[srv:] GetServiceHandle(\"%s\"): not emulated, using a stub", service_name.c_str());
-                    stub = std::make_shared<StubService>(service_name);
+                    stub = kernel.MakeService<StubService>(service_name);
                 }
                 service = stub;
             }
@@ -218,7 +218,7 @@ constexpr uint32_t kResultFsNotFound = 0xc8804478;
 constexpr uint32_t kResultFsNotSupported = 0xe0c046be;
 
 // Session for one open file (the RomFS image).
-class RomFsFile : public Service
+class RomFsFile : public Cloneable<RomFsFile, Service, Service>
 {
 public:
     explicit RomFsFile(std::shared_ptr<RomFs> romfs) : romfs_(std::move(romfs))
@@ -266,7 +266,7 @@ public:
             {
                 ctx.Reply(1, 2);
                 ctx.SetWord(2, IpcMoveHandles(1));
-                auto self = std::make_shared<RomFsFile>(romfs_);
+                auto self = kernel.MakeService<RomFsFile>(romfs_);
                 ctx.SetWord(3, kernel.CreateSessionHandle(self));
                 return;
             }
@@ -330,7 +330,7 @@ void FsService::HandleRequest(Kernel& kernel, uint32_t cmdbuf)
 
             ctx.Reply(1, 2);
             ctx.SetWord(2, IpcMoveHandles(1));
-            ctx.SetWord(3, kernel.CreateSessionHandle(std::make_shared<RomFsFile>(romfs_)));
+            ctx.SetWord(3, kernel.CreateSessionHandle(kernel.MakeService<RomFsFile>(romfs_)));
             return;
         }
 
@@ -362,7 +362,7 @@ void FsService::HandleRequest(Kernel& kernel, uint32_t cmdbuf)
 
             ctx.Reply(1, 2);
             ctx.SetWord(2, IpcMoveHandles(1));
-            ctx.SetWord(3, kernel.CreateSessionHandle(std::make_shared<RomFsFile>(romfs_)));
+            ctx.SetWord(3, kernel.CreateSessionHandle(kernel.MakeService<RomFsFile>(romfs_)));
             return;
         }
 
@@ -383,17 +383,17 @@ void FsService::HandleRequest(Kernel& kernel, uint32_t cmdbuf)
     }
 }
 
-DspService::DspService(dsp::TeakraDsp& dsp) : dsp_(dsp)
+DspService::DspService(dsp::TeakraDsp& dsp) : dsp_(&dsp)
 {
 }
 
 void DspService::Attach(Kernel& kernel)
 {
     kernel_ = &kernel;
-    semaphore_event_ = std::make_shared<Event>();
+    semaphore_event_ = kernel.Make<Event>();
     semaphore_event_->on_signal_ = [this]
     {
-        dsp_.SetSemaphore(preset_semaphore_);
+        dsp_->SetSemaphore(preset_semaphore_);
     };
 
     const auto on_interrupt = [this](dsp::Interrupt type, dsp::Pipe pipe)
@@ -405,7 +405,7 @@ void DspService::Attach(Kernel& kernel)
             event = interrupt_zero_;
             if (!event)
             {
-                dsp_.ReadReply(0);
+                dsp_->ReadReply(0);
             }
             break;
 
@@ -413,7 +413,7 @@ void DspService::Attach(Kernel& kernel)
             event = interrupt_one_;
             if (!event)
             {
-                dsp_.ReadReply(1);
+                dsp_->ReadReply(1);
             }
             break;
 
@@ -433,19 +433,19 @@ void DspService::Attach(Kernel& kernel)
             kernel_->SignalEvent(*event);
         }
     };
-    dsp_.SetInterruptHandler(on_interrupt);
+    dsp_->SetInterruptHandler(on_interrupt);
 }
 
 void DspService::HandleRequest(Kernel& kernel, uint32_t cmdbuf)
 {
     IpcContext ctx(kernel, cmdbuf);
-    const uint64_t dsp_before = dsp_.Cycles();
+    const uint64_t dsp_before = dsp_->Cycles();
 
     switch (ctx.Command())
     {
     case 0x0001: // RecvData(register)
         {
-            const uint16_t value = dsp_.ReadReply(ctx.Word(1));
+            const uint16_t value = dsp_->ReadReply(ctx.Word(1));
             ctx.Reply(2, 0);
             ctx.SetWord(2, value);
             break;
@@ -453,14 +453,14 @@ void DspService::HandleRequest(Kernel& kernel, uint32_t cmdbuf)
 
     case 0x0002: // RecvDataIsReady(register)
         {
-            const bool ready = dsp_.ReplyReady(ctx.Word(1));
+            const bool ready = dsp_->ReplyReady(ctx.Word(1));
             ctx.Reply(2, 0);
             ctx.SetWord(2, ready ? 1 : 0);
             break;
         }
 
     case 0x0007: // SetSemaphore(value)
-        dsp_.SetSemaphore(static_cast<uint16_t>(ctx.Word(1)));
+        dsp_->SetSemaphore(static_cast<uint16_t>(ctx.Word(1)));
         ctx.Reply(1, 0);
         break;
 
@@ -493,7 +493,7 @@ void DspService::HandleRequest(Kernel& kernel, uint32_t cmdbuf)
                 buffer[5] = buffer[6] = buffer[7] = 0;
             }
 
-            dsp_.WritePipe(pipe, buffer);
+            dsp_->WritePipe(pipe, buffer);
             ctx.Reply(1, 0);
             break;
         }
@@ -503,11 +503,11 @@ void DspService::HandleRequest(Kernel& kernel, uint32_t cmdbuf)
         {
             const auto pipe = static_cast<dsp::Pipe>(ctx.Word(1));
             const uint32_t size = ctx.Word(3) & 0xffff;
-            const std::size_t readable = dsp_.PipeReadable(pipe);
+            const std::size_t readable = dsp_->PipeReadable(pipe);
             std::vector<uint8_t> data;
             if (readable >= size)
             {
-                data = dsp_.ReadPipe(pipe, size);
+                data = dsp_->ReadPipe(pipe, size);
             }
 
             const uint32_t addr = ctx.WriteStaticBuffer(0, data.data(), static_cast<uint32_t>(data.size()));
@@ -532,7 +532,7 @@ void DspService::HandleRequest(Kernel& kernel, uint32_t cmdbuf)
         {
             const auto pipe = static_cast<dsp::Pipe>(ctx.Word(1));
             ctx.Reply(2, 0);
-            ctx.SetWord(2, static_cast<uint32_t>(dsp_.PipeReadable(pipe)) & 0xffff);
+            ctx.SetWord(2, static_cast<uint32_t>(dsp_->PipeReadable(pipe)) & 0xffff);
             break;
         }
 
@@ -542,7 +542,7 @@ void DspService::HandleRequest(Kernel& kernel, uint32_t cmdbuf)
             const uint32_t desc = ctx.Word(4);
             const uint32_t addr = ctx.Word(5);
             const auto component = ctx.ReadBuffer(addr, size);
-            dsp_.LoadComponent(component);
+            dsp_->LoadComponent(component);
             ctx.Reply(2, 2);
             ctx.SetWord(2, 1);
             ctx.SetWord(3, desc);
@@ -552,7 +552,7 @@ void DspService::HandleRequest(Kernel& kernel, uint32_t cmdbuf)
         }
 
     case 0x0012: // UnloadComponent
-        dsp_.UnloadComponent();
+        dsp_->UnloadComponent();
         ctx.Reply(1, 0);
         break;
 
@@ -620,7 +620,7 @@ void DspService::HandleRequest(Kernel& kernel, uint32_t cmdbuf)
     }
 
     // The caller waited while the DSP ran inside a blocking call, so that time is added to the kernel's ticks.
-    const uint64_t dsp_after = dsp_.Cycles();
+    const uint64_t dsp_after = dsp_->Cycles();
     if (dsp_after > dsp_before)
     {
         kernel.AddTicks((dsp_after - dsp_before) * 2);
@@ -764,7 +764,7 @@ void AptService::HandleRequest(Kernel& kernel, uint32_t cmdbuf)
         {
             if (!lock_)
             {
-                lock_ = std::make_shared<Mutex>();
+                lock_ = kernel.Make<Mutex>();
             }
 
             ctx.Reply(3, 2);
@@ -779,12 +779,12 @@ void AptService::HandleRequest(Kernel& kernel, uint32_t cmdbuf)
         {
             if (!notification_event_)
             {
-                notification_event_ = std::make_shared<Event>();
+                notification_event_ = kernel.Make<Event>();
             }
 
             if (!parameter_event_)
             {
-                parameter_event_ = std::make_shared<Event>();
+                parameter_event_ = kernel.Make<Event>();
             }
 
             ctx.Reply(1, 3);
@@ -840,14 +840,14 @@ void AptService::HandleRequest(Kernel& kernel, uint32_t cmdbuf)
 
 void InstallServices(Kernel& kernel, std::shared_ptr<RomFs> romfs, dsp::TeakraDsp& dsp)
 {
-    auto dsp_service = std::make_shared<DspService>(dsp);
+    auto dsp_service = kernel.MakeService<DspService>(dsp);
     dsp_service->Attach(kernel);
-    kernel.RegisterPort("srv:", std::make_shared<SrvService>());
-    kernel.RegisterPort("err:f", std::make_shared<ErrfService>());
-    kernel.RegisterService("fs:USER", std::make_shared<FsService>(std::move(romfs)));
+    kernel.RegisterPort("srv:", kernel.MakeService<SrvService>());
+    kernel.RegisterPort("err:f", kernel.MakeService<ErrfService>());
+    kernel.RegisterService("fs:USER", kernel.MakeService<FsService>(std::move(romfs)));
     kernel.RegisterService("dsp::DSP", dsp_service);
-    kernel.RegisterService("cfg:u", std::make_shared<CfgService>());
-    kernel.RegisterService("APT:U", std::make_shared<AptService>());
+    kernel.RegisterService("cfg:u", kernel.MakeService<CfgService>());
+    kernel.RegisterService("APT:U", kernel.MakeService<AptService>());
 }
 
 } // namespace threesf::horizon

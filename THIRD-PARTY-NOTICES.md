@@ -1,12 +1,11 @@
 # Third-party notices
 
-3SF is under the MIT licence (`LICENSE`). It builds on the following, each under its own
-licence.
+3SF is under the MIT licence (`LICENSE`). Its dependencies have the following licences.
 
 | Component | Licence | Use in 3SF |
 |---|---|---|
 | [Teakra](https://github.com/wwylele/teakra), Copyright (c) 2018 Weiyi Wang | MIT (`externals/teakra/LICENSE`) | In `externals/teakra`, compiled into every 3SF program: upstream commit 3d697a1 with 3SF's changes, which are 3SF's work and offered under Teakra's MIT licence. |
-| [Catch2](https://github.com/catchorg/Catch2) v2.13.8, Copyright (c) 2022 Two Blue Cubes Ltd | BSL-1.0 | Teakra's unit tests use it (`externals/teakra/externals/catch`). 3SF doesn't build them, so it's in no 3SF program. |
+| [Catch2](https://github.com/catchorg/Catch2) v2.13.8, Copyright (c) 2022 Two Blue Cubes Ltd | BSL-1.0 | Teakra's unit tests use it (`externals/teakra/externals/catch`). 3SF doesn't build these tests or include Catch2 in its programs. |
 | [zlib](https://zlib.net), Copyright (C) 1995-2024 Jean-loup Gailly and Mark Adler | zlib | The PSF container. The system's copy is used, or v1.3.1 is downloaded when configuring. |
 | [libFLAC](https://xiph.org/flac/), Copyright the Xiph.Org Foundation | BSD-3-Clause | FLAC output in `3sfplay`. The system's copy is used, or 1.5.0 is downloaded when configuring. |
 | [foobar2000 SDK](https://www.foobar2000.org/SDK), Copyright Peter Pawlowski | BSD-style (the SDK's `sdk-license.txt`) | Only for `plugins/foobar2000`. Not included here; it's supplied when building the plugin. |
@@ -36,8 +35,8 @@ Nothing in this repository licenses game data. Rips (`.3sflib`) contain a game's
 sound archive and its DSP firmware, which belong to their copyright holders.
 
 `src/nwsnd/tables.h` holds the numeric tables nw::snd uses: powers of two, decibel levels, pan
-curves, sines and cosines, envelope attack multipliers and filter cutoffs. They have the game's
-exact values, because the sound model needs them to match the game.
+curves, sines and cosines, envelope attack multipliers and filter cutoffs. The sound model uses
+the game's exact values to reproduce its output.
 
 ## Licence texts
 

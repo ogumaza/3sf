@@ -8,6 +8,8 @@ namespace Teakra {
 
 class MemoryInterface;
 struct RegisterState;
+class StateReader;
+class StateWriter;
 
 class Processor {
 public:
@@ -20,6 +22,10 @@ public:
 
     RegisterState& GetRegisterState();
     const RegisterState& GetRegisterState() const;
+
+    // Saves or loads the registers and the interpreter's state (see state.h).
+    void Serialize(StateWriter& ar);
+    void Serialize(StateReader& ar);
 
 private:
     struct Impl;

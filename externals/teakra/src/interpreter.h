@@ -321,6 +321,13 @@ public:
         vinterrupt_context_switch = context_switch;
     }
 
+    // Saves or loads the interrupts signalled but not yet taken, and the idle state (see state.h).
+    template <typename Archive>
+    void Serialize(Archive& ar) {
+        ar(interrupt_pending, vinterrupt_pending, any_interrupt_pending, vinterrupt_context_switch,
+           vinterrupt_address, idle);
+    }
+
     using instruction_return_type = void;
     static constexpr bool fixed_handlers = true;
 
@@ -3114,8 +3121,8 @@ private:
     std::array<std::atomic<bool>, 3> interrupt_pending{{false, false, false}};
     std::atomic<bool> vinterrupt_pending{false};
     std::atomic<bool> any_interrupt_pending{false};
-    std::atomic<bool> vinterrupt_context_switch;
-    std::atomic<u32> vinterrupt_address;
+    std::atomic<bool> vinterrupt_context_switch{false};
+    std::atomic<u32> vinterrupt_address{0};
 
     bool idle = false;
 

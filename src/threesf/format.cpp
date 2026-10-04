@@ -39,12 +39,12 @@ std::string Hex(uint32_t value)
 // Diagnostic suffixes for unsupported descriptor flags and output modes.
 const char* FlagsExpected()
 {
-    return ", where a version 1 descriptor has bit 0 set (the DSP is required) and no other";
+    return "; version 1 requires only bit 0 (DSP required) to be set";
 }
 
 const char* OutputModeExpected()
 {
-    return ", where version 1 plays stereo (1) only";
+    return "; version 1 supports only stereo (1)";
 }
 
 // The byte that a set's MEM chunks leave at `address`, or nothing if none of them covers it. A later chunk overwrites
@@ -97,7 +97,7 @@ std::optional<std::string> CheckDriverBlock(const std::vector<MemChunk>& memory)
 
     if (*version != DriverBlock::kVersion)
     {
-        return "driver block version " + std::to_string(*version) + ", where this player reads version " +
+        return "driver block version " + std::to_string(*version) + "; this player supports version " +
                std::to_string(DriverBlock::kVersion);
     }
 
@@ -448,7 +448,7 @@ std::optional<std::string> ProcessDescriptor::Check() const
 {
     if (version != kVersion)
     {
-        return "process descriptor version " + std::to_string(version) + ", where this player reads version " +
+        return "process descriptor version " + std::to_string(version) + "; this player supports version " +
                std::to_string(kVersion);
     }
 
@@ -532,7 +532,7 @@ std::optional<std::string> ArchiveDescriptor::Check() const
 {
     if (version != kVersion)
     {
-        return "archive descriptor version " + std::to_string(version) + ", where this player reads version " +
+        return "archive descriptor version " + std::to_string(version) + "; this player supports version " +
                std::to_string(kVersion);
     }
 

@@ -34,6 +34,7 @@ add_library(teakra
     processor.cpp
     processor.h
     shared_memory.h
+    state.h
     teakra.cpp
     test.h
     test_generator.cpp

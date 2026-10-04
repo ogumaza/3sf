@@ -3,6 +3,7 @@
 #include <mutex>
 #include <utility>
 #include "apbp.h"
+#include "state.h"
 
 namespace Teakra {
 class DataChannel {
@@ -44,6 +45,12 @@ public:
         disable_interrupt = v;
     }
 
+    template <typename Archive>
+    void Serialize(Archive& ar) {
+        std::lock_guard lock(mutex);
+        ar(ready, data, disable_interrupt);
+    }
+
     std::function<void()> handler;
 
 private:
@@ -68,6 +75,14 @@ public:
         semaphore = 0;
         semaphore_mask = 0;
         semaphore_master_signal = false;
+    }
+
+    template <typename Archive>
+    void Serialize(Archive& ar) {
+        for (auto& c : data_channels)
+            c.Serialize(ar);
+        std::lock_guard lock(semaphore_mutex);
+        ar(semaphore, semaphore_mask, semaphore_master_signal);
     }
 };
 
@@ -145,5 +160,13 @@ void Apbp::SetSemaphoreHandler(std::function<void()> handler) {
 bool Apbp::IsSemaphoreSignaled() const {
     std::lock_guard lock(impl->semaphore_mutex);
     return impl->semaphore_master_signal;
+}
+
+void Apbp::Serialize(StateWriter& ar) {
+    impl->Serialize(ar);
+}
+
+void Apbp::Serialize(StateReader& ar) {
+    impl->Serialize(ar);
 }
 } // namespace Teakra

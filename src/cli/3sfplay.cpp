@@ -43,8 +43,8 @@ constexpr char kUsage[] =
     "usage: 3sfplay [options] <file> [<file> ...]\n"
     "\n"
     "Renders each .mini3sf (or .3sf) file to a WAV file next to it, at the DSP's native 32728 Hz,\n"
-    "for the length and fade its tags give. A .3sflib among the files is skipped, since it's a\n"
-    "library that the others load. Files can also be dropped on the program.\n"
+    "using its length and fade tags. Libraries (.3sflib), which the .mini3sf files load, are\n"
+    "skipped. You can also drop files on the program.\n"
     "\n"
     "options:\n"
     "  -o, --output FILE  write FILE instead, as WAV or FLAC by its extension (one input only)\n"
@@ -98,8 +98,12 @@ void PrintInfo(Playback& playback)
 // Renders `in` to `out`, or prints what it loads with --info. Returns the exit code.
 int Render(const std::string& in, const fs::path& out, const Options& o)
 {
+    // A render goes from the start to the end and never seeks, so it takes no snapshots.
+    PlaybackOptions options = o.playback;
+    options.snapshots = false;
+
     Playback playback;
-    if (!playback.Open(in, ReadWholeFile, o.playback))
+    if (!playback.Open(in, ReadWholeFile, options))
     {
         std::fprintf(stderr, "error: %s\n", playback.Error().c_str());
         return 1;
@@ -246,7 +250,7 @@ int ParseArgs(int argc, char** argv, Options& o, std::vector<std::string>& input
 
     if (!o.out.empty() && inputs.size() > 1)
     {
-        std::fprintf(stderr, "error: -o names one output file, so it takes a single input\n");
+        std::fprintf(stderr, "error: -o requires a single input file\n");
         return 2;
     }
 
@@ -268,8 +272,8 @@ int Run(int argc, char** argv)
         return parsed < 0 ? 0 : parsed;
     }
 
-    // An input that isn't there stops everything before anything is written. A dropped file is always there, so this
-    // catches mistyped paths, and an output given the old way, after the input.
+    // Check all paths before writing anything. Dropped files always exist, so this catches typos and output paths
+    // passed as positional arguments instead of with -o.
     for (std::size_t i = 0; i < inputs.size(); i++)
     {
         std::error_code ec;
@@ -301,7 +305,7 @@ int Run(int argc, char** argv)
         const fs::path canonical = fs::weakly_canonical(in, ec);
         if (!done.insert(ec ? fs::absolute(in) : canonical).second)
         {
-            std::fprintf(stderr, "skipped, since it's given more than once\n");
+            std::fprintf(stderr, "skipped duplicate input\n");
             continue;
         }
 
@@ -314,7 +318,7 @@ int Run(int argc, char** argv)
 
         if (IsLibrary(in))
         {
-            std::fprintf(stderr, "skipped %s: it's the library that the .mini3sf files load\n", in.c_str());
+            std::fprintf(stderr, "skipped %s: a library that .mini3sf files load\n", in.c_str());
             continue;
         }
 

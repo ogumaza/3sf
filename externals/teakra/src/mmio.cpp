@@ -9,6 +9,7 @@
 #include "dma.h"
 #include "memory_interface.h"
 #include "mmio.h"
+#include "state.h"
 #include "timer.h"
 
 namespace Teakra {
@@ -46,16 +47,22 @@ struct Cell {
     std::function<void(u16)> set;
     std::function<u16(void)> get;
     u16 index = 0;
+    // The value a register keeps itself, which the DSP's state includes, or nullptr for one that
+    // only reflects a component's state.
+    std::shared_ptr<u16> storage;
 
     Cell(std::function<void(u16)> set, std::function<u16(void)> get)
         : set(std::move(set)), get(std::move(get)) {}
+    // Stores writes and reports each access. The callbacks capture `this` to read the index, so the
+    // cell must stay at its original address; copying it would leave the callbacks pointing at the
+    // original cell.
     Cell() {
-        std::shared_ptr<u16> storage = std::make_shared<u16>(0);
-        set = [storage, this](u16 value) {
+        storage = std::make_shared<u16>(0);
+        set = [storage = storage, this](u16 value) {
             *storage = value;
             std::printf("MMIO: cell %04X set = %04X\n", index, value);
         };
-        get = [storage, this]() -> u16 {
+        get = [storage = storage, this]() -> u16 {
             std::printf("MMIO: cell %04X get\n", index);
             return *storage;
         };
@@ -83,6 +90,7 @@ struct Cell {
     static Cell BitFieldCell(const std::vector<BitFieldSlot>& slots) {
         Cell cell({}, {});
         std::shared_ptr<u16> storage = std::make_shared<u16>(0);
+        cell.storage = storage;
         cell.set = [storage, slots](u16 value) {
             for (const auto& slot : slots) {
                 if (slot.set) {
@@ -111,6 +119,15 @@ public:
     Impl() {
         for (std::size_t i = 0; i < cells.size(); ++i) {
             cells[i].index = (u16)i;
+        }
+    }
+
+    template <typename Archive>
+    void Serialize(Archive& ar) {
+        for (Cell& cell : cells) {
+            if (cell.storage) {
+                ar(*cell.storage);
+            }
         }
     }
 };
@@ -154,8 +171,9 @@ MMIORegion::MMIORegion(MemoryInterfaceUnit& miu, ICU& icu, Apbp& apbp_from_cpu, 
         impl->cells[0x26 + i * 0x10] = Cell::RefCell(timer[i].start_high);   // TIMERx_SCH
         impl->cells[0x28 + i * 0x10] = Cell::RefCell(timer[i].counter_low);  // TIMERx_CCL
         impl->cells[0x2A + i * 0x10] = Cell::RefCell(timer[i].counter_high); // TIMERx_CCH
-        impl->cells[0x2C + i * 0x10] = Cell();                               // TIMERx_SPWMCL
-        impl->cells[0x2E + i * 0x10] = Cell();                               // TIMERx_SPWMCH
+        // TIMERx_SPWMCL (0x2C + i * 0x10) and TIMERx_SPWMCH (0x2E + i * 0x10) keep the cells they
+        // start with, which store what's written. Assigning them a new Cell() would leave their
+        // functions reading the index of a temporary.
     }
 
     // APBP
@@ -367,5 +385,13 @@ void MMIORegion::Write(u16 addr, u16 value) {
     if (AffectsTiming(addr))
         core_timing.Invalidate();
     impl->cells[addr].set(value);
+}
+
+void MMIORegion::Serialize(StateWriter& ar) {
+    impl->Serialize(ar);
+}
+
+void MMIORegion::Serialize(StateReader& ar) {
+    impl->Serialize(ar);
 }
 } // namespace Teakra

@@ -120,7 +120,7 @@ static bool YieldLetsTheOtherThreadRun(bool hint)
     return system.GetKernel().RunUntil(10'000'000) == Kernel::RunResult::kExited;
 }
 
-// Horizon doesn't share a core out by time among threads of equal priority, but a thread that yields goes behind them.
+// Horizon does not time-slice threads of equal priority. A yielding thread moves to the back of their queue.
 static void TestYield()
 {
     THREESF_CHECK(YieldLetsTheOtherThreadRun(false));

@@ -76,6 +76,15 @@ public:
         write_external32 = std::move(write32);
     }
 
+    template <typename Archive>
+    void Serialize(Archive& ar) {
+        ar(busy_flag);
+        for (Channel& channel : channels) {
+            ar(channel.unit_size, channel.burst_size, channel.direction, channel.dma_channel,
+               channel.burst_queue, channel.write_burst_start);
+        }
+    }
+
 private:
     u16 busy_flag = 0;
     struct Channel {

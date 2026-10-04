@@ -180,7 +180,7 @@ void AnalyzeLengths(std::vector<Job>& jobs, const std::vector<uint8_t>& archive,
 
                 if (!jobs[i].timing)
                 {
-                    std::fprintf(stderr, "warning: %s gets no length tag: its length analysis failed\n",
+                    std::fprintf(stderr, "warning: length analysis failed for %s; no length tag written\n",
                                  jobs[i].label.c_str());
                 }
             }
@@ -462,7 +462,7 @@ constexpr char kUsage[] =
     "  --archive PATH       archive mode on a game: rip only this sound archive (its RomFS path)\n"
     "  --only REGEX         rip only the sounds whose label matches\n"
     "  --bgm                rip only the BGMs (--only '^SEQ_BGM')\n"
-    "  --no-length          don't work out lengths, so the rips get no length or fade tags\n"
+    "  --no-length          skip length analysis and omit length and fade tags\n"
     "  --jobs N             the number of length analyses that run at once (default: the number\n"
     "                       of CPU threads)\n"
     "  --game NAME, --artist NAME, --year YEAR, --copyright TEXT, --by NAME\n"
@@ -559,7 +559,7 @@ int RipLooseArchive(const std::string& input, const fs::path& out_dir, const Opt
     if (o.list)
     {
         std::fprintf(stderr, "firmware: %s\n",
-                     firmware.empty() ? "none found, so ripping needs one" : firmware_file.c_str());
+                     firmware.empty() ? "none found, so ripping needs --firmware" : firmware_file.c_str());
         std::fprintf(stderr, "%s: a sound archive (archive mode)\n", input.c_str());
         return 0;
     }
@@ -754,8 +754,8 @@ int RipGameInGameMode(const std::string& input, const rip::GameFiles& game, cons
     return 0;
 }
 
-// Rips a game image or directory, in game mode when it has a driver profile and archive mode otherwise, unless --mode
-// says. Returns the exit code.
+// Rips a game image or directory. Uses game mode if a driver profile exists, otherwise archive mode, unless --mode
+// overrides the choice. Returns the exit code.
 int RipGame(const std::string& input, const fs::path& out_dir, const Options& o, rip::FileNames& names)
 {
     rip::GameFiles game;
@@ -1033,8 +1033,8 @@ int Run(int argc, char** argv)
         return parsed < 0 ? 0 : parsed;
     }
 
-    // An input that isn't there stops everything before anything is written. A dropped file is always there, so this
-    // catches mistyped paths, and an output given the old way, after the input.
+    // Check all paths before writing anything. Dropped files always exist, so this catches typos and output paths
+    // passed as positional arguments instead of with -o.
     for (std::size_t i = 0; i < inputs.size(); i++)
     {
         std::error_code ec;
@@ -1077,7 +1077,7 @@ int Run(int argc, char** argv)
         const fs::path canonical = fs::weakly_canonical(inputs[i], ec);
         if (!done.insert(ec ? InputPath(inputs[i]) : canonical).second)
         {
-            std::fprintf(stderr, "skipped, since it's given more than once\n");
+            std::fprintf(stderr, "skipped duplicate input\n");
             continue;
         }
 

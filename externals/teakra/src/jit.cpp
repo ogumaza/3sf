@@ -3923,7 +3923,7 @@ struct Jit::Impl {
         // Stops before instruction `index`: the ones before it have run.
         const s32 pc_off = static_cast<s32>(reinterpret_cast<const u8*>(&modes.pc) -
                                             reinterpret_cast<const u8*>(&modes));
-        // Stops with flags pending, or perhaps pending, share the code that works them out.
+        // Exits with pending or possibly pending flags share the code that computes them.
         Label bail_pending, bail_either;
         for (Bail& b : bails) {
             if (!b.label->Used()) {

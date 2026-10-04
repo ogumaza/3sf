@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <iterator>
 #include <string>
 #include <utility>
 
@@ -39,6 +40,8 @@ TrackLength ResolveLength(long long length_ms, long long fade_ms, const Playback
 bool Playback::Open(const std::string& path, const FileReader& reader, const PlaybackOptions& options)
 {
     options_ = options;
+    saved_.clear();
+    latest_.reset();
 
     if (!player_.Load(path, reader))
     {
@@ -53,6 +56,8 @@ bool Playback::Open(const std::string& path, const FileReader& reader, const Pla
 bool Playback::Open(LoadedSet set, const PlaybackOptions& options)
 {
     options_ = options;
+    saved_.clear();
+    latest_.reset();
 
     if (!player_.Load(std::move(set)))
     {
@@ -80,8 +85,58 @@ bool Playback::Start()
 {
     position_ = 0;
     finished_at_.reset();
+    saved_.clear();
+    latest_.reset();
+    interval_ = std::max<uint64_t>(options_.snapshot_interval, 1);
 
-    return player_.Start();
+    if (!player_.Start())
+    {
+        return false;
+    }
+
+    SaveIfDue();
+
+    return true;
+}
+
+void Playback::SaveIfDue()
+{
+    if (!options_.snapshots)
+    {
+        return;
+    }
+
+    const uint64_t stretch = position_ / interval_;
+    const auto it = std::ranges::upper_bound(saved_, position_, {}, &SavedState::position);
+    if (it != saved_.begin() && std::prev(it)->position / interval_ == stretch)
+    {
+        return;
+    }
+
+    std::shared_ptr<const Player::Snapshot> snapshot = player_.Save(latest_.get());
+    if (!snapshot)
+    {
+        return;
+    }
+
+    latest_ = snapshot;
+    saved_.insert(it, {position_, finished_at_, std::move(snapshot)});
+
+    // Double the interval and keep the first snapshot in each new interval.
+    while (saved_.size() > std::max<std::size_t>(options_.max_snapshots, 1))
+    {
+        interval_ *= 2;
+        std::vector<SavedState> kept;
+        for (SavedState& s : saved_)
+        {
+            if (kept.empty() || kept.back().position / interval_ != s.position / interval_)
+            {
+                kept.push_back(std::move(s));
+            }
+        }
+
+        saved_ = std::move(kept);
+    }
 }
 
 std::size_t Playback::Render(int16_t* out, std::size_t frames)
@@ -136,12 +191,33 @@ std::size_t Playback::Render(int16_t* out, std::size_t frames)
         finished_at_ = player_.FinishedFrame();
     }
 
+    SaveIfDue();
+
     return got;
 }
 
 bool Playback::Seek(uint64_t frame, const std::function<bool()>& abort)
 {
-    if (frame < position_ || player_.GetState() == Player::State::kIdle || player_.GetState() == Player::State::kError)
+    // The latest snapshot at or before the target, unless the current position is nearer and the player can go on
+    // from it.
+    const bool can_go_on =
+        player_.GetState() == Player::State::kPlaying || player_.GetState() == Player::State::kFinished;
+    const auto it = std::ranges::upper_bound(saved_, frame, {}, &SavedState::position);
+    const SavedState* from = it == saved_.begin() ? nullptr : &*std::prev(it);
+    if (from && (!can_go_on || frame < position_ || from->position > position_))
+    {
+        if (player_.Restore(*from->snapshot))
+        {
+            position_ = from->position;
+            finished_at_ = from->finished_at;
+            latest_ = from->snapshot;
+        }
+        else if (!Start())
+        {
+            return false;
+        }
+    }
+    else if (!can_go_on || frame < position_)
     {
         if (!Start())
         {

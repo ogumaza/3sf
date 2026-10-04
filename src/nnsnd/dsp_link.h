@@ -91,7 +91,7 @@ private:
     void BeforeDspRuns();
     void AfterDspRuns();
 
-    dsp::TeakraDsp& dsp_;
+    dsp::TeakraDsp* dsp_; // a pointer, so that the link can be copied into a snapshot
     std::array<uint16_t, 15> struct_addr_{};
     uint16_t frame_ = 0;   // nn::snd +0x131a
     int read_region_ = 0;  // nn::snd +0x131c

@@ -6,6 +6,7 @@
 #include <bit>
 #include <cstdint>
 #include <memory>
+#include <stdexcept>
 #include <utility>
 #include <vector>
 
@@ -634,7 +635,7 @@ Voice* VoiceManager::AllocVoice(int channel_count, int priority, Voice::Callback
         return nullptr;
     }
 
-    auto owned = std::make_unique<Voice>();
+    auto owned = std::make_shared<Voice>();
     Voice* v = owned.get();
     v->engine_ = &engine_;
     if (!v->Alloc(channel_count, priority, std::move(callback)))
@@ -722,6 +723,34 @@ void VoiceManager::ChangePriority(Voice* v)
     list_.remove(v);
     auto it = std::find_if(list_.begin(), list_.end(), [&](Voice* o) { return o->priority_ > v->priority_; });
     list_.insert(it, v);
+}
+
+VoiceManager::Snapshot VoiceManager::Save() const
+{
+    if (!graveyard_.empty())
+    {
+        throw std::logic_error("nw::snd voices saved in the middle of a frame");
+    }
+
+    Snapshot snapshot{pool_, {}, list_};
+    for (const std::shared_ptr<Voice>& v : pool_)
+    {
+        snapshot.values.push_back(*v);
+    }
+
+    return snapshot;
+}
+
+void VoiceManager::Restore(const Snapshot& snapshot)
+{
+    pool_ = snapshot.pool;
+    list_ = snapshot.list;
+    graveyard_.clear();
+    auto value = snapshot.values.begin();
+    for (const std::shared_ptr<Voice>& v : pool_)
+    {
+        *v = *value++;
+    }
 }
 
 void VoiceManager::UpdateAllVoices()
@@ -1002,7 +1031,7 @@ void Channel::OnVoiceEvent(Voice::Status status)
 Channel* ChannelManager::AllocChannel(int channel_count, int priority, Channel::Callback callback)
 {
     // 0x320868
-    auto owned = std::make_unique<Channel>();
+    auto owned = std::make_shared<Channel>();
     Channel* ch = owned.get();
     ch->engine_ = &engine_;
     ch->auto_free_ = true;
@@ -1051,6 +1080,34 @@ void ChannelManager::UpdateAllChannel()
 int ChannelManager::ActiveCount() const
 {
     return static_cast<int>(active_list_.size());
+}
+
+ChannelManager::Snapshot ChannelManager::Save() const
+{
+    if (!graveyard_.empty())
+    {
+        throw std::logic_error("nw::snd channels saved in the middle of a frame");
+    }
+
+    Snapshot snapshot{pool_, {}, active_list_};
+    for (const std::shared_ptr<Channel>& ch : pool_)
+    {
+        snapshot.values.push_back(*ch);
+    }
+
+    return snapshot;
+}
+
+void ChannelManager::Restore(const Snapshot& snapshot)
+{
+    pool_ = snapshot.pool;
+    active_list_ = snapshot.active_list;
+    graveyard_.clear();
+    auto value = snapshot.values.begin();
+    for (const std::shared_ptr<Channel>& ch : pool_)
+    {
+        *ch = *value++;
+    }
 }
 
 } // namespace threesf::nwsnd

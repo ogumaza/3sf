@@ -22,7 +22,7 @@ CFLAGS = [
 
 
 def render_header(blob, entry, params, end):
-    """The text of driver_blob.h for a linked driver image, laid out as clang-format lays it out."""
+    """Returns driver_blob.h for a linked driver image, formatted to match clang-format."""
     lines = [
         "// SPDX-License-Identifier: MIT",
         "",

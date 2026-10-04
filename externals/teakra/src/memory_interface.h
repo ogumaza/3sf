@@ -24,6 +24,11 @@ public:
         *this = MemoryInterfaceUnit();
     }
 
+    template <typename Archive>
+    void Serialize(Archive& ar) {
+        ar(x_page, y_page, z_page, x_size, y_size, page_mode, mmio_base);
+    }
+
     TEAKRA_ALWAYS_INLINE bool InMMIO(u16 addr) const {
         return addr >= mmio_base && addr < mmio_base + MMIOSize;
     }

@@ -264,8 +264,7 @@ static void TestLoadSet()
     THREESF_CHECK(LoadSet("dir/z.minincsf", reader, set).has_value());
     THREESF_CHECK(LoadSet("dir/w.mini3sf", reader, set).has_value());
 
-    // So does a descriptor of a version this player doesn't read, or one that gives the program no application memory
-    // or more than a 3DS has.
+    // So is a descriptor with an unsupported version, or with application memory outside the 3DS's range.
     ProcessDescriptor v2;
     v2.version = 2;
     ProcessDescriptor none;

@@ -42,7 +42,7 @@ constexpr uint64_t kMaxFrameWaitCycles = 200'000'000;
 
 } // namespace
 
-DspLink::DspLink(dsp::TeakraDsp& dsp) : dsp_(dsp)
+DspLink::DspLink(dsp::TeakraDsp& dsp) : dsp_(&dsp)
 {
     const auto on_interrupt = [this](dsp::Interrupt type, dsp::Pipe pipe)
     {
@@ -51,19 +51,19 @@ DspLink::DspLink(dsp::TeakraDsp& dsp) : dsp_(dsp)
             audio_irq_ = true;
         }
     };
-    dsp_.SetInterruptHandler(on_interrupt);
+    dsp_->SetInterruptHandler(on_interrupt);
 }
 
 bool DspLink::Initialize(std::span<const uint8_t> component)
 {
     BeforeDspRuns();
-    dsp_.LoadComponent(component);
+    dsp_->LoadComponent(component);
 
     // Audio pipe command 0 = Initialize (2 = Wakeup). dsp::DSP zeroes bytes 2..3.
     constexpr uint8_t kInitializeCommand[4] = {0, 0, 0, 0};
     audio_irq_ = false;
-    dsp_.WritePipe(dsp::Pipe::kAudio, kInitializeCommand);
-    dsp_.SetSemaphore(kInitSemaphore);
+    dsp_->WritePipe(dsp::Pipe::kAudio, kInitializeCommand);
+    dsp_->SetSemaphore(kInitSemaphore);
     uint64_t waited = 0;
     while (!audio_irq_)
     {
@@ -73,21 +73,21 @@ bool DspLink::Initialize(std::span<const uint8_t> component)
             return false;
         }
 
-        dsp_.Run(1024);
+        dsp_->Run(1024);
         waited += 1024;
     }
 
     AfterDspRuns();
     audio_irq_ = false;
 
-    const auto count_bytes = dsp_.ReadPipe(dsp::Pipe::kAudio, 2);
+    const auto count_bytes = dsp_->ReadPipe(dsp::Pipe::kAudio, 2);
     const uint16_t count = static_cast<uint16_t>(count_bytes[0] | (count_bytes[1] << 8));
     if (count != struct_addr_.size())
     {
         return false;
     }
 
-    auto addrs = dsp_.ReadPipe(dsp::Pipe::kAudio, count * 2);
+    auto addrs = dsp_->ReadPipe(dsp::Pipe::kAudio, count * 2);
     for (uint16_t i = 0; i < count; i++)
     {
         struct_addr_[i] = static_cast<uint16_t>(addrs[i * 2] | (addrs[i * 2 + 1] << 8));
@@ -109,11 +109,11 @@ bool DspLink::Initialize(std::span<const uint8_t> component)
         }
     }
 
-    dsp_.SetSemaphore(kInitSemaphore);
+    dsp_->SetSemaphore(kInitSemaphore);
     frame_ = 4;
     StoreWord(kFrameCounter, 0, frame_);
     frame_++;
-    dsp_.SetSemaphore(kFrameSemaphore); // SignalEvent(semaphore event)
+    dsp_->SetSemaphore(kFrameSemaphore); // SignalEvent(semaphore event)
     write_region_ = frame_ & 1;
     read_region_ = frame_ & 1;
 
@@ -132,7 +132,7 @@ bool DspLink::WaitForFrame()
             return false;
         }
 
-        dsp_.Run(256);
+        dsp_->Run(256);
         waited += 256;
     }
 
@@ -165,13 +165,13 @@ void DspLink::Commit()
 
     for (uint64_t run = 0; run < kArmLatencyCycles; run += 256)
     {
-        dsp_.Run(256);
+        dsp_->Run(256);
     }
 
     AfterDspRuns();
     StoreWord(kFrameCounter, write_region_, frame_);
     frame_++;
-    dsp_.SetSemaphore(kFrameSemaphore); // SignalEvent(semaphore event)
+    dsp_->SetSemaphore(kFrameSemaphore); // SignalEvent(semaphore event)
     write_region_ = frame_ & 1;
 }
 
@@ -198,7 +198,7 @@ const SourceReport& DspLink::SourceReportOf(int voice) const
 uint8_t* DspLink::Address(int structure, int region) const
 {
     const uint32_t address = struct_addr_[structure] | (region ? 0x10000u : 0u);
-    return dsp_.Ram() + dsp::DataOffset(address);
+    return dsp_->Ram() + dsp::DataOffset(address);
 }
 
 uint16_t DspLink::LoadWord(int structure, int region) const

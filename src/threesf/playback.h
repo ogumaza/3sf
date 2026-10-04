@@ -2,12 +2,16 @@
 
 // Playback of a 3SF set as a finite (or endless) stream: length, fade and volume from the tags or the defaults, end
 // detection and seeking. Shared by the CLI renderer and the foobar2000 plugin so that they play a file identically.
+//
+// Seeking uses save states: as it renders, the player takes a snapshot of the emulation every few seconds (see
+// Player::Save), and a seek goes back to the latest one before the target and renders from there.
 
 #pragma once
 
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -35,6 +39,18 @@ struct PlaybackOptions
     // Overrides of the length and fade tags (ignored when negative).
     long long length_override_ms = -1;
     long long fade_override_ms = -1;
+
+    // Take snapshots while rendering, so that seeks are quick. They cost a little time and memory, which a render that
+    // never seeks can save.
+    bool snapshots = true;
+
+    // Initial interval between snapshots, in frames: a seek renders up to this much. Shorter intervals reduce rendering
+    // time when seeking, at the cost of more time and memory spent saving states.
+    uint64_t snapshot_interval = 2 * static_cast<uint64_t>(kPlayerSampleRate);
+
+    // Maximum number of snapshots. When exceeded, double the interval and discard every other snapshot to bound memory
+    // use for long or endless tracks.
+    std::size_t max_snapshots = 128;
 };
 
 // A file's play time before its fade, and the fade's length.
@@ -66,9 +82,17 @@ public:
     // of frames written: fewer than requested at the end of the track, 0 after it or after an error (see Error()).
     std::size_t Render(int16_t* out, std::size_t frames);
 
-    // Moves to `frame`. Going back restarts emulation; either way the emulator runs up to the target, which takes about
-    // as long as playing it. `abort` is polled between blocks; the seek stops (returning false) when it returns true.
+    // Seeks to `frame` by rendering from the latest snapshot at or before it, or from the current position if nearer.
+    // Within previously rendered audio, this requires less than one snapshot interval of rendering (PlaybackOptions).
+    // Seeking further ahead renders the remaining distance. Without snapshots, backward seeks restart the emulation.
+    // Polls `abort` between blocks and returns false if it requests cancellation.
     bool Seek(uint64_t frame, const std::function<bool()>& abort = {});
+
+    // The snapshots kept, for tests.
+    std::size_t SnapshotCount() const
+    {
+        return saved_.size();
+    }
 
     // Current position in frames.
     uint64_t Position() const
@@ -116,7 +140,18 @@ public:
     }
 
 private:
+    // A snapshot, and where playback was when it was taken.
+    struct SavedState
+    {
+        uint64_t position = 0;
+        std::optional<uint64_t> finished_at;
+        std::shared_ptr<const Player::Snapshot> snapshot;
+    };
+
     void ComputeLength();
+
+    // Takes a snapshot if none has been taken yet in this stretch of interval_ frames.
+    void SaveIfDue();
 
     Player player_;
     PlaybackOptions options_;
@@ -126,6 +161,13 @@ private:
     uint64_t position_ = 0;
     std::optional<uint64_t> finished_at_; // the frame at which the sound reported its end (untagged files)
     std::vector<int16_t> scratch_;
+
+    // Declared after player_ so snapshots release their references to the player's objects before the player is
+    // destroyed.
+    std::vector<SavedState> saved_; // in order of position, at most one in each stretch of interval_ frames
+    // The last one taken or restored, which the next shares pages with. It may be one that has gone from saved_.
+    std::shared_ptr<const Player::Snapshot> latest_;
+    uint64_t interval_ = 0;
 };
 
 } // namespace threesf

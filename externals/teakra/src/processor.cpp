@@ -1,6 +1,7 @@
 #include "interpreter.h"
 #include "processor.h"
 #include "register.h"
+#include "state.h"
 
 namespace Teakra {
 
@@ -10,6 +11,14 @@ struct Processor::Impl {
     CoreTiming& core_timing;
     RegisterState regs;
     Interpreter interpreter;
+
+    template <typename Archive>
+    void Serialize(Archive& ar) {
+        // Whole, so that a register added to it is saved too.
+        static_assert(std::is_trivially_copyable_v<RegisterState>);
+        ar(regs);
+        interpreter.Serialize(ar);
+    }
 };
 
 Processor::Processor(CoreTiming& core_timing, MemoryInterface& memory_interface)
@@ -38,6 +47,14 @@ Teakra::RegisterState& Processor::GetRegisterState() {
 
 const Teakra::RegisterState& Processor::GetRegisterState() const {
     return impl->regs;
+}
+
+void Processor::Serialize(StateWriter& ar) {
+    impl->Serialize(ar);
+}
+
+void Processor::Serialize(StateReader& ar) {
+    impl->Serialize(ar);
 }
 
 } // namespace Teakra

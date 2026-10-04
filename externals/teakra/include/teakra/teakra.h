@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <vector>
 
 namespace Teakra {
 struct RegisterState;
@@ -88,6 +89,14 @@ public:
     void SetAHBMCallback(const AHBMCallback& callback);
 
     void SetAudioCallback(std::function<void(std::array<std::int16_t, 2>)> callback);
+
+    // Saves and restores DSP registers and component state. LoadState accepts a state from this DSP
+    // or another. The host must save and restore DSP memory (GetDspMemory) separately before the
+    // next Run, which rechecks translated code against that memory. Callbacks are unchanged. States
+    // are only valid within this process and use the host's byte order. LoadState throws
+    // std::invalid_argument for invalid state data.
+    std::vector<std::uint8_t> SaveState();
+    void LoadState(const std::vector<std::uint8_t>& state);
 
 private:
     struct Impl;

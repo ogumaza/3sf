@@ -5,8 +5,9 @@
 // come from the tags (or the defaults in Advanced preferences > Decoding > 3SF decoder), and the tags can be edited.
 //
 // The player core (src/threesf) does the emulation: the game's sound code on an emulated ARM11 in game mode, or 3SF's
-// model of the SDK sound player in archive mode, with the game's DSP firmware either way. Seeking restarts or
-// fast-forwards the emulation, so it takes as long as rendering everything up to the target.
+// model of the SDK sound player in archive mode, with the game's DSP firmware either way. While playing, it takes a
+// snapshot of the emulation every few seconds, and a seek goes back to the latest one before the target and renders
+// from there; a seek past what has played renders up to the target.
 //
 // Build: see plugins/foobar2000/README.md (clang-cl or MSVC on Windows, or Apple Clang on macOS, with the foobar2000
 // SDK).
@@ -45,8 +46,8 @@ advconfig_integer_factory cfg_default_length("Default length for files without a
                                              kBranchGuid, 0, PlaybackOptions::kDefaultLengthMs / 1000, 1, 24 * 3600);
 advconfig_integer_factory cfg_default_fade("Default fade for files without a length tag (seconds)", kFadeGuid,
                                            kBranchGuid, 1, PlaybackOptions::kDefaultFadeMs / 1000, 0, 3600);
-advconfig_checkbox_factory cfg_endless("Play endlessly (ignore lengths; only while playing, not when converting)",
-                                       kEndlessGuid, kBranchGuid, 2, false);
+advconfig_checkbox_factory cfg_endless("Play endlessly (ignore lengths during playback only)", kEndlessGuid,
+                                       kBranchGuid, 2, false);
 
 constexpr std::size_t kBlockFrames = 1024;      // frames decoded per decode_run call
 constexpr t_filesize kMaxFileSize = 256u << 20; // largest file read into memory
@@ -230,9 +231,11 @@ public:
             pfc::throw_exception_with_message<exception_io_data>(err->c_str());
         }
 
-        // Endless playback is only for real playback: converting or scanning needs an end.
+        // Enable endless playback and snapshots only during playback. Conversion and scanning need a finite length and
+        // never seek.
         PlaybackOptions options = DefaultOptions();
         options.endless = cfg_endless.get() && (p_flags & input_flag_playback) && !(p_flags & input_flag_no_looping);
+        options.snapshots = (p_flags & input_flag_playback) != 0;
 
         if (!playback_.Open(std::move(set), options))
         {

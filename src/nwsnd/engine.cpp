@@ -8,7 +8,9 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <utility>
+#include <vector>
 
 #include "nwsnd/sequence.h"
 #include "nwsnd/util.h"
@@ -36,13 +38,20 @@ Engine::Engine(nnsnd::SoundSystem& snd, Fcram& fcram, const csar::SoundArchive& 
     }
 }
 
-Engine::~Engine() = default;
+Engine::~Engine()
+{
+    // The players go first (see players_), and channels they still hold mustn't call back into their tracks.
+    for (auto& p : players_)
+    {
+        p->DetachChannels();
+    }
+}
 
 const csar::Bank* Engine::GetBank(uint32_t bank_item)
 {
     if (auto it = banks_.find(bank_item); it != banks_.end())
     {
-        return &it->second;
+        return it->second.get();
     }
 
     const uint32_t index = bank_item & 0xffffff;
@@ -57,14 +66,14 @@ const csar::Bank* Engine::GetBank(uint32_t bank_item)
         return nullptr;
     }
 
-    return &banks_.emplace(bank_item, csar::Bank::Parse(file)).first->second;
+    return banks_.emplace(bank_item, std::make_shared<const csar::Bank>(csar::Bank::Parse(file))).first->second.get();
 }
 
 const Engine::LoadedWarc* Engine::GetWarc(uint32_t wave_archive_item)
 {
     if (auto it = warcs_.find(wave_archive_item); it != warcs_.end())
     {
-        return &it->second;
+        return it->second.get();
     }
 
     const uint32_t index = wave_archive_item & 0xffffff;
@@ -86,7 +95,7 @@ const Engine::LoadedWarc* Engine::GetWarc(uint32_t wave_archive_item)
     w.base = fcram_.Store(file.data(), file.size());
     w.archive = csar::WaveArchive::Parse(file);
 
-    return &warcs_.emplace(wave_archive_item, std::move(w)).first->second;
+    return warcs_.emplace(wave_archive_item, std::make_shared<const LoadedWarc>(std::move(w))).first->second.get();
 }
 
 std::optional<WaveInfo> Engine::GetWave(uint32_t wave_archive_item, uint32_t index)
@@ -271,6 +280,78 @@ bool Engine::IsBusy() const
     }
 
     return channels_.ActiveCount() > 0;
+}
+
+Engine::Snapshot Engine::Save() const
+{
+    Snapshot snapshot;
+    snapshot.voices = voices_.Save();
+    snapshot.channels = channels_.Save();
+    snapshot.random = random_;
+    for (const auto& p : players_)
+    {
+        snapshot.players.push_back(*p);
+    }
+
+    snapshot.banks = banks_;
+    snapshot.warcs = warcs_;
+    snapshot.waves = waves_;
+    snapshot.frame_count = frame_count_;
+    snapshot.global_vars = global_vars_;
+
+    return snapshot;
+}
+
+void Engine::Restore(const Snapshot& snapshot)
+{
+    if (snapshot.players.size() > players_.size())
+    {
+        throw std::invalid_argument("nw::snd snapshot with players the engine doesn't have");
+    }
+
+    // Remove players started after the snapshot. Their channels are removed when channel state is restored below.
+    while (players_.size() > snapshot.players.size())
+    {
+        players_.back()->DetachChannels();
+        players_.pop_back();
+    }
+
+    // The players stay where they are: channels' callbacks point at their tracks.
+    for (std::size_t i = 0; i < players_.size(); i++)
+    {
+        *players_[i] = snapshot.players[i];
+    }
+
+    voices_.Restore(snapshot.voices);
+    channels_.Restore(snapshot.channels);
+    random_ = snapshot.random;
+    banks_ = snapshot.banks;
+    warcs_ = snapshot.warcs;
+    waves_ = snapshot.waves;
+    frame_count_ = snapshot.frame_count;
+    global_vars_ = snapshot.global_vars;
+}
+
+ArchiveModel::Snapshot ArchiveModel::Save(const Snapshot* previous)
+{
+    return {fcram.Save(previous ? &previous->fcram : nullptr), dsp.Save(previous ? &previous->dsp : nullptr), snd,
+            engine ? std::optional<Engine::Snapshot>(engine->Save()) : std::nullopt};
+}
+
+void ArchiveModel::Restore(const Snapshot& snapshot)
+{
+    if (engine.has_value() != snapshot.engine.has_value())
+    {
+        throw std::invalid_argument("archive model snapshot from before or after the engine started");
+    }
+
+    fcram.Restore(snapshot.fcram);
+    dsp.Restore(snapshot.dsp);
+    snd = snapshot.snd;
+    if (engine)
+    {
+        engine->Restore(*snapshot.engine);
+    }
 }
 
 bool ArchiveModel::Start(std::span<const uint8_t> firmware, const csar::SoundArchive& archive, uint8_t output_mode)

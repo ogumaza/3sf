@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "common/common_types.h"
+#include "common/memory_image.h"
 
 namespace threesf
 {
@@ -53,6 +54,37 @@ public:
         used_ = offset + size;
 
         return kFcramBase + static_cast<PAddr>(offset);
+    }
+
+    // A copy of FCRAM's contents and of how much Store has used.
+    struct Snapshot
+    {
+        MemoryImage bytes;
+        std::size_t used = 0;
+
+        // Memory used by this snapshot, excluding pages shared with `previous`.
+        std::size_t Bytes(const Snapshot* previous) const
+        {
+            return bytes.BytesNotIn(previous ? &previous->bytes : nullptr);
+        }
+    };
+
+    // Takes a snapshot, sharing the pages that haven't changed since `previous`.
+    Snapshot Save(const Snapshot* previous) const
+    {
+        return {MemoryImage(bytes_.data(), bytes_.size(), previous ? &previous->bytes : nullptr), used_};
+    }
+
+    // Restores FCRAM from a snapshot. Throws if the snapshot has a different size.
+    void Restore(const Snapshot& snapshot)
+    {
+        if (snapshot.bytes.Size() != bytes_.size())
+        {
+            throw std::invalid_argument("FCRAM snapshot of a different size");
+        }
+
+        snapshot.bytes.Restore(bytes_.data());
+        used_ = snapshot.used;
     }
 
 private:

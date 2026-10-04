@@ -13,6 +13,8 @@ class Dma;
 class Ahbm;
 class Btdmp;
 class CoreTiming;
+class StateReader;
+class StateWriter;
 
 class MMIORegion {
 public:
@@ -22,6 +24,11 @@ public:
     ~MMIORegion();
     u16 Read(u16 addr); // not const because it can be a FIFO register
     void Write(u16 addr, u16 value);
+
+    // Saves or loads the values that registers keep themselves (see state.h). The others belong to
+    // the components.
+    void Serialize(StateWriter& ar);
+    void Serialize(StateReader& ar);
 
 private:
     CoreTiming& core_timing;

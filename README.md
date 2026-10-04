@@ -12,7 +12,7 @@ mixing, filtering and limiting. The rip's mode determines what drives the DSP:
   The rip plays as it does in the game.
 - **Archive mode** (from a sound archive, `.bcsar`, or a game without a profile): 3SF's model
   of the SDK sound player (`nw::snd`/`nn::snd`, reverse engineered from Pokemon X) plays the archive. It
-  works for any archive.
+  accepts sound archives from any game.
 
 The format is described in [`docs/3sf.md`](docs/3sf.md). Game mode needs a small driver profile
 per game (`src/rip/rip.cpp`), and so far only Pokemon X (Japan) has one. Archive mode takes any
@@ -90,21 +90,28 @@ MSVC (x64), on macOS with Apple Clang (Apple Silicon and Intel), and on Linux wi
 `externals/teakra` is [Teakra](https://github.com/wwylele/teakra) at upstream commit 3d697a1 with
 3SF's changes, excluding upstream's hardware tests, Git LFS setup and CI. Compare against that
 commit to see the changes. This version has a faster interpreter and a JIT that translates DSP
-firmware into x86-64 code as it runs. It bounds firmware accesses to DSP memory, fixes delayed
-interrupts when the DSP is idle, and initializes the interrupt controller and every register to
-a known state. Emulation failures throw exceptions instead of aborting, and 32-bit x86 builds
-are supported. Samples match upstream Teakra's, except that 3SF drops the zeros upstream inserts
-when the DSP's output runs dry for a slot.
+firmware into x86-64 code as it runs, and it can save and load its state. It bounds firmware
+accesses to DSP memory, fixes delayed interrupts when the DSP is idle, and initializes the
+interrupt controller and every register to a known state. Emulation failures throw exceptions
+instead of aborting, and 32-bit x86 builds are supported. Samples match upstream Teakra's, except
+that 3SF drops the zeros upstream inserts when the DSP's output runs dry for a slot.
 
-The test of the DSP glue (`src/dsp/teakra_dsp.*`) runs small firmwares built into the test, and
-checks how the glue loads firmware, waits for the DSP, moves bytes through the firmware's pipes
-and passes on its interrupts (`tests/teakra_dsp_test.cpp`).
+The DSP glue tests (`tests/teakra_dsp_test.cpp`) use small firmware programs to check loading,
+timeouts, pipe transfers and interrupts in `src/dsp/teakra_dsp.*`.
 
 Emulating the DSP takes most of the time. On x86-64, where the system allows it, Teakra
 translates the DSP firmware into machine code as it runs, which renders the same samples faster
 than interpreting it. On Apple Silicon and in 32-bit builds Teakra interprets the firmware.
 Set `TEAKRA_JIT=0` in the environment to disable the JIT. A test runs random programs through
 both the JIT and interpreter and compares the results (`tests/teakra_jit_test.cpp`).
+
+Seeking uses save states. While the foobar2000 component plays a track, the player takes a
+snapshot of the whole emulation every 2 seconds (`src/threesf/playback.cpp`): the DSP's
+registers, components and memory, FCRAM, and either the ARM11 with the kernel's objects, services
+and memory (game mode) or the model of the sound player (archive mode). Unchanged 4 KiB memory
+pages are shared between snapshots. Seeking restores the latest snapshot before the target and
+renders from there. The save-state test runs random programs on the DSP, saves part-way through,
+and checks that restoring the state reproduces the same results (`tests/teakra_state_test.cpp`).
 
 ## Layout
 
@@ -129,5 +136,5 @@ tests/               ctest suites
 3SF is under the MIT licence (`LICENSE`). Teakra is MIT too; `THIRD-PARTY-NOTICES.md` lists
 everything 3SF uses and what a binary distribution must include.
 
-Game data isn't covered: a `.3sflib` contains a game's code, sound archive and DSP firmware,
-and rips are for personal use.
+Game data is not covered by this licence. A `.3sflib` contains a game's code, sound archive and
+DSP firmware. Rips are for personal use.

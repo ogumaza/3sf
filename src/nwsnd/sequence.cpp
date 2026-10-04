@@ -27,14 +27,13 @@ constexpr int kParseLimit = 10000;                                // commands pe
 } // namespace
 
 // --------------------------------------------------------------------------------------------- SequenceTrack
-SequenceTrack::SequenceTrack(SequenceSoundPlayer& player, int index) : player_(player), index_(index)
+SequenceTrack::SequenceTrack(SequenceSoundPlayer& player, int index) : player_(&player), index_(index)
 {
     InitParam();
 }
 
-SequenceTrack::~SequenceTrack()
+void SequenceTrack::DetachChannels()
 {
-    // Detach any channels still pointing at this track.
     for (Channel* ch = channel_list_; ch; ch = ch->next_in_track_)
     {
         ch->callback_ = nullptr;
@@ -324,7 +323,7 @@ int32_t SequenceTrack::ReadArg(int type)
             const uint32_t h2 = ReadByte();
             const uint32_t l2 = ReadByte();
             const int32_t hi = static_cast<int16_t>(((h2 << 8) & 0xffff) | l2);
-            const uint32_t r = player_.GetEngine().Rng().Next();
+            const uint32_t r = player_->GetEngine().Rng().Next();
 
             // 32-bit wrapping multiply, arithmetic shift (as the ARM code does).
             const int32_t prod = static_cast<int32_t>(static_cast<uint32_t>((hi - lo) + 1) * r);
@@ -337,7 +336,7 @@ int32_t SequenceTrack::ReadArg(int type)
             int16_t* var = nullptr;
             if (idx < 0x20)
             {
-                var = player_.Variable(idx);
+                var = player_->Variable(idx);
             }
             else if (idx < 0x30)
             {
@@ -592,7 +591,7 @@ void SequenceTrack::CommandProc(uint32_t cmd, int32_t arg1, int32_t arg2)
         {
             if (arg1 < 0x20)
             {
-                var = player_.Variable(arg1);
+                var = player_->Variable(arg1);
             }
             else if (arg1 < 0x30)
             {
@@ -656,7 +655,7 @@ void SequenceTrack::CommandProc(uint32_t cmd, int32_t arg1, int32_t arg2)
                     range = static_cast<int16_t>(-v);
                 }
 
-                int32_t r = static_cast<int32_t>(static_cast<uint32_t>(player_.GetEngine().Rng().Next()) *
+                int32_t r = static_cast<int32_t>(static_cast<uint32_t>(player_->GetEngine().Rng().Next()) *
                                                  static_cast<uint32_t>(range + 1)) >>
                             16;
                 if (neg)
@@ -735,7 +734,7 @@ void SequenceTrack::CommandProc(uint32_t cmd, int32_t arg1, int32_t arg2)
 
     case 0x88: // opentrack
         {
-            SequenceTrack* target = player_.GetTrack(arg1);
+            SequenceTrack* target = player_->GetTrack(arg1);
             if (!target || target == this)
             {
                 break;
@@ -748,9 +747,9 @@ void SequenceTrack::CommandProc(uint32_t cmd, int32_t arg1, int32_t arg2)
         }
 
     case 0x89: // jump
-        if (static_cast<uint32_t>(arg1) < current_ && index_ == 0 && player_.on_loop_)
+        if (static_cast<uint32_t>(arg1) < current_ && index_ == 0 && player_->on_loop_)
         {
-            player_.on_loop_();
+            player_->on_loop_();
         }
 
         current_ = static_cast<uint32_t>(arg1);
@@ -769,7 +768,7 @@ void SequenceTrack::CommandProc(uint32_t cmd, int32_t arg1, int32_t arg2)
         break;
 
     case 0xb0:
-        player_.timebase_ = a8;
+        player_->timebase_ = a8;
         break;
 
     case 0xb1:
@@ -815,7 +814,7 @@ void SequenceTrack::CommandProc(uint32_t cmd, int32_t arg1, int32_t arg2)
         break;
 
     case 0xc2:
-        player_.main_volume_ = a8;
+        player_->main_volume_ = a8;
         break;
 
     case 0xc3:
@@ -943,7 +942,7 @@ void SequenceTrack::CommandProc(uint32_t cmd, int32_t arg1, int32_t arg2)
         break;
 
     case 0xe1:
-        player_.tempo_ = static_cast<uint16_t>(std::clamp(arg1, 0, 0x3ff));
+        player_->tempo_ = static_cast<uint16_t>(std::clamp(arg1, 0, 0x3ff));
         break;
 
     case 0xe3:
@@ -969,9 +968,9 @@ void SequenceTrack::CommandProc(uint32_t cmd, int32_t arg1, int32_t arg2)
             }
 
             uint8_t count = e.loop_count;
-            if (count == 0 && index_ == 0 && player_.on_loop_)
+            if (count == 0 && index_ == 0 && player_->on_loop_)
             {
-                player_.on_loop_(); // infinite loop in the main track
+                player_->on_loop_(); // infinite loop in the main track
             }
 
             if (count != 0)
@@ -1087,9 +1086,9 @@ void SequenceTrack::NoteOn(int key, int velocity, int32_t length, bool tie)
         info.velocity = vel;
         info.length = tie ? -1 : length;
         info.init_pan = init_pan_;
-        info.priority = player_.channel_priority_ + priority_;
+        info.priority = player_->channel_priority_ + priority_;
         info.callback = MakeCallback();
-        ch = player_.GetEngine().NoteOn(player_.GetBank(bank_index_), info);
+        ch = player_->GetEngine().NoteOn(player_->GetBank(bank_index_), info);
         if (!ch)
         {
             return;
@@ -1156,9 +1155,9 @@ void SequenceTrack::NoteOn(int key, int velocity, int32_t length, bool tie)
 
     porta_key_ = static_cast<uint8_t>(key);
 
-    ch->release_priority_fix_ = player_.release_priority_fix_;
-    ch->pan_mode_ = player_.pan_mode_;
-    ch->pan_curve_ = player_.pan_curve_;
+    ch->release_priority_fix_ = player_->release_priority_fix_;
+    ch->pan_mode_ = player_->pan_mode_;
+    ch->pan_curve_ = player_->pan_curve_;
     if (ch->voice_)
     {
         ch->voice_->SetFrontBypass(front_bypass_);
@@ -1174,10 +1173,10 @@ void SequenceTrack::UpdateChannelParam()
     }
 
     const uint32_t v = vol_.Get();
-    const uint32_t level = v * static_cast<uint32_t>(volume2_ * player_.main_volume_);
+    const uint32_t level = v * static_cast<uint32_t>(volume2_ * player_->main_volume_);
     float lv = static_cast<float>(level) * kOneOver127Cubed;
     lv = lv * lv;
-    const float ch_volume = player_.volume_ * lv;
+    const float ch_volume = player_->volume_ * lv;
 
     const float bend_semitones =
         (static_cast<float>(bend_.Get()) * 0.0078125f) * static_cast<float>(static_cast<uint32_t>(bend_range_));
@@ -1228,7 +1227,7 @@ void SequenceTrack::UpdateChannelParam()
 // --------------------------------------------------------------------------------------------- SequenceSoundPlayer
 SequenceSoundPlayer::SequenceSoundPlayer(Engine& engine, const csar::SoundInfo& info, csar::Sequence sequence,
                                          std::array<const csar::Bank*, 4> banks)
-    : engine_(engine),
+    : engine_(&engine),
       sequence_(sequence),
       banks_(banks),
       allocate_track_flags_(info.allocate_track_flags),
@@ -1260,10 +1259,21 @@ int16_t* SequenceSoundPlayer::Variable(int index)
 
     if (index < 32)
     {
-        return &engine_.GlobalVariables()[index - 16];
+        return &engine_->GlobalVariables()[index - 16];
     }
 
     return nullptr;
+}
+
+void SequenceSoundPlayer::DetachChannels()
+{
+    for (auto& t : tracks_)
+    {
+        if (t)
+        {
+            t->DetachChannels();
+        }
+    }
 }
 
 void SequenceSoundPlayer::Start()
@@ -1272,7 +1282,7 @@ void SequenceSoundPlayer::Start()
     {
         if (allocate_track_flags_ & (1u << i))
         {
-            tracks_[i] = std::make_unique<SequenceTrack>(*this, i);
+            tracks_[i].emplace(*this, i);
         }
     }
 
@@ -1321,17 +1331,18 @@ void SequenceSoundPlayer::UpdateTick()
         bool any_open = false;
         for (int i = 0; i < 16; i++)
         {
-            SequenceTrack* t = tracks_[i].get();
-            if (!t)
+            if (!tracks_[i])
             {
                 continue;
             }
 
+            SequenceTrack* t = &*tracks_[i];
             t->UpdateChannelLength();
 
             if (t->ParseNextTick(true) < 0)
             {
                 t->Close();
+                t->DetachChannels();
                 tracks_[i].reset();
                 continue; // the freed track reads as closed
             }
@@ -1349,6 +1360,7 @@ void SequenceSoundPlayer::UpdateTick()
                 if (t)
                 {
                     t->Close();
+                    t->DetachChannels();
                     t.reset();
                 }
             }

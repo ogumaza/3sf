@@ -24,6 +24,11 @@ struct ArchivePlayer::State
     nwsnd::ArchiveModel model;
 };
 
+struct ArchivePlayer::Snapshot
+{
+    nwsnd::ArchiveModel::Snapshot model;
+};
+
 ArchivePlayer::ArchivePlayer() = default;
 ArchivePlayer::~ArchivePlayer() = default;
 
@@ -106,6 +111,24 @@ bool ArchivePlayer::RunFrame()
 bool ArchivePlayer::Busy() const
 {
     return state_ && state_->model.engine && state_->model.engine->IsBusy();
+}
+
+std::shared_ptr<ArchivePlayer::Snapshot> ArchivePlayer::Save(const Snapshot* previous)
+{
+    return std::make_shared<Snapshot>(Snapshot{state_->model.Save(previous ? &previous->model : nullptr)});
+}
+
+std::size_t ArchivePlayer::SnapshotBytes(const Snapshot& snapshot, const Snapshot* previous)
+{
+    // The model's objects are a few kilobytes in all.
+    const nwsnd::ArchiveModel::Snapshot* before = previous ? &previous->model : nullptr;
+    return snapshot.model.fcram.Bytes(before ? &before->fcram : nullptr) +
+           snapshot.model.dsp.Bytes(before ? &before->dsp : nullptr) + 16384;
+}
+
+void ArchivePlayer::Restore(const Snapshot& snapshot)
+{
+    state_->model.Restore(snapshot.model);
 }
 
 } // namespace threesf

@@ -33,8 +33,8 @@ public:
     Jit(const Jit&) = delete;
     Jit& operator=(const Jit&) = delete;
 
-    // True if this host runs the translated code: it's x86-64, the system hands out executable
-    // memory, and the TEAKRA_JIT environment variable isn't 0.
+    // True if the JIT is available: the host is x86-64, executable memory is allowed, and the
+    // TEAKRA_JIT environment variable isn't 0.
     bool Enabled() const;
 
     // Runs translated code from regs.pc for at most `limit` instructions, while there is code for
@@ -53,9 +53,9 @@ public:
     bool Stats() const;
     void Interpreted(u32 pc, u64 count, bool no_budget);
 
-    // Runs one instruction in the interpreter, for blocks, which call it for some instructions they
-    // don't translate. Exceptions can't pass through a block: it keeps them for Run's caller, and
-    // returns false, and the block stops.
+    // Runs one instruction in the interpreter for a block that doesn't translate it. Exceptions
+    // cannot unwind through generated code, so the handler saves them for Run's caller and returns
+    // false to stop the block.
     using Handler = bool (*)(void* interpreter, u16 opcode, u16 expansion);
     void SetInterpreter(void* interpreter, Handler handler);
 

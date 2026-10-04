@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <array>
 #include <functional>
+#include <type_traits>
 #include <utility>
 #include "common_types.h"
 
@@ -172,6 +173,13 @@ public:
 
     void SetInterruptHandler(std::function<void()> handler) {
         interrupt_handler = std::move(handler);
+    }
+
+    template <typename Archive>
+    void Serialize(Archive& ar) {
+        // Whole channels, so that a field added to them is saved too.
+        static_assert(std::is_trivially_copyable_v<Channel>);
+        ar(enable_channel, active_channel, budget, channels);
     }
 
 private:

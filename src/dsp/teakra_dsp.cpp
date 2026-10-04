@@ -103,7 +103,8 @@ std::vector<Segment> ReadSegments(std::span<const uint8_t> image)
     const unsigned count = image[kSegmentCountOffset];
     if (count > kMaxSegments)
     {
-        throw std::runtime_error("DSP: the firmware has " + std::to_string(count) + " segments, and 10 is the most");
+        throw std::runtime_error("DSP: the firmware has " + std::to_string(count) +
+                                 " segments; at most 10 are supported");
     }
 
     std::vector<Segment> segments;
@@ -456,6 +457,39 @@ void TeakraDsp::Run(uint64_t cycles)
 uint64_t TeakraDsp::Cycles() const
 {
     return cycles_;
+}
+
+TeakraDsp::Snapshot TeakraDsp::Save(const Snapshot* previous)
+{
+    Snapshot snapshot;
+    snapshot.teakra = teakra_->SaveState();
+    snapshot.ram = MemoryImage(teakra_->GetDspMemory(), kRamSize, previous ? &previous->ram : nullptr);
+    snapshot.cycles = cycles_;
+    snapshot.running = running_;
+    snapshot.pipe_table = pipe_table_;
+    snapshot.pipe_reply = pipe_reply_;
+    snapshot.pipe_semaphore = pipe_semaphore_;
+    snapshot.deferred_notification = deferred_notification_;
+
+    return snapshot;
+}
+
+void TeakraDsp::Restore(const Snapshot& snapshot)
+{
+    if (snapshot.ram.Size() != kRamSize)
+    {
+        throw std::invalid_argument("DSP: a snapshot without DSP RAM");
+    }
+
+    // Teakra checks the code it has translated against the restored program memory.
+    teakra_->LoadState(snapshot.teakra);
+    snapshot.ram.Restore(teakra_->GetDspMemory());
+    cycles_ = snapshot.cycles;
+    running_ = snapshot.running;
+    pipe_table_ = snapshot.pipe_table;
+    pipe_reply_ = snapshot.pipe_reply;
+    pipe_semaphore_ = snapshot.pipe_semaphore;
+    deferred_notification_ = snapshot.deferred_notification;
 }
 
 // Runs the DSP in slices, as the ARM11 side does while it waits for the DSP, until `done` returns true. Throws once it

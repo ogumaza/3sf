@@ -78,7 +78,7 @@ u32  size of the payload in bytes (excluding padding)
 |---|---|---|
 | `MEM ` | `u32 address`, then data | Load the data into the emulated address space at `address`. Pages that a `MEM` chunk touches are mapped read/write and zero-filled first. |
 | `FILE` | `u16 path length`, the UTF-8 path (no leading `/`, `/` separators), zeros to a multiple of 4, then the file data | A file in the game's RomFS, as seen through `rom:/` (for example `sound/xy_sound.bcsar`). |
-| `SND ` | `u32 sound id` | Archive mode: the sound to play, as a `nw::snd` item id (`0x01000000 \| index` in the archive's sound table). The last one in loading order counts. |
+| `SND ` | `u32 sound id` | Archive mode: the sound to play, as a `nw::snd` item id (`0x01000000 \| index` in the archive's sound table). The last one in loading order takes effect. |
 
 Unknown chunk types are skipped. Chunks are applied in order. For the same address or path, later
 data replaces earlier data.
@@ -207,7 +207,7 @@ the game's code:
   needs another; `nn::snd` drops DSP voices by its own priorities when a stereo voice needs more
   of its 24 than are free. The random number generator (x = x × 0x19660D + 0x3C6EF35F, from
   0x12345678) steps once a frame, after the channels' updates, and takes 17 steps before the
-  sound's first frame: where game mode's has got to by the time the sound's sequence first runs.
+  sound's first frame, matching its state when the sequence first runs in game mode.
 
 3SF's implementation (`src/nwsnd`, `src/nnsnd`) was written from a study of Pokemon X's
 `code.bin` (NintendoWare for CTR as linked into that game). Other games may use other versions of the
@@ -239,9 +239,9 @@ parameter block is at **0x0E000010**:
 0x20  ...  game profile: addresses of the game's functions and data (see driver.c)
 ```
 
-A `.mini3sf` patches only the sound id (a 4-byte `MEM` chunk at 0x0E00001C). A version 1 player
-refuses a set whose driver block, as its `MEM` chunks leave it, has the magic but a version other
-than 1 or an output mode other than 1 (stereo).
+A `.mini3sf` patches only the sound id (a 4-byte `MEM` chunk at 0x0E00001C). After applying all
+`MEM` chunks, a version 1 player checks the driver block. If the block has the expected magic,
+the player rejects versions other than 1 and output modes other than 1 (stereo).
 
 Version 1's game profile is for games whose sound code is Game Freak's `gfl::snd` on top of
 `nw::snd`, such as Pokemon X: the driver calls gfl's functions to load and play a sound. A game

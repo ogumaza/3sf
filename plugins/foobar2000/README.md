@@ -23,8 +23,11 @@ covers the player core. Both clang-cl and MSVC builds play in foobar2000 on Wind
   for the default length and fade and stop early when the sound ends by itself.
 - Advanced preferences › Decoding › 3SF decoder: default length and fade, and endless playback.
   Endless playback applies to playback only, never to conversion or scanning.
-- Seeking works, but it runs the emulation up to the target point, so it takes as long as
-  rendering everything up to there. Seeking backwards restarts from the beginning.
+- Seeking within the part of a track already played is quick. The component saves the emulation
+  state every 2 seconds during playback. Seeking restores the nearest earlier state and renders
+  from there. Seeking further ahead requires rendering up to the target. At most 128 states are
+  kept, with longer intervals between them as the track continues. Conversion and scanning do
+  not save states.
 - Output is 16-bit stereo at 32728 Hz, the DSP's native rate, and isn't resampled.
 
 ## Building
@@ -36,10 +39,10 @@ workflow). GitHub lists a manual workflow only once it's on the default branch (
 GitHub Actions enabled for the repository. The workflow downloads the SDK version specified in
 `.github/actions/foobar2000-sdk/action.yml` from foobar2000.org. CI uses the same version.
 
-**On Windows:** you need Visual Studio 2022 or later with the C++ workload and its "C++ Clang
-tools for Windows" component, which adds clang-cl, CMake 3.20 or later, and the foobar2000 SDK
-from <https://www.foobar2000.org/SDK> unpacked somewhere (the folder that contains `pfc` and
-`foobar2000`). CI builds with the version that `.github/actions/foobar2000-sdk/action.yml` names,
+**On Windows:** you need Visual Studio 2022 or later with the C++ workload and the "C++ Clang
+tools for Windows" component, plus CMake 3.20 or later. Download and unpack the foobar2000 SDK
+from <https://www.foobar2000.org/SDK>. Use the folder containing `pfc` and `foobar2000` as the
+SDK path below. CI builds with the version that `.github/actions/foobar2000-sdk/action.yml` names,
 and a newer one may need changes to `plugins/foobar2000/CMakeLists.txt`.
 
 ```

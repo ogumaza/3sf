@@ -41,6 +41,12 @@ public:
         interrupt_handler = std::move(handler);
     }
 
+    template <typename Archive>
+    void Serialize(Archive& ar) {
+        ar(update_mmio, pause, count_mode, scale, start_high, start_low, counter, counter_high,
+           counter_low);
+    }
+
 private:
     std::function<void()> interrupt_handler;
 

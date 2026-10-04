@@ -67,6 +67,12 @@ public:
         return vector_low[irq] | ((u32)vector_high[irq] << 16);
     }
 
+    template <typename Archive>
+    void Serialize(Archive& ar) {
+        std::lock_guard lock(mutex);
+        ar(request, enabled, vectored_enabled, vector_low, vector_high, vector_context_switch);
+    }
+
     void SetInterruptHandler(std::function<void(u32)> interrupt,
                              std::function<void(u32, bool)> vectored_interrupt) {
         on_interrupt = std::move(interrupt);

@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <span>
 
 #include "csar/formats.h"
@@ -70,7 +71,10 @@ class SequenceTrack
 {
 public:
     SequenceTrack(SequenceSoundPlayer& player, int index);
-    ~SequenceTrack();
+
+    // Clears callbacks of channels still pointing at this track before it is destroyed. This cannot be done in the
+    // destructor: snapshots hold copies of tracks, and destroying those copies must not affect the channels.
+    void DetachChannels();
 
     void SetSeqData(std::span<const uint8_t> data, uint32_t offset); // 0x186d80
     void Open();                                                     // 0x186d90
@@ -122,7 +126,7 @@ private:
         return index < 16 ? &vars_[index] : nullptr;
     }
 
-    SequenceSoundPlayer& player_;
+    SequenceSoundPlayer* player_; // a pointer, so that the track can be copied into a snapshot
     int index_;
     bool open_ = false;             // +0x05
     std::span<const uint8_t> data_; // TP+0x00 base
@@ -189,12 +193,15 @@ public:
     // Loop detection for rendering: called by track 0 when it jumps backwards.
     std::function<void()> on_loop_;
 
+    // Detaches every track's channels (see SequenceTrack::DetachChannels), before the player goes away.
+    void DetachChannels();
+
 private:
     friend class SequenceTrack;
 
     Engine& GetEngine()
     {
-        return engine_;
+        return *engine_;
     }
 
     const csar::Bank* GetBank(int i) const
@@ -204,18 +211,20 @@ private:
 
     SequenceTrack* GetTrack(int i) // 0x180b6c
     {
-        return i >= 0 && i < 16 ? tracks_[i].get() : nullptr;
+        return i >= 0 && i < 16 && tracks_[i] ? &*tracks_[i] : nullptr;
     }
 
     int16_t* Variable(int index); // 0x3201ec
     void UpdateTick();            // 0x31ff50
 
-    Engine& engine_;
+    // A pointer, and tracks kept in place, so that a snapshot can hold a copy of the player and copy it back without
+    // moving the tracks, which channels' callbacks point at.
+    Engine* engine_;
     csar::Sequence sequence_;
     std::array<const csar::Bank*, 4> banks_;
     uint32_t allocate_track_flags_;
     uint32_t start_offset_;
-    std::array<std::unique_ptr<SequenceTrack>, 16> tracks_;
+    std::array<std::optional<SequenceTrack>, 16> tracks_;
     std::array<int16_t, 16> local_vars_{}; // +0xcc
     float tick_fraction_ = 0.0f;           // +0x68
     bool started_ = false;                 // +0x0d

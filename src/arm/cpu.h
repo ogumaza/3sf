@@ -16,6 +16,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "common/bytes.h"
 
@@ -143,6 +144,28 @@ public:
     uint32_t fault_address_ = 0;
     bool fault_write_ = false;
 
+    // Snapshot of the mapping: runs of pages mapped to consecutive host memory. The kernel and system own the host
+    // memory and keep its addresses stable. The snapshot can only be restored to this address space.
+    struct Snapshot
+    {
+        struct Run
+        {
+            uint32_t first_page;
+            uint32_t pages;
+            uint8_t* host;
+        };
+
+        std::shared_ptr<const std::vector<Run>> runs; // shared with the previous snapshot while the mapping is the same
+        uint64_t generation = 0;
+        bool fault = false;
+        uint32_t fault_address = 0;
+        bool fault_write = false;
+    };
+
+    // Takes a snapshot, reusing `previous`'s runs if nothing has been mapped or unmapped since.
+    Snapshot Save(const Snapshot* previous) const;
+    void Restore(const Snapshot& snapshot);
+
 private:
     // A write to a watched page (see WatchWrites) or an unmapped one.
     void WriteSlow8(uint32_t a, uint8_t v);
@@ -172,6 +195,10 @@ private:
     const uint8_t* watch_start_ = nullptr;
     const uint8_t* watch_end_ = nullptr;
     std::function<void()> on_watched_write_;
+
+    // Mapping generation. Map and Unmap assign a new number, so snapshots with the same number share the same mapping.
+    uint64_t generation_ = 0;
+    uint64_t next_generation_ = 1;
 };
 
 // Register state of one thread.
@@ -219,6 +246,34 @@ public:
     }
 
     std::string Describe() const;
+
+    // The CPU's state between runs, for a snapshot.
+    struct Snapshot
+    {
+        CpuState state;
+        uint32_t svc_number = 0;
+        uint32_t stop_pc = 0;
+        uint32_t stop_opcode = 0;
+        uint64_t executed = 0;
+        bool exclusive_valid = false;
+        uint32_t exclusive_addr = 0;
+    };
+
+    Snapshot Save() const
+    {
+        return {state_, svc_number_, stop_pc_, stop_opcode_, executed_, exclusive_valid_, exclusive_addr_};
+    }
+
+    void Restore(const Snapshot& snapshot)
+    {
+        state_ = snapshot.state;
+        svc_number_ = snapshot.svc_number;
+        stop_pc_ = snapshot.stop_pc;
+        stop_opcode_ = snapshot.stop_opcode;
+        executed_ = snapshot.executed;
+        exclusive_valid_ = snapshot.exclusive_valid;
+        exclusive_addr_ = snapshot.exclusive_addr;
+    }
 
     CpuState state_;
     uint32_t svc_number_ = 0;

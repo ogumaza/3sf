@@ -1,5 +1,8 @@
 #include <array>
+#include <cstdint>
 #include <cstring>
+#include <stdexcept>
+#include <vector>
 #include "ahbm.h"
 #include "apbp.h"
 #include "btdmp.h"
@@ -11,6 +14,7 @@
 #include "processor.h"
 #include "register.h"
 #include "shared_memory.h"
+#include "state.h"
 #include "teakra/teakra.h"
 #include "timer.h"
 
@@ -50,6 +54,25 @@ struct Teakra::Impl {
         dma.SetInterruptHandler([this]() { icu.TriggerSingle(0xF); });
     }
 
+    template <typename Archive>
+    void Serialize(Archive& ar) {
+        core_timing.Serialize(ar);
+        miu.Serialize(ar);
+        icu.Serialize(ar);
+        apbp_from_cpu.Serialize(ar);
+        apbp_from_dsp.Serialize(ar);
+        for (Timer& t : timer) {
+            t.Serialize(ar);
+        }
+        ahbm.Serialize(ar);
+        dma.Serialize(ar);
+        for (Btdmp& b : btdmp) {
+            b.Serialize(ar);
+        }
+        mmio.Serialize(ar);
+        processor.Serialize(ar);
+    }
+
     void Reset() {
         std::memset(shared_memory.raw, 0, DspMemorySize);
         miu.Reset();
@@ -82,6 +105,36 @@ const uint8_t* Teakra::GetDspMemory() const {
 }
 
 void Teakra::NotifyProgramWrite() {
+    ++impl->shared_memory.program_writes;
+}
+
+// A saved state starts with these two words. The version changes with the layout.
+static constexpr std::uint32_t StateMagic = 0x5453414B;
+static constexpr std::uint32_t StateVersion = 1;
+
+std::vector<std::uint8_t> Teakra::SaveState() {
+    std::vector<std::uint8_t> state;
+    StateWriter ar(state);
+    std::uint32_t magic = StateMagic, version = StateVersion;
+    ar(magic, version);
+    impl->Serialize(ar);
+    return state;
+}
+
+void Teakra::LoadState(const std::vector<std::uint8_t>& state) {
+    StateReader ar(state.data(), state.size());
+    std::uint32_t magic = 0, version = 0;
+    ar(magic, version);
+    if (magic != StateMagic || version != StateVersion) {
+        throw std::invalid_argument("Teakra: not a saved state from this version");
+    }
+
+    impl->Serialize(ar);
+    if (!ar.AtEnd()) {
+        throw std::invalid_argument("Teakra: the saved state is longer than expected");
+    }
+
+    // The memory comes back from the host, so translated code is checked against it again.
     ++impl->shared_memory.program_writes;
 }
 

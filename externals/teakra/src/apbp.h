@@ -5,6 +5,9 @@
 #include "common_types.h"
 
 namespace Teakra {
+class StateReader;
+class StateWriter;
+
 class Apbp {
 public:
     Apbp();
@@ -28,6 +31,10 @@ public:
     void SetSemaphoreHandler(std::function<void()> handler);
 
     bool IsSemaphoreSignaled() const;
+
+    // Saves or loads the data channels and the semaphore (see state.h).
+    void Serialize(StateWriter& ar);
+    void Serialize(StateReader& ar);
 
 private:
     class Impl;

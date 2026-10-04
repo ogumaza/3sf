@@ -80,6 +80,12 @@ public:
         interrupt_handler = std::move(handler);
     }
 
+    template <typename Archive>
+    void Serialize(Archive& ar) {
+        ar(transmit_clock_config, transmit_period, transmit_timer, transmit_enable, transmit_empty,
+           transmit_full, transmit_queue);
+    }
+
 private:
     // TODO: figure out the relation between clock_config and period.
     // Default to period = 4096 for now which every game uses
