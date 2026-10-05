@@ -21,13 +21,18 @@ covers the player core. Both clang-cl and MSVC builds play in foobar2000 on Wind
   `_lib`, `length`, `fade` and `volume` are kept.
 - Length and fade come from the `length` and `fade` tags. Files without a length tag play
   for the default length and fade and stop early when the sound ends by itself.
-- Advanced preferences › Decoding › 3SF decoder: default length and fade, and endless playback.
-  Endless playback applies to playback only, never to conversion or scanning.
-- Seeking within the part of a track already played is quick. The component saves the emulation
-  state every 2 seconds during playback. Seeking restores the nearest earlier state and renders
-  from there. Seeking further ahead requires rendering up to the target. At most 128 states are
-  kept, with longer intervals between them as the track continues. Conversion and scanning do
-  not save states.
+- Advanced preferences › Decoding › 3SF decoder: default length and fade, endless playback, and
+  rendering ahead. Endless playback and rendering ahead apply to playback only, never to
+  conversion or scanning.
+- During playback, the component renders ahead on a separate thread, as fast as the CPU allows,
+  and buffers up to 10 minutes and 10 seconds of audio (about 76 MiB), enough for the longest
+  track `3sfrip`'s length analysis produces. Seeking within the buffer is instant. Seeking further
+  ahead waits for rendering to reach the requested position. Rendering ahead keeps one CPU core
+  busy until it reaches the end of the track or the buffer limit. Longer tracks also save the
+  emulation state every 2 seconds. Seeking back before the buffered audio restores the latest
+  state before the target and renders from there. At most 128 states are kept, with longer
+  intervals between them as the track continues. With rendering ahead turned off, every track
+  saves states, and seeking past what has played renders up to the target.
 - Output is 16-bit stereo at 32728 Hz, the DSP's native rate, and isn't resampled.
 
 ## Building

@@ -289,103 +289,6 @@ public:
         kError
     };
 
-    explicit Kernel(const KernelConfig& config);
-    ~Kernel();
-
-    arm::Memory& Memory()
-    {
-        return mem_;
-    }
-
-    // Maps a zero-initialised region of host memory owned by the kernel.
-    uint8_t* MapRegion(uint32_t vaddr, uint32_t size);
-
-    // Maps caller-owned host memory (e.g. DSP RAM).
-    void MapExternal(uint32_t vaddr, uint8_t* host, uint32_t size);
-
-    // FCRAM backing for the linear heap (physical 0x20000000). Must be set before starting.
-    void SetFcram(uint8_t* base, uint32_t size);
-
-    // Creates the main thread (priority from the exheader) at `entry` with the given stack.
-    void CreateMainThread(uint32_t entry, uint32_t stack_top, int32_t priority);
-
-    // Runs until the given time (in ARM cycles), process exit or an error.
-    RunResult RunUntil(uint64_t until);
-
-    uint64_t Ticks() const
-    {
-        return ticks_;
-    }
-
-    void SignalEvent(Event& event);
-    Handle AddHandle(std::shared_ptr<Object> object);
-
-    // Makes a kernel object, or a service, and keeps track of it for snapshots. Every object and service is made this
-    // way.
-    template <typename T>
-    std::shared_ptr<T> Make()
-    {
-        auto object = std::make_shared<T>();
-        objects_.push_back(object);
-        return object;
-    }
-
-    template <typename T, typename... Args>
-    std::shared_ptr<T> MakeService(Args&&... args)
-    {
-        auto service = std::make_shared<T>(std::forward<Args>(args)...);
-        services_made_.push_back(service);
-        return service;
-    }
-
-    template <typename T>
-    std::shared_ptr<T> Get(Handle handle)
-    {
-        return std::dynamic_pointer_cast<T>(GetObject(handle));
-    }
-
-    void RegisterService(const std::string& name, std::shared_ptr<Service> service);
-    void RegisterPort(const std::string& name, std::shared_ptr<Service> service);
-    std::shared_ptr<Service> FindService(const std::string& name);
-
-    // Creates a client session handle to a service (for srv:GetServiceHandle).
-    Handle CreateSessionHandle(std::shared_ptr<Service> service);
-
-    Thread* CurrentThread()
-    {
-        return current_;
-    }
-
-    // Guest memory helpers
-    uint32_t Read32(uint32_t a)
-    {
-        return mem_.Read32(a);
-    }
-
-    void Write32(uint32_t a, uint32_t v)
-    {
-        mem_.Write32(a, v);
-    }
-
-    // Formats a message and hands it to log_, or prints it to stderr when there's no log_.
-    void Log(const char* fmt, ...) const;
-
-    // Adds CPU time that passes outside the interpreter, such as the time an HLE service spends waiting for the DSP.
-    void AddTicks(uint64_t cycles)
-    {
-        pending_cycles_ += cycles;
-    }
-
-    // Called whenever emulated time advances, with the new time. The System runs the DSP up to it.
-    std::function<void(uint64_t to_ticks)> device_step_;
-
-    // The error that made RunUntil return kError.
-    std::string error_;
-
-    // Receives the messages of Log: debug output from svcOutputDebugString and svcBreak, and warnings about requests
-    // the services don't emulate.
-    std::function<void(const std::string&)> log_;
-
     // Host memory the kernel maps: what MapRegion mapped, and memory blocks' own storage. A region stays where it is
     // while the kernel or a snapshot holds it.
     struct Region
@@ -427,14 +330,110 @@ public:
         uint32_t linear_size = 0;
         arm::Memory::Snapshot memory;
         arm::Cpu::Snapshot cpu;
-
-        // Approximate memory use, excluding pages shared with `previous`. Each object counts as a few hundred bytes.
-        std::size_t Bytes(const Snapshot* previous) const;
     };
+
+    explicit Kernel(const KernelConfig& config);
+    ~Kernel();
+
+    arm::Memory& Memory()
+    {
+        return mem_;
+    }
+
+    // Maps a zero-initialised region of host memory owned by the kernel.
+    uint8_t* MapRegion(uint32_t vaddr, uint32_t size);
+
+    // Maps caller-owned host memory (e.g. DSP RAM).
+    void MapExternal(uint32_t vaddr, uint8_t* host, uint32_t size);
+
+    // FCRAM backing for the linear heap (physical 0x20000000). Must be set before starting.
+    void SetFcram(uint8_t* base, uint32_t size);
+
+    // Creates the main thread (priority from the exheader) at `entry` with the given stack.
+    void CreateMainThread(uint32_t entry, uint32_t stack_top, int32_t priority);
+
+    // Runs until the given time (in ARM cycles), process exit or an error.
+    RunResult RunUntil(uint64_t until);
+
+    uint64_t Ticks() const
+    {
+        return ticks_;
+    }
+
+    void SignalEvent(Event& event);
+    Handle AddHandle(std::shared_ptr<Object> object);
+
+    // Makes a kernel object, or a service, and keeps track of it for snapshots. Every object and service is made this
+    // way.
+    template <typename T>
+    std::shared_ptr<T> Make()
+    {
+        auto object = std::make_shared<T>();
+        objects_.push_back(object);
+
+        return object;
+    }
+
+    template <typename T, typename... Args>
+    std::shared_ptr<T> MakeService(Args&&... args)
+    {
+        auto service = std::make_shared<T>(std::forward<Args>(args)...);
+        services_made_.push_back(service);
+
+        return service;
+    }
+
+    template <typename T>
+    std::shared_ptr<T> Get(Handle handle)
+    {
+        return std::dynamic_pointer_cast<T>(GetObject(handle));
+    }
+
+    void RegisterService(const std::string& name, std::shared_ptr<Service> service);
+    void RegisterPort(const std::string& name, std::shared_ptr<Service> service);
+    std::shared_ptr<Service> FindService(const std::string& name);
+
+    // Creates a client session handle to a service (for srv:GetServiceHandle).
+    Handle CreateSessionHandle(std::shared_ptr<Service> service);
+
+    Thread* CurrentThread()
+    {
+        return current_;
+    }
+
+    // Guest memory helpers
+    uint32_t Read32(uint32_t a)
+    {
+        return mem_.Read32(a);
+    }
+
+    void Write32(uint32_t a, uint32_t v)
+    {
+        mem_.Write32(a, v);
+    }
+
+    // Formats a message and hands it to log_, or prints it to stderr when there's no log_.
+    void Log(const char* fmt, ...) const;
+
+    // Adds CPU time that passes outside the interpreter, such as the time an HLE service spends waiting for the DSP.
+    void AddTicks(uint64_t cycles)
+    {
+        pending_cycles_ += cycles;
+    }
 
     // Takes a snapshot between runs, sharing the memory pages that haven't changed since `previous`.
     std::shared_ptr<Snapshot> Save(const Snapshot* previous);
     void Restore(const Snapshot& snapshot);
+
+    // Called whenever emulated time advances, with the new time. The System runs the DSP up to it.
+    std::function<void(uint64_t to_ticks)> device_step_;
+
+    // The error that made RunUntil return kError.
+    std::string error_;
+
+    // Receives the messages of Log: debug output from svcOutputDebugString and svcBreak, and warnings about requests
+    // the services don't emulate.
+    std::function<void(const std::string&)> log_;
 
 private:
     // Makes a region of `size` zeroed bytes.

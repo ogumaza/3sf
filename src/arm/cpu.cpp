@@ -46,6 +46,7 @@ Memory::Snapshot Memory::Save(const Snapshot* previous) const
     snapshot.fault = fault_;
     snapshot.fault_address = fault_address_;
     snapshot.fault_write = fault_write_;
+
     if (previous && previous->generation == generation_)
     {
         snapshot.runs = previous->runs;
@@ -61,7 +62,7 @@ Memory::Snapshot Memory::Save(const Snapshot* previous) const
             continue;
         }
 
-        // Runs stay below 2 GiB, so that Restore can map each with a 32-bit size.
+        // Runs are at most 2 GiB, so that Restore can map each with a 32-bit size.
         if (!runs->empty())
         {
             Snapshot::Run& last = runs->back();
@@ -87,6 +88,7 @@ void Memory::Restore(const Snapshot& snapshot)
     fault_ = snapshot.fault;
     fault_address_ = snapshot.fault_address;
     fault_write_ = snapshot.fault_write;
+
     if (snapshot.generation == generation_)
     {
         return;

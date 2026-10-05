@@ -283,6 +283,7 @@ Bank Bank::Parse(std::span<const uint8_t> file)
     Reader r(file);
     auto blocks = BlockTable(r, "CBNK");
     const uint32_t info_off = blocks.at(0x5800).first;
+
     const std::size_t b = info_off + 8;
     std::size_t wave_table = 0, inst_table = 0;
     for (int i = 0; i < 2; i++)
@@ -523,7 +524,6 @@ SoundArchive SoundArchive::Load(std::vector<uint8_t> bytes)
                     s.channel_priority = static_cast<uint8_t>(*so.values[1]);
                     s.release_priority_fix = ((*so.values[1] >> 8) & 0xff) != 0;
                 }
-
                 break;
             }
 
@@ -596,6 +596,7 @@ SoundArchive SoundArchive::Load(std::vector<uint8_t> bytes)
         const auto group_blocks = BlockTable(g, "CGRP");
         const uint32_t items = group_blocks.at(0x7800).first + 8;
         const uint32_t data = group_blocks.at(0x7801).first + 8;
+
         const uint32_t n = g.U32(items);
         for (uint32_t i = 0; i < n; i++)
         {

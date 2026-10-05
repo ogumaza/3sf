@@ -38,7 +38,7 @@ static uint64_t CommittedMemory(uint32_t size, const ProcessImage::Segment& extr
     constexpr uint32_t kNames = 0x100108;  // the resources asked for: 1, commit
 
     std::vector<uint8_t> program = Words({
-        0xe59f001c, // ldr r0, =0xffff8001 (the current process)
+        0xe59f101c, // ldr r1, =0xffff8001 (the current process)
         0xef000038, // svc 0x38: GetResourceLimit, which leaves the handle in r1
         0xe59f000c, // ldr r0, =kValues
         0xe59f200c, // ldr r2, =kNames

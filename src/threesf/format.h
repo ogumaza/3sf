@@ -11,6 +11,7 @@
 #include <map>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace threesf
@@ -190,9 +191,11 @@ struct LoadedSet
 using FileReader = std::function<bool(const std::string& path, std::vector<uint8_t>& data)>;
 
 // Loads a 3SF/mini3SF file with its _lib/_libN chain. Paths in _lib tags are relative to the directory of the file that
-// names them. Returns an error for a set a version 1 player can't play: a descriptor that fails its Check(), or a
-// game-mode set whose driver block has another version or an output mode other than stereo.
-std::optional<std::string> LoadSet(const std::string& path, const FileReader& reader, LoadedSet& out);
+// names them: its path up to the last of `separators`. Returns an error for a set a version 1 player can't play: a
+// descriptor that fails its Check(), or a game-mode set whose driver block has another version or an output mode other
+// than stereo.
+std::optional<std::string> LoadSet(const std::string& path, const FileReader& reader, LoadedSet& out,
+                                   std::string_view separators = "/\\");
 
 // Reads a whole file from disk.
 bool ReadWholeFile(const std::string& path, std::vector<uint8_t>& data);

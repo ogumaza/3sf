@@ -49,6 +49,10 @@ const Teakra::RegisterState& Processor::GetRegisterState() const {
     return impl->regs;
 }
 
+u64 Processor::JitInstructions() const {
+    return impl->interpreter.JitInstructions();
+}
+
 void Processor::Serialize(StateWriter& ar) {
     impl->Serialize(ar);
 }

@@ -124,6 +124,15 @@ private:
 class VoiceManager
 {
 public:
+    // Active voices and copies of their values. Keeps the voices alive so pointers elsewhere in the snapshot remain
+    // valid.
+    struct Snapshot
+    {
+        std::list<std::shared_ptr<Voice>> pool;
+        std::vector<Voice> values; // of the voices in `pool`, in its order
+        std::list<Voice*> list;
+    };
+
     // Pokemon X sets nw::snd's voice count to 23 before the sound system starts (0x1150d0 writes it to 0x5d10c0, where
     // nw::snd's default is 24), so one of the DSP's 24 voices is never used.
     static constexpr int kVoiceCount = 23;
@@ -144,15 +153,6 @@ public:
 
     // 0x174540
     void UpdateAllVoices();
-
-    // Active voices and copies of their values. Keeps the voices alive so pointers elsewhere in the snapshot remain
-    // valid.
-    struct Snapshot
-    {
-        std::list<std::shared_ptr<Voice>> pool;
-        std::vector<Voice> values; // of the voices in `pool`, in its order
-        std::list<Voice*> list;
-    };
 
     // Saves state between frames, after freed voices have been released.
     Snapshot Save() const;
@@ -261,6 +261,14 @@ struct NoteOnInfo
 class ChannelManager
 {
 public:
+    // The channels in use and their values, for a snapshot of the engine (see VoiceManager::Snapshot).
+    struct Snapshot
+    {
+        std::list<std::shared_ptr<Channel>> pool;
+        std::vector<Channel> values; // of the channels in `pool`, in its order
+        std::list<Channel*> active_list;
+    };
+
     explicit ChannelManager(Engine& engine) : engine_(engine)
     {
     }
@@ -279,14 +287,6 @@ public:
     {
         graveyard_.clear();
     }
-
-    // The channels in use and their values, for a snapshot of the engine (see VoiceManager::Snapshot).
-    struct Snapshot
-    {
-        std::list<std::shared_ptr<Channel>> pool;
-        std::vector<Channel> values; // of the channels in `pool`, in its order
-        std::list<Channel*> active_list;
-    };
 
     // Saves state between frames, after freed channels have been released.
     Snapshot Save() const;

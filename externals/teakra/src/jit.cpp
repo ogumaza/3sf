@@ -472,9 +472,6 @@ public:
             return Refuse();
         }
         const unsigned unit = b.Index();
-        if (!AddressUnitSupported(unit)) {
-            return RefuseMode();
-        }
         RegToBus16(Reg::rsi, a.GetName(), true); // before the step, which can change the register
         RnAndModify(Reg::rax, Reg::rcx, unit, bs.GetName(), false);
         CheckData(Reg::rax);
@@ -489,9 +486,6 @@ public:
             return Refuse();
         }
         const unsigned unit = a.Index();
-        if (!AddressUnitSupported(unit)) {
-            return RefuseMode();
-        }
         RnAndModify(Reg::rax, Reg::rcx, unit, as.GetName(), false);
         CheckData(Reg::rax);
         LoadData(Reg::rsi, Reg::rax);
@@ -535,7 +529,7 @@ public:
         const unsigned unit = Mode(modes.arrn[b.Index()]);
         const StepValue step = ArStep(Mode(modes.arstep[bs.Index()]));
         const OffsetValue offset = static_cast<OffsetValue>(Mode(modes.aroffset[bs.Index()]));
-        if (!AddressUnitSupported(unit) || !OffsetSupported(unit, offset, false)) {
+        if (!OffsetSupported(unit, offset, false)) {
             return RefuseMode();
         }
         GetAndSatAcc(Reg::rsi, a.GetName());
@@ -555,7 +549,7 @@ public:
         const unsigned unit = Mode(modes.arrn[a.Index()]);
         const StepValue step = ArStep(Mode(modes.arstep[as.Index()]));
         const OffsetValue offset = static_cast<OffsetValue>(Mode(modes.aroffset[as.Index()]));
-        if (!AddressUnitSupported(unit) || !OffsetSupported(unit, offset, false)) {
+        if (!OffsetSupported(unit, offset, false)) {
             return RefuseMode();
         }
         RnAndModify(Reg::rax, Reg::rcx, unit, step, false);
@@ -589,9 +583,6 @@ public:
             return Refuse();
         }
         const unsigned unit = a.Index();
-        if (!AddressUnitSupported(unit)) {
-            return RefuseMode();
-        }
         RnAndModify(Reg::rax, Reg::rcx, unit, as.GetName(), false);
         CheckData(Reg::rax);
         LoadData(Reg::rsi, Reg::rax);
@@ -603,9 +594,6 @@ public:
 
     bool tstb(Rn a, StepZIDS as, Imm4 b) {
         const unsigned unit = a.Index();
-        if (!AddressUnitSupported(unit)) {
-            return RefuseMode();
-        }
         ComputeFlags(); // it sets fz
         RnAndModify(Reg::rax, Reg::rcx, unit, as.GetName(), false);
         CheckData(Reg::rax);
@@ -737,9 +725,6 @@ public:
 
     bool movs(Rn a, StepZIDS as, Ab b) {
         const unsigned unit = a.Index();
-        if (!AddressUnitSupported(unit)) {
-            return RefuseMode();
-        }
         RnAndModify(Reg::rsi, Reg::rcx, unit, as.GetName(), false);
         CheckData(Reg::rsi);
         LoadData(Reg::rax, Reg::rsi);
@@ -768,9 +753,7 @@ public:
         const StepValue sj = ArStep(Mode(modes.arpstepj[j.Index()]));
         const OffsetValue oi = static_cast<OffsetValue>(Mode(modes.arpoffseti[i.Index()]));
         const OffsetValue oj = static_cast<OffsetValue>(Mode(modes.arpoffsetj[j.Index()]));
-        if (!AddressUnitSupported(ui) || !AddressUnitSupported(uj) ||
-            !OffsetSupported(ui, oi, dmodi) || !OffsetSupported(uj, oj, dmodj) ||
-            !ProductSumSupported(base)) {
+        if (!OffsetSupported(ui, oi, dmodi) || !OffsetSupported(uj, oj, dmodj)) {
             return RefuseMode();
         }
         // The four addresses: x and y at the two units, and the offset one after each.
@@ -803,9 +786,6 @@ public:
 
     bool mma(RegName a, bool x0_sign, bool y0_sign, bool x1_sign, bool y1_sign, SumBase base,
              bool sub_p0, bool p0_align, bool sub_p1, bool p1_align) {
-        if (!ProductSumSupported(base)) {
-            return RefuseMode();
-        }
         ProductSum(base, a, sub_p0, p0_align, sub_p1, p1_align);
         // std::swap(regs.x[0], regs.x[1])
         e.Movzx(Reg::rax, R(modes.x[0]), 16);
@@ -1102,9 +1082,6 @@ public:
     }
 
     bool app(Ab c, SumBase base, bool sub_p0, bool p0_align, bool sub_p1, bool p1_align) {
-        if (!ProductSumSupported(base)) {
-            return RefuseMode();
-        }
         ProductSum(base, c.GetName(), sub_p0, p0_align, sub_p1, p1_align);
         return true;
     }
@@ -1264,7 +1241,7 @@ public:
         const unsigned unit = Mode(modes.arrn[x.Index()]);
         const StepValue step = ArStep(Mode(modes.arstep[xs.Index()]));
         const OffsetValue offset = static_cast<OffsetValue>(Mode(modes.aroffset[xs.Index()]));
-        if (!OffsetSupported(unit, offset, false) || !ProductSumSupported(base)) {
+        if (!OffsetSupported(unit, offset, false)) {
             return RefuseMode();
         }
         RnAndModify(Reg::r8, Reg::r10, unit, step, false);
@@ -2525,11 +2502,6 @@ private:
         }
     }
 
-    static bool ProductSumSupported(SumBase base) {
-        return base == SumBase::Zero || base == SumBase::Acc || base == SumBase::Sv ||
-               base == SumBase::SvRnd;
-    }
-
     // ProductSum. Clobbers rax, rcx, rdx, rsi, rdi and r8 to r10.
     void ProductSum(SumBase base, RegName acc, bool sub_p0, bool p0_align, bool sub_p1,
                     bool p1_align) {
@@ -3122,11 +3094,6 @@ private:
 
     // ------------------------------------------------------------------ Addresses and memory
 
-    // Every address unit mode is baked in.
-    bool AddressUnitSupported(unsigned) {
-        return true;
-    }
-
     // RnAndModify: the unit register's value into `old_value` and its stepped value into
     // `new_value`, both zero-extended 16 bits. The register itself isn't written: the caller
     // stores `new_value` once the instruction can't stop. The modes are baked in. Clobbers rdx.
@@ -3607,9 +3574,23 @@ struct Jit::Impl {
                         }
                     }
                 }
-                // Another block from here that suits the modes as they are now, or a new one.
+                // Another block from here that suits the modes as they are now, or a new one. Find
+                // stopped checking blocks against program memory at this one, so the rest are
+                // checked here, and stale ones dropped as there.
                 Block* other = nullptr;
-                for (Block* b = block->next.get(); b; b = b->next.get()) {
+                const u64 current = Generation();
+                std::unique_ptr<Block>* slot = &block->next;
+                while (*slot) {
+                    Block* b = slot->get();
+                    if (b->checked != current) {
+                        ++validations;
+                        if (!SourceMatches(*b)) {
+                            *slot = std::move(b->next);
+                            continue;
+                        }
+                        b->checked = current;
+                    }
+                    slot = &b->next;
                     if (b->loop_end != loop_end || !b->code || b->length > limit - done) {
                         continue;
                     }
@@ -4138,7 +4119,6 @@ struct Jit::Impl {
     std::unordered_map<u32, std::pair<u64, u64>> per_block;
     std::unordered_map<u32, u64> bails_at;
     std::unordered_map<u64, u64> guard_failures;
-    std::unordered_map<std::string, u64> interpreted;
     std::unordered_map<u16, u64> interpreted_opcodes;
     std::unordered_map<u32, u64> interpreted_by_stop;
     std::unordered_map<std::string, u64> refused;
@@ -4172,9 +4152,6 @@ void Jit::Interpreted(u32 pc, u64 count, bool no_budget) {
         impl->stop = Impl::Stop::Budget;
     }
     const u16 opcode = SharedMemory::ReadWord(impl->mem.ProgramMemory(), pc);
-    const auto& matcher = impl->Decode(opcode);
-    // Name and operand types, the way the decoder calls the translator.
-    ++impl->interpreted[std::string(matcher.GetName()) + " " + std::to_string(opcode >> 12)];
     impl->interpreted_opcodes[opcode] += count;
     impl->interpreted_by_stop[(u32{opcode} << 8) | static_cast<u32>(impl->stop)] += count;
     impl->stops[static_cast<int>(impl->stop)] += count;
@@ -4183,6 +4160,10 @@ void Jit::Interpreted(u32 pc, u64 count, bool no_budget) {
 void Jit::SetInterpreter(void* interpreter, Handler handler) {
     impl->interpreter = interpreter;
     impl->handler = handler;
+}
+
+u64 Jit::Instructions() const {
+    return impl->run;
 }
 
 #else // !TEAKRA_JIT_X64
@@ -4206,6 +4187,9 @@ bool Jit::Stats() const {
 }
 bool Jit::StoppedForBudget() const {
     return false;
+}
+u64 Jit::Instructions() const {
+    return 0;
 }
 void Jit::Interpreted(u32, u64, bool) {}
 void Jit::SetInterpreter(void*, Handler) {}

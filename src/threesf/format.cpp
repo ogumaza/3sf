@@ -17,6 +17,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -190,10 +191,10 @@ Tags ParseTags(const char* text, std::size_t size)
 
 // The directory part of `path`, with its trailing separator. Paths only go to a FileReader, which may not use the file
 // system (foobar2000 passes its own paths), so they stay strings.
-std::string DirectoryOf(const std::string& path)
+std::string DirectoryOf(const std::string& path, std::string_view separators)
 {
-    const std::size_t slash = path.find_last_of("/\\");
-    return slash == std::string::npos ? std::string() : path.substr(0, slash + 1);
+    const std::size_t separator = path.find_last_of(separators);
+    return separator == std::string::npos ? std::string() : path.substr(0, separator + 1);
 }
 
 } // namespace
@@ -681,8 +682,8 @@ bool ReadWholeFile(const std::string& path, std::vector<uint8_t>& data)
 namespace
 {
 
-std::optional<std::string> LoadRecursive(const std::string& path, const FileReader& reader, LoadedSet& out, int depth,
-                                         bool top)
+std::optional<std::string> LoadRecursive(const std::string& path, const FileReader& reader, std::string_view separators,
+                                         LoadedSet& out, int depth, bool top)
 {
     if (depth > kMaxLibDepth)
     {
@@ -713,11 +714,11 @@ std::optional<std::string> LoadRecursive(const std::string& path, const FileRead
         return path + ": not a 3SF file (PSF version 0x" + version + ")";
     }
 
-    const std::string dir = DirectoryOf(path);
+    const std::string dir = DirectoryOf(path, separators);
     auto lib = psf.tags.find("_lib");
     if (lib != psf.tags.end() && !lib->second.empty())
     {
-        if (auto err = LoadRecursive(dir + lib->second, reader, out, depth + 1, false))
+        if (auto err = LoadRecursive(dir + lib->second, reader, separators, out, depth + 1, false))
         {
             return err;
         }
@@ -782,7 +783,7 @@ std::optional<std::string> LoadRecursive(const std::string& path, const FileRead
             continue;
         }
 
-        if (auto err = LoadRecursive(dir + it->second, reader, out, depth + 1, false))
+        if (auto err = LoadRecursive(dir + it->second, reader, separators, out, depth + 1, false))
         {
             return err;
         }
@@ -798,11 +799,12 @@ std::optional<std::string> LoadRecursive(const std::string& path, const FileRead
 
 } // namespace
 
-std::optional<std::string> LoadSet(const std::string& path, const FileReader& reader, LoadedSet& out)
+std::optional<std::string> LoadSet(const std::string& path, const FileReader& reader, LoadedSet& out,
+                                   std::string_view separators)
 {
     out = LoadedSet{};
 
-    if (auto err = LoadRecursive(path, reader, out, 0, true))
+    if (auto err = LoadRecursive(path, reader, separators, out, 0, true))
     {
         return err;
     }

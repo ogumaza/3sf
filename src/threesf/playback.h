@@ -88,7 +88,14 @@ public:
     // Polls `abort` between blocks and returns false if it requests cancellation.
     bool Seek(uint64_t frame, const std::function<bool()>& abort = {});
 
-    // The snapshots kept, for tests.
+    // Returns the frame a seek to `frame` starts rendering from: the position of the snapshot it restores, the current
+    // position if that's nearer, or 0 if the emulation must restart.
+    uint64_t SeekStart(uint64_t frame) const;
+
+    // Enables or disables snapshots. Disabling them discards existing snapshots.
+    void SetSnapshots(bool on);
+
+    // Number of retained snapshots, for tests.
     std::size_t SnapshotCount() const
     {
         return saved_.size();
@@ -148,7 +155,16 @@ private:
         std::shared_ptr<const Player::Snapshot> snapshot;
     };
 
+    // How a seek to `frame` gets there: restore `from` if it's set; otherwise restart if `restart` is set, or render on
+    // from the current position.
+    struct Route
+    {
+        const SavedState* from = nullptr;
+        bool restart = false;
+    };
+
     void ComputeLength();
+    Route RouteTo(uint64_t frame) const;
 
     // Takes a snapshot if none has been taken yet in this stretch of interval_ frames.
     void SaveIfDue();
@@ -165,7 +181,7 @@ private:
     // Declared after player_ so snapshots release their references to the player's objects before the player is
     // destroyed.
     std::vector<SavedState> saved_; // in order of position, at most one in each stretch of interval_ frames
-    // The last one taken or restored, which the next shares pages with. It may be one that has gone from saved_.
+    // Last snapshot taken or restored. The next snapshot shares pages with it, even if it is no longer in saved_.
     std::shared_ptr<const Player::Snapshot> latest_;
     uint64_t interval_ = 0;
 };

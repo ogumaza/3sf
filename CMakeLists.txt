@@ -3,7 +3,7 @@
 cmake_minimum_required(VERSION 3.20)
 # Shared version for 3sfrip, 3sfplay, the foobar2000 component, Windows file properties and macOS bundles
 # (threesf_add_version below). For a release, update it here and add notes in docs/release-notes/.
-project(threesf VERSION 1.0.0 LANGUAGES CXX)
+project(threesf VERSION 1.1.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -69,11 +69,7 @@ else()
     add_compile_options(-fmacro-prefix-map=${CMAKE_SOURCE_DIR}/= -fmacro-prefix-map=${CMAKE_BINARY_DIR}/=)
 endif()
 
-# Teakra (MIT): the Teak DSP emulator. externals/teakra is upstream commit 3d697a1 with 3SF's changes, which speed
-# Teakra up without changing the samples, keep the DSP firmware (which comes with each rip) from reaching outside the
-# DSP's memory, drop audio-port underrun slots instead of outputting zeros, wake the idle DSP for an interrupt
-# signalled on the tick it went idle (upstream Teakra leaves it waiting until the end of the run), make assertions
-# throw instead of aborting, and let Teakra build for 32-bit x86.
+# Teakra (MIT): the Teak DSP emulator. externals/teakra is upstream commit 3d697a1 with 3SF's changes.
 set(TEAKRA_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
 set(TEAKRA_BUILD_UNIT_TESTS OFF CACHE BOOL "" FORCE)
 add_subdirectory(externals/teakra EXCLUDE_FROM_ALL)
@@ -212,8 +208,11 @@ add_library(threesf_core STATIC
     src/threesf/playback.h
     src/threesf/player.cpp
     src/threesf/player.h
+    src/threesf/render_ahead.cpp
+    src/threesf/render_ahead.h
 )
-target_link_libraries(threesf_core PUBLIC threesf_horizon threesf_nwsnd ZLIB::ZLIB)
+find_package(Threads REQUIRED)
+target_link_libraries(threesf_core PUBLIC threesf_horizon threesf_nwsnd ZLIB::ZLIB Threads::Threads)
 target_compile_options(threesf_core PRIVATE ${THREESF_WARNINGS})
 
 # Ripper: game profiles, the guest driver (driver/driver.c, prebuilt) and length analysis.
@@ -374,6 +373,10 @@ add_executable(snapshot_test tests/snapshot_test.cpp)
 target_link_libraries(snapshot_test PRIVATE threesf_common)
 target_compile_options(snapshot_test PRIVATE ${THREESF_WARNINGS})
 
+add_executable(render_ahead_test tests/render_ahead_test.cpp)
+target_link_libraries(render_ahead_test PRIVATE threesf_core)
+target_compile_options(render_ahead_test PRIVATE ${THREESF_WARNINGS})
+
 add_executable(csar_test tests/csar_test.cpp)
 target_link_libraries(csar_test PRIVATE threesf_csar)
 target_compile_options(csar_test PRIVATE ${THREESF_WARNINGS})
@@ -394,6 +397,7 @@ add_test(NAME teakra_dsp COMMAND teakra_dsp_test)
 add_test(NAME teakra_jit COMMAND teakra_jit_test)
 add_test(NAME teakra_state COMMAND teakra_state_test)
 add_test(NAME snapshot COMMAND snapshot_test)
+add_test(NAME render_ahead COMMAND render_ahead_test)
 add_test(NAME csar COMMAND csar_test)
 add_test(NAME file_names COMMAND file_names_test)
 add_test(NAME rip COMMAND rip_test)
@@ -404,8 +408,6 @@ foreach (tool 3sfrip 3sfplay)
     add_test(NAME version_${tool} COMMAND ${tool} --version)
     set_tests_properties(version_${tool} PROPERTIES PASS_REGULAR_EXPRESSION "^${tool} ${version_pattern}[\r\n]*$")
 endforeach()
-
-find_package(Python3 COMPONENTS Interpreter)
 
 # Load local_tests.cmake from each immediate subdirectory to register tests that use locally supplied files.
 file(GLOB local_tests CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/*/local_tests.cmake)

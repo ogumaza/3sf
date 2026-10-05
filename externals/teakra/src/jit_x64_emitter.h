@@ -254,10 +254,6 @@ public:
         RRExt(bits == 8 ? 0xF6 : 0xF7, bits, 0, a);
         Imm(imm, bits == 8 ? 1 : ImmSize(bits));
     }
-    void TestImm(const Mem& a, s32 imm, int bits) {
-        RM(bits == 8 ? 0xF6 : 0xF7, bits, 0, a, bits == 8 ? 1 : ImmSize(bits));
-        Imm(imm, bits == 8 ? 1 : ImmSize(bits));
-    }
 
     void ShiftImm(Shift op, Reg dst, u8 count, int bits) {
         if (count == 1) {
@@ -295,12 +291,6 @@ public:
         Byte(0x90 | static_cast<u8>(cond));
         ModRMReg(0, Num(dst));
     }
-    void Set(CC cond, const Mem& dst) {
-        RexMem(false, 0, dst, false);
-        Byte(0x0F);
-        Byte(0x90 | static_cast<u8>(cond));
-        ModRMMem(0, dst);
-    }
 
     void Cmov(CC cond, Reg dst, Reg src, int bits) {
         ASSERT(bits != 8);
@@ -309,17 +299,6 @@ public:
         Byte(0x0F);
         Byte(0x40 | static_cast<u8>(cond));
         ModRMReg(Num(dst), Num(src));
-    }
-
-    // Bit test: CF = bit `bit` of src.
-    void BtImm(Reg src, u8 bit, int bits) {
-        ASSERT(bits != 8);
-        Prefix16(bits);
-        Rex(bits == 64, 4, 0, Num(src));
-        Byte(0x0F);
-        Byte(0xBA);
-        ModRMReg(4, Num(src));
-        Byte(bit);
     }
 
     // --- Calls and the stack.
@@ -337,9 +316,6 @@ public:
     }
     void CallReg(Reg target) {
         RRExt(0xFF, 32, 2, target); // call r/m64 needs no REX.W
-    }
-    void Int3() {
-        Byte(0xCC);
     }
 
 private:

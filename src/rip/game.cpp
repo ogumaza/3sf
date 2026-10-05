@@ -28,6 +28,7 @@ namespace threesf::rip
 {
 namespace
 {
+
 namespace fs = std::filesystem;
 
 constexpr uint64_t kMaxFileSize = 1ull << 30; // largest single file read into memory
@@ -270,7 +271,7 @@ std::optional<std::string> ListRomFs(Image& img, uint64_t base, uint64_t limit,
     return std::nullopt;
 }
 
-// An NCCH (a CXI) at `base`, at most `limit` bytes long.
+// An NCCH (a CXI) at `base`.
 std::optional<std::string> LoadNcch(const std::shared_ptr<Image>& img, uint64_t base, uint64_t limit, GameFiles& out)
 {
     uint8_t h[0x200];
@@ -597,7 +598,7 @@ std::optional<std::string> LoadGameDirectory(const std::string& dir, GameFiles& 
     {
         if (it->is_regular_file(ec))
         {
-            out.romfs_files.push_back(fs::relative(it->path(), romfs, ec).generic_string());
+            out.romfs_files.push_back(it->path().lexically_relative(romfs).generic_string());
         }
     }
     if (ec)

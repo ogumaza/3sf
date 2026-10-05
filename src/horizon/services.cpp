@@ -524,7 +524,6 @@ void DspService::HandleRequest(Kernel& kernel, uint32_t cmdbuf)
                 ctx.SetWord(3, IpcStaticBuffer(static_cast<uint32_t>(data.size()), 0));
                 ctx.SetWord(4, addr);
             }
-
             break;
         }
 

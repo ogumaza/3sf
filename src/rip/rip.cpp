@@ -220,7 +220,6 @@ std::optional<GameFirmware> FindGameFirmware(const GameFiles& game, const GamePr
 
     const auto begin = game.code.begin() + static_cast<std::ptrdiff_t>(*offset);
     const auto end = begin + static_cast<std::ptrdiff_t>(Get32(game.code, *offset + kDspSizeOffset));
-
     return GameFirmware{"", *offset, std::vector<uint8_t>(begin, end)};
 }
 

@@ -21,6 +21,9 @@ namespace threesf
 class ArchivePlayer
 {
 public:
+    // Snapshot of the model between frames, excluding output_. Can only be restored to this player.
+    struct Snapshot;
+
     ArchivePlayer();
     ~ArchivePlayer();
 
@@ -34,17 +37,11 @@ public:
     // False once the sequence has ended and no voice is sounding.
     bool Busy() const;
 
-    // The DSP's output (interleaved L, R), appended by RunFrame.
-    std::vector<int16_t> output_;
-
-    // Snapshot of the model between frames, excluding output_. Can only be restored to this player.
-    struct Snapshot;
-
     std::shared_ptr<Snapshot> Save(const Snapshot* previous);
     void Restore(const Snapshot& snapshot);
 
-    // Approximate memory used by `snapshot`, excluding pages shared with `previous`.
-    static std::size_t SnapshotBytes(const Snapshot& snapshot, const Snapshot* previous);
+    // The DSP's output (interleaved L, R), appended by RunFrame.
+    std::vector<int16_t> output_;
 
 private:
     struct State;

@@ -24,6 +24,13 @@ constexpr PAddr kFcramBase = 0x20000000;
 class Fcram
 {
 public:
+    // A copy of FCRAM's contents and of how much Store has used.
+    struct Snapshot
+    {
+        MemoryImage bytes;
+        std::size_t used = 0;
+    };
+
     explicit Fcram(std::size_t size) : bytes_(size, 0)
     {
     }
@@ -55,19 +62,6 @@ public:
 
         return kFcramBase + static_cast<PAddr>(offset);
     }
-
-    // A copy of FCRAM's contents and of how much Store has used.
-    struct Snapshot
-    {
-        MemoryImage bytes;
-        std::size_t used = 0;
-
-        // Memory used by this snapshot, excluding pages shared with `previous`.
-        std::size_t Bytes(const Snapshot* previous) const
-        {
-            return bytes.BytesNotIn(previous ? &previous->bytes : nullptr);
-        }
-    };
 
     // Takes a snapshot, sharing the pages that haven't changed since `previous`.
     Snapshot Save(const Snapshot* previous) const

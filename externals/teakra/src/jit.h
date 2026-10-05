@@ -47,6 +47,9 @@ public:
     // True if the last Run stopped at a block that needs more instructions than its limit.
     bool StoppedForBudget() const;
 
+    // The instructions that translated code has run.
+    u64 Instructions() const;
+
     // With TEAKRA_JIT_STATS set, the instructions the interpreter runs between blocks are counted
     // (Interpreted: `count` from `pc`, and whether Run was called at all), and a summary is
     // printed at the end.

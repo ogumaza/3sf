@@ -182,6 +182,15 @@ static void TestChunks()
     THREESF_CHECK(ParseProgram(huge, truncated).has_value());
 }
 
+// The error LoadSet gives for `path`, or an empty string if the set loads.
+static std::string LoadError(const std::string& path, const FileReader& reader)
+{
+    LoadedSet set;
+    const auto err = LoadSet(path, reader, set);
+
+    return err ? *err : std::string();
+}
+
 static void TestLoadSet()
 {
     // dir/lib.3sflib holds the descriptor and the base memory. dir/sub/x.mini3sf loads it with _lib=../lib.3sflib, and
@@ -260,9 +269,9 @@ static void TestLoadSet()
     fs["dir/z.minincsf"] = WritePsf(0x25, {}, {}, {{"_lib", "lib.3sflib"}});
     fs["dir/w.mini3sf"] = WritePsf(kPsfVersion3sf, {}, {}, {{"title", "w"}});
 
-    THREESF_CHECK(LoadSet("dir/y.mini3sf", reader, set).has_value());
-    THREESF_CHECK(LoadSet("dir/z.minincsf", reader, set).has_value());
-    THREESF_CHECK(LoadSet("dir/w.mini3sf", reader, set).has_value());
+    THREESF_CHECK(LoadError("dir/y.mini3sf", reader) == "can't read dir/missing.3sflib");
+    THREESF_CHECK(LoadError("dir/z.minincsf", reader).find("not a 3SF file") != std::string::npos);
+    THREESF_CHECK(LoadError("dir/w.mini3sf", reader).starts_with("no process or archive descriptor"));
 
     // So is a descriptor with an unsupported version, or with application memory outside the 3DS's range.
     ProcessDescriptor v2;
@@ -331,7 +340,7 @@ static void TestLoadSet()
     fs["dir/c1.3sf"] = WritePsf(kPsfVersion3sf, {}, {}, {{"_lib", "c2.3sf"}});
     fs["dir/c2.3sf"] = WritePsf(kPsfVersion3sf, {}, {}, {{"_lib", "c1.3sf"}});
 
-    THREESF_CHECK(LoadSet("dir/c1.3sf", reader, set).has_value());
+    THREESF_CHECK(LoadError("dir/c1.3sf", reader) == "_lib nesting too deep");
 
     // So does a set that names more files than a set can have. Each of these names the next one ten times, which would
     // take 10^10 loads.
@@ -348,7 +357,37 @@ static void TestLoadSet()
 
     fs["dir/f10.3sf"] = WritePsf(kPsfVersion3sf, {}, {}, {});
 
-    THREESF_CHECK(LoadSet("dir/f0.3sf", reader, set).has_value());
+    THREESF_CHECK(LoadError("dir/f0.3sf", reader) == "more than 64 files in the set");
+}
+
+static void TestLoadSetInArchive()
+{
+    // foobar2000's path for a file in an archive: unpack://zip|<length>|<the archive's path>|<its path in the archive>.
+    const std::string archive = "unpack://zip|23|file://C:\\music\\set.zip|";
+    std::map<std::string, std::vector<uint8_t>> fs;
+    fs[archive + "set.3sflib"] = WritePsf(kPsfVersion3sf, ProcessDescriptor{}.Serialize(), {}, {});
+    fs[archive + "x.mini3sf"] = WritePsf(kPsfVersion3sf, {}, {}, {{"_lib", "set.3sflib"}});
+
+    const FileReader reader = [&](const std::string& path, std::vector<uint8_t>& out)
+    {
+        auto it = fs.find(path);
+        if (it == fs.end())
+        {
+            return false;
+        }
+
+        out = it->second;
+
+        return true;
+    };
+
+    LoadedSet set;
+    const auto err = LoadSet(archive + "x.mini3sf", reader, set, "/\\|");
+    const std::string without = LoadError(archive + "x.mini3sf", reader);
+
+    // With | as a separator, the library is found in the archive, and without it, beside the archive.
+    THREESF_CHECK(!err && set.sources.size() == 2 && set.sources[0] == archive + "set.3sflib");
+    THREESF_CHECK(without == "can't read unpack://zip|23|file://C:\\music\\set.3sflib");
 }
 
 static void TestArchiveMode()
@@ -445,6 +484,7 @@ int main()
     TestDescriptor();
     TestChunks();
     TestLoadSet();
+    TestLoadSetInArchive();
 
     if (failures)
     {

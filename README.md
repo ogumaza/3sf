@@ -53,7 +53,7 @@ characters; on Windows that needs Windows 10 version 1903 or later.
 
 You need Git, CMake 3.20 or later and a C++20 compiler. zlib and libFLAC are downloaded and
 built along with 3SF when they aren't installed. Python 3 is only needed for the scripts in
-`tools/` and `driver/`.
+`driver/`.
 
 - **Windows:** Visual Studio 2022 or later with the "Desktop development with C++" workload,
   which includes CMake, and its "C++ Clang tools for Windows" component, which adds clang-cl.
@@ -105,13 +105,20 @@ than interpreting it. On Apple Silicon and in 32-bit builds Teakra interprets th
 Set `TEAKRA_JIT=0` in the environment to disable the JIT. A test runs random programs through
 both the JIT and interpreter and compares the results (`tests/teakra_jit_test.cpp`).
 
-Seeking uses save states. While the foobar2000 component plays a track, the player takes a
-snapshot of the whole emulation every 2 seconds (`src/threesf/playback.cpp`): the DSP's
-registers, components and memory, FCRAM, and either the ARM11 with the kernel's objects, services
-and memory (game mode) or the model of the sound player (archive mode). Unchanged 4 KiB memory
-pages are shared between snapshots. Seeking restores the latest snapshot before the target and
-renders from there. The save-state test runs random programs on the DSP, saves part-way through,
-and checks that restoring the state reproduces the same results (`tests/teakra_state_test.cpp`).
+During playback, the foobar2000 component renders ahead on a separate thread, as fast as the
+CPU allows, and buffers up to 10 minutes and 10 seconds of audio
+(`src/threesf/render_ahead.cpp`). Seeking within the buffer is instant. Seeking further
+ahead waits for rendering to reach the requested position. Longer tracks also use save
+states. Every 2 seconds, the player takes a snapshot of the whole emulation
+(`src/threesf/playback.cpp`): the DSP's registers, components and memory, FCRAM, and either
+the ARM11 with the kernel's objects, services and memory (game mode) or the model of the
+sound player (archive mode). Unchanged 4 KiB memory pages are shared between snapshots.
+Seeking back before the buffered audio restores the latest snapshot before the target and
+renders from there. With rendering ahead turned off, every track uses snapshots.
+
+The save-state test runs random programs on the DSP, saves part-way through, and checks that
+restoring the state reproduces the same results (`tests/teakra_state_test.cpp`). The rendering-ahead
+test checks reads and seeks with a test substitute for the player (`tests/render_ahead_test.cpp`).
 
 ## Layout
 

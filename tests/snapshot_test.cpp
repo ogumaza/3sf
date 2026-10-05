@@ -3,8 +3,6 @@
 // Unit tests for the pieces of snapshots (save states) that need no game data: memory images (src/common/
 // memory_image.h).
 
-#include "common/memory_image.h"
-
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -12,6 +10,7 @@
 #include <vector>
 
 #include "check.h"
+#include "common/memory_image.h"
 
 using namespace threesf;
 
@@ -24,13 +23,14 @@ std::vector<uint8_t> Restored(const MemoryImage& image)
 {
     std::vector<uint8_t> bytes(image.Size(), 0xAA);
     image.Restore(bytes.data());
+
     return bytes;
 }
 
 void TestMemoryImages()
 {
-    std::mt19937 rng(1);
     // Ten and a half pages: random ones, zero ones and a partial one at the end.
+    std::mt19937 rng(1);
     std::vector<uint8_t> memory(10 * kPage + kPage / 2);
     for (std::size_t i = 0; i < memory.size(); i++)
     {
@@ -95,5 +95,6 @@ int main()
     }
 
     std::printf("snapshot tests passed\n");
+
     return 0;
 }

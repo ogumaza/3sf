@@ -403,10 +403,10 @@ std::shared_ptr<Kernel::Snapshot> Kernel::Save(const Snapshot* previous)
     snapshot->regions = regions_;
     for (std::size_t i = 0; i < regions_.size(); i++)
     {
-        const MemoryImage* before = previous && i < previous->region_images.size() &&
-                                            previous->regions[i] == regions_[i]
-                                        ? &previous->region_images[i]
-                                        : nullptr;
+        const MemoryImage* before =
+            previous && i < previous->region_images.size() && previous->regions[i] == regions_[i]
+                ? &previous->region_images[i]
+                : nullptr;
         snapshot->region_images.emplace_back(regions_[i]->bytes.get(), regions_[i]->size, before);
     }
 
@@ -419,23 +419,6 @@ std::shared_ptr<Kernel::Snapshot> Kernel::Save(const Snapshot* previous)
     return snapshot;
 }
 
-std::size_t Kernel::Snapshot::Bytes(const Snapshot* previous) const
-{
-    std::size_t bytes = (objects.size() + services.size()) * 256 + events.size() * 64;
-    for (std::size_t i = 0; i < region_images.size(); i++)
-    {
-        const bool same = previous && i < previous->regions.size() && previous->regions[i] == regions[i];
-        bytes += region_images[i].BytesNotIn(same ? &previous->region_images[i] : nullptr);
-    }
-
-    if (!previous || previous->memory.runs != memory.runs)
-    {
-        bytes += memory.runs->size() * sizeof(arm::Memory::Snapshot::Run);
-    }
-
-    return bytes;
-}
-
 void Kernel::Restore(const Snapshot& snapshot)
 {
     // Release references between objects absent from this snapshot. Other snapshots may keep them alive and restore
@@ -443,7 +426,8 @@ void Kernel::Restore(const Snapshot& snapshot)
     for (const std::weak_ptr<Object>& weak : objects_)
     {
         std::shared_ptr<Object> object = weak.lock();
-        if (object && std::ranges::find(snapshot.objects, object, &Snapshot::ObjectCopy::first) == snapshot.objects.end())
+        if (object &&
+            std::ranges::find(snapshot.objects, object, &Snapshot::ObjectCopy::first) == snapshot.objects.end())
         {
             ForgetWaits(*object);
         }

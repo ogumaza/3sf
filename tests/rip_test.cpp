@@ -77,8 +77,8 @@ static void TestFirmwareInCode()
     THREESF_CHECK(!rip::FindFirmwareInCode({}));
     THREESF_CHECK(!rip::FindFirmwareInCode(std::vector<uint8_t>(image.begin(), image.begin() + 0x2ff)));
 
-    // Each of these breaks the image: it's bigger than what's left of the code, it has no segments or more than ten, a
-    // segment runs past its end, or a segment starts inside the header.
+    // Each of these breaks the image: it's bigger than what's left of the code, it has no segments, a segment runs past
+    // its end, or a segment starts inside the header.
     const auto broken = [&](std::size_t field, uint32_t value)
     {
         std::vector<uint8_t> bad = image;
@@ -95,9 +95,20 @@ static void TestFirmwareInCode()
     };
     THREESF_CHECK(broken(0x104, 0x801));
     THREESF_CHECK(broken(0x10e, 0));
-    THREESF_CHECK(broken(0x10e, 11));
     THREESF_CHECK(broken(0x128, 0x11));
     THREESF_CHECK(broken(0x120, 0x2ff));
+
+    // So does an eleventh segment, even when it and the other ten are well-formed.
+    std::vector<uint8_t> eleven = image;
+    eleven.resize(0x340);
+    StoreLe32(eleven.data() + 0x104, 0x340);
+    eleven[0x10e] = 11;
+    for (std::size_t i = 1; i <= 10; i++)
+    {
+        std::copy_n(image.begin() + 0x120, 0x30, eleven.begin() + static_cast<std::ptrdiff_t>(0x120 + i * 0x30));
+    }
+
+    THREESF_CHECK(!rip::FindFirmwareInCode(WithImage(code, eleven, 0x800)));
 }
 
 // A game's firmware is the first of its RomFS files that's a DSP1 image, and otherwise the image in its code.
@@ -112,6 +123,7 @@ static void TestGameFirmware()
     game.read_romfs = [&](const std::string& path, std::vector<uint8_t>& data)
     {
         data = path == "sound/dspaudio.cdc" ? file : std::vector<uint8_t>{1, 2, 3};
+
         return true;
     };
 

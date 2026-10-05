@@ -19,7 +19,7 @@
 //   --only REGEX     rip only sounds whose label matches (ECMAScript regex)
 //   --bgm            shortcut for --only '^SEQ_BGM'
 //   --no-length      don't analyze lengths (no length/fade tags)
-//   --jobs N         length analyses run in parallel (default: the number of CPU threads)
+//   --jobs N         length analyses run in parallel (default: the number of CPU threads, at most 8 in a 32-bit build)
 //   --game NAME      game tag (default: the profile's name, or else the name of the image, directory or archive)
 //   --artist NAME, --year YEAR, --copyright TEXT, --by NAME (3sfby)
 //   --version        print the version
@@ -122,6 +122,7 @@ Tags CommonTags(const Options& o, const std::string& game_name, const char* mode
 {
     Tags common;
     common["game"] = game_name;
+
     if (!o.artist.empty())
     {
         common["artist"] = o.artist;
@@ -225,7 +226,6 @@ void AnalyzeLengths(std::vector<Job>& jobs, const std::vector<uint8_t>& archive,
 fs::path InputPath(const std::string& input)
 {
     const fs::path path = fs::absolute(input).lexically_normal();
-
     return path.has_filename() ? path : path.parent_path();
 }
 
@@ -234,7 +234,6 @@ fs::path InputPath(const std::string& input)
 std::string NameOfInput(const std::string& input)
 {
     const fs::path path = InputPath(input);
-
     return fs::is_directory(path) ? path.filename().string() : path.stem().string();
 }
 
@@ -464,7 +463,7 @@ constexpr char kUsage[] =
     "  --bgm                rip only the BGMs (--only '^SEQ_BGM')\n"
     "  --no-length          skip length analysis and omit length and fade tags\n"
     "  --jobs N             the number of length analyses that run at once (default: the number\n"
-    "                       of CPU threads)\n"
+    "                       of CPU threads, and at most 8 in a 32-bit build)\n"
     "  --game NAME, --artist NAME, --year YEAR, --copyright TEXT, --by NAME\n"
     "                       tags (the game defaults to the profile's name, or else the input's)\n"
     "  --version            show the version\n"
@@ -645,6 +644,7 @@ int RipGameInArchiveMode(const std::string& input, const rip::GameFiles& game, c
     const std::string game_name = o.game_name.empty() ? (profile ? profile->name : NameOfInput(input)) : o.game_name;
     int total = 0;
     std::size_t matched = 0;
+    bool failed = false; // an archive that can't be ripped doesn't stop the others
     for (const auto& path : archives)
     {
         if (!o.only_archive.empty() && path != o.only_archive)
@@ -656,7 +656,8 @@ int RipGameInArchiveMode(const std::string& input, const rip::GameFiles& game, c
         if (!game.read_romfs(path, archive_bytes))
         {
             std::fprintf(stderr, "error: can't read %s\n", path.c_str());
-            return 1;
+            failed = true;
+            continue;
         }
 
         const std::string lib_base =
@@ -665,13 +666,14 @@ int RipGameInArchiveMode(const std::string& input, const rip::GameFiles& game, c
                                  game_name, o, matched);
         if (n < 0)
         {
-            return 1;
+            failed = true;
+            continue;
         }
 
         total += n;
     }
 
-    if (matched == 0 && !o.only_text.empty())
+    if (matched == 0 && !o.only_text.empty() && !failed)
     {
         return NoSoundMatches(o);
     }
@@ -682,7 +684,7 @@ int RipGameInArchiveMode(const std::string& input, const rip::GameFiles& game, c
         ReportOutput(out_dir);
     }
 
-    return 0;
+    return failed ? 1 : 0;
 }
 
 // Rips the archive a game's driver profile names, running the game's sound code. Returns the exit code.
@@ -953,9 +955,15 @@ int ParseArgs(int argc, char** argv, Options& o, std::vector<std::string>& input
         }
     }
 
+    // Each analysis emulates 64 MiB of FCRAM, so a 32-bit build, which has 2 GiB of address space, runs at most 8.
     if (o.jobs == 0)
     {
+        constexpr unsigned kMaxJobs32 = 8;
         o.jobs = std::max(1u, std::thread::hardware_concurrency());
+        if constexpr (sizeof(void*) < 8)
+        {
+            o.jobs = std::min(o.jobs, kMaxJobs32);
+        }
     }
 
     return 0;

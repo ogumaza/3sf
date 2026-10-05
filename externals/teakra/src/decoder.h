@@ -136,7 +136,7 @@ constexpr bool IsFlowRegister(RegName name) {
 // Returns true for instructions that change the program flow or the interrupt state whatever their
 // operands. Instructions that do so through a register operand are found by
 // Matcher::UsesFlowRegister. The interpreter runs every other instruction without checking for a
-// jump, a loop or an interrupt after it (Interpreter::RunOrdinary), and the JIT translates them.
+// jump, a loop or an interrupt after it (Interpreter::RunOrdinary).
 inline bool ChangesFlow(std::string_view name) {
     static constexpr std::string_view names[] = {
         "*",

@@ -41,6 +41,20 @@ public:
     using InterruptHandler = std::function<void(Interrupt interrupt, Pipe pipe)>;
     using SampleSink = std::function<void(std::array<int16_t, 2> sample)>;
 
+    // A copy of the DSP's state: Teakra's registers and components, DSP RAM and the glue's state. The handlers stay as
+    // they are.
+    struct Snapshot
+    {
+        std::vector<uint8_t> teakra;
+        MemoryImage ram;
+        uint64_t cycles = 0;
+        bool running = false;
+        std::optional<uint16_t> pipe_table;
+        bool pipe_reply = false;
+        bool pipe_semaphore = false;
+        std::optional<uint16_t> deferred_notification;
+    };
+
     explicit TeakraDsp(Fcram& fcram); // `fcram` outlives the object
     ~TeakraDsp();
 
@@ -91,26 +105,6 @@ public:
 
     // Returns total DSP cycles: those passed to Run plus those run while the ARM11 side waits for the DSP.
     uint64_t Cycles() const;
-
-    // A copy of the DSP's state: Teakra's registers and components, DSP RAM and the glue's state. The handlers stay as
-    // they are.
-    struct Snapshot
-    {
-        std::vector<uint8_t> teakra;
-        MemoryImage ram;
-        uint64_t cycles = 0;
-        bool running = false;
-        std::optional<uint16_t> pipe_table;
-        bool pipe_reply = false;
-        bool pipe_semaphore = false;
-        std::optional<uint16_t> deferred_notification;
-
-        // Memory used by this snapshot, excluding pages shared with `previous`.
-        std::size_t Bytes(const Snapshot* previous) const
-        {
-            return teakra.size() + ram.BytesNotIn(previous ? &previous->ram : nullptr);
-        }
-    };
 
     // Takes a snapshot, sharing unchanged DSP RAM pages with `previous`. Must not be called during a DSP run.
     Snapshot Save(const Snapshot* previous);

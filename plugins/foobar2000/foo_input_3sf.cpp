@@ -5,9 +5,11 @@
 // come from the tags (or the defaults in Advanced preferences > Decoding > 3SF decoder), and the tags can be edited.
 //
 // The player core (src/threesf) does the emulation: the game's sound code on an emulated ARM11 in game mode, or 3SF's
-// model of the SDK sound player in archive mode, with the game's DSP firmware either way. While playing, it takes a
-// snapshot of the emulation every few seconds, and a seek goes back to the latest one before the target and renders
-// from there; a seek past what has played renders up to the target.
+// model of the SDK sound player in archive mode, with the game's DSP firmware either way. While playing, it renders
+// ahead on a worker thread and buffers the audio (see src/threesf/render_ahead.h). Seeks within the buffer are instant;
+// seeks further ahead wait for rendering to reach the target. Tracks longer than the buffer also take snapshots every
+// few seconds. Seeking back before the buffered audio restores the latest snapshot before the target and renders from
+// there. With rendering ahead turned off, decode_run renders each block itself, and every track takes snapshots.
 //
 // Build: see plugins/foobar2000/README.md (clang-cl or MSVC on Windows, or Apple Clang on macOS, with the foobar2000
 // SDK).
@@ -16,13 +18,16 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
 #include "common/ascii.h"
 #include "threesf/format.h"
 #include "threesf/playback.h"
+#include "threesf/render_ahead.h"
 
 namespace
 {
@@ -30,6 +35,7 @@ namespace
 using threesf::Playback;
 using threesf::PlaybackOptions;
 using threesf::Player;
+using threesf::RenderAhead;
 using threesf::Tags;
 
 // {A335A9E1-B807-48DD-A589-4D6511BCCE2B}
@@ -40,6 +46,7 @@ constexpr GUID kBranchGuid = {0x83236141, 0xed54, 0x4ab0, {0xab, 0xe8, 0x2d, 0xe
 constexpr GUID kLengthGuid = {0x39864782, 0x5638, 0x436d, {0x9f, 0x8b, 0x5a, 0xe6, 0x63, 0x38, 0xd9, 0xcd}};
 constexpr GUID kFadeGuid = {0x832017b3, 0x784b, 0x40d0, {0x8b, 0x01, 0x58, 0xd2, 0x29, 0xd3, 0xcb, 0x5c}};
 constexpr GUID kEndlessGuid = {0x13458d58, 0x4bcb, 0x48da, {0xb5, 0x59, 0xca, 0x5b, 0xff, 0xb9, 0xbe, 0x63}};
+constexpr GUID kRenderAheadGuid = {0x4451eb09, 0x317c, 0x48e0, {0x86, 0x08, 0x00, 0x6d, 0x10, 0xb3, 0x8d, 0x52}};
 
 advconfig_branch_factory cfg_branch("3SF decoder", kBranchGuid, advconfig_entry::guid_branch_decoding, 0);
 advconfig_integer_factory cfg_default_length("Default length for files without a length tag (seconds)", kLengthGuid,
@@ -48,6 +55,8 @@ advconfig_integer_factory cfg_default_fade("Default fade for files without a len
                                            kBranchGuid, 1, PlaybackOptions::kDefaultFadeMs / 1000, 0, 3600);
 advconfig_checkbox_factory cfg_endless("Play endlessly (ignore lengths during playback only)", kEndlessGuid,
                                        kBranchGuid, 2, false);
+advconfig_checkbox_factory cfg_render_ahead("Render ahead during playback (quicker seeking; uses more CPU and memory)",
+                                            kRenderAheadGuid, kBranchGuid, 3, true);
 
 constexpr std::size_t kBlockFrames = 1024;      // frames decoded per decode_run call
 constexpr t_filesize kMaxFileSize = 256u << 20; // largest file read into memory
@@ -200,6 +209,10 @@ public:
 
     void decode_initialize(unsigned p_flags, abort_callback& p_abort)
     {
+        // foobar2000 may restart decoding with the same input. Stop the previous worker thread first.
+        ahead_.reset();
+        playback_.reset();
+
         // The file and its libraries, read through foobar2000's file system.
         const threesf::FileReader reader = [&](const std::string& path, std::vector<uint8_t>& out) -> bool
         {
@@ -225,26 +238,36 @@ public:
                 return false;
             }
         };
+        // A file in an archive has a path like unpack://zip|<length>|<the archive's path>|<its path in the archive>, so
+        // its libraries are found after the last | too.
+        const bool in_archive = std::string_view(path_).starts_with("unpack://");
         threesf::LoadedSet set;
-        if (auto err = threesf::LoadSet(path_, reader, set))
+        if (auto err = threesf::LoadSet(path_, reader, set, in_archive ? "/\\|" : "/\\"))
         {
             pfc::throw_exception_with_message<exception_io_data>(err->c_str());
         }
 
-        // Enable endless playback and snapshots only during playback. Conversion and scanning need a finite length and
-        // never seek.
+        // Enable endless playback, snapshots and rendering ahead only during playback. Conversion and scanning need a
+        // finite length and never seek.
+        const bool playing = (p_flags & input_flag_playback) != 0;
         PlaybackOptions options = DefaultOptions();
-        options.endless = cfg_endless.get() && (p_flags & input_flag_playback) && !(p_flags & input_flag_no_looping);
-        options.snapshots = (p_flags & input_flag_playback) != 0;
+        options.endless = cfg_endless.get() && playing && !(p_flags & input_flag_no_looping);
+        options.snapshots = playing;
 
-        if (!playback_.Open(std::move(set), options))
+        playback_ = std::make_unique<Playback>();
+        if (!playback_->Open(std::move(set), options))
         {
-            pfc::throw_exception_with_message<exception_io_data>(playback_.Error().c_str());
+            pfc::throw_exception_with_message<exception_io_data>(playback_->Error().c_str());
         }
 
-        if (!playback_.Start())
+        if (!playback_->Start())
         {
-            pfc::throw_exception_with_message<exception_io_data>(playback_.Error().c_str());
+            pfc::throw_exception_with_message<exception_io_data>(playback_->Error().c_str());
+        }
+
+        if (playing && cfg_render_ahead.get())
+        {
+            ahead_ = std::make_unique<RenderAhead>(std::move(playback_));
         }
 
         buffer_.resize(2 * kBlockFrames);
@@ -253,12 +276,24 @@ public:
     bool decode_run(audio_chunk& p_chunk, abort_callback& p_abort)
     {
         p_abort.check();
-        const std::size_t n = playback_.Render(buffer_.data(), kBlockFrames);
+        const std::size_t n = ahead_ ? ahead_->Read(buffer_.data(), kBlockFrames, [&] { return p_abort.is_aborting(); })
+                                     : playback_->Render(buffer_.data(), kBlockFrames);
         if (n == 0)
         {
-            if (playback_.GetPlayer().GetState() == Player::State::kError)
+            p_abort.check();
+            std::string error;
+            if (ahead_)
             {
-                pfc::throw_exception_with_message<exception_io_data>(playback_.Error().c_str());
+                error = ahead_->Error();
+            }
+            else if (playback_->GetPlayer().GetState() == Player::State::kError)
+            {
+                error = playback_->Error();
+            }
+
+            if (!error.empty())
+            {
+                pfc::throw_exception_with_message<exception_io_data>(error.c_str());
             }
 
             return false;
@@ -273,10 +308,16 @@ public:
     void decode_seek(double p_seconds, abort_callback& p_abort)
     {
         const t_uint64 target = audio_math::time_to_samples(p_seconds, Playback::kSampleRate);
-        if (!playback_.Seek(target, [&] { return p_abort.is_aborting(); }))
+        if (ahead_)
+        {
+            ahead_->Seek(target); // decode_run waits for the audio there
+            return;
+        }
+
+        if (!playback_->Seek(target, [&] { return p_abort.is_aborting(); }))
         {
             p_abort.check();
-            pfc::throw_exception_with_message<exception_io_data>(playback_.Error().c_str());
+            pfc::throw_exception_with_message<exception_io_data>(playback_->Error().c_str());
         }
     }
 
@@ -412,7 +453,6 @@ private:
         const auto fade = tags_.find("fade");
         const long long length_ms = length != tags_.end() ? threesf::ParseTime(length->second) : -1;
         const long long fade_ms = fade != tags_.end() ? threesf::ParseTime(fade->second) : -1;
-
         return threesf::ResolveLength(length_ms, fade_ms, DefaultOptions());
     }
 
@@ -442,7 +482,8 @@ private:
     service_ptr_t<file> file_;
     std::vector<uint8_t> data_; // the file as read (its program is small for a .mini3sf)
     Tags tags_;
-    Playback playback_;
+    std::unique_ptr<Playback> playback_; // when decode_run renders the blocks itself
+    std::unique_ptr<RenderAhead> ahead_; // owns the Playback while rendering ahead
     std::vector<int16_t> buffer_;
 };
 

@@ -94,6 +94,7 @@ inline std::vector<Kind>& Kinds()
                 }
             }
         }
+
         return table;
     }();
     return kinds;
@@ -152,6 +153,7 @@ inline void Randomize(Teakra::RegisterState& r, std::mt19937_64& rng)
     {
         return static_cast<uint16_t>(rng() & ((1u << n) - 1));
     };
+
     const auto acc = [&]
     {
         const uint64_t v = rng() & 0xFF'FFFF'FFFFull;
@@ -324,6 +326,7 @@ inline std::vector<uint8_t> RandomMemory(std::mt19937_64& rng)
             {
                 break;
             }
+
             value = static_cast<uint16_t>(rng());
         }
         memory[word * 2] = static_cast<uint8_t>(value);

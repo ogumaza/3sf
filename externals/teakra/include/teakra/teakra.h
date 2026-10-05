@@ -98,6 +98,9 @@ public:
     std::vector<std::uint8_t> SaveState();
     void LoadState(const std::vector<std::uint8_t>& state);
 
+    // The instructions that code translated by the JIT has run, which stays 0 without the JIT.
+    std::uint64_t JitInstructions() const;
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl;

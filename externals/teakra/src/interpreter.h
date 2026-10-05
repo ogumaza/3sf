@@ -3,7 +3,6 @@
 #include <atomic>
 #include <exception>
 #include <stdexcept>
-#include <string_view>
 #include <tuple>
 #include <type_traits>
 #include <utility>
@@ -39,6 +38,11 @@ public:
         if (jit) {
             jit->Reset();
         }
+    }
+
+    // The instructions that translated code has run.
+    u64 JitInstructions() const {
+        return jit ? jit->Instructions() : 0;
     }
 
     void PushPC() {

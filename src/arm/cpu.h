@@ -32,6 +32,24 @@ constexpr uint32_t ByteSwap32(uint32_t v)
 class Memory
 {
 public:
+    // Snapshot of the mapping: runs of pages mapped to consecutive host memory. The kernel and system own the host
+    // memory and keep its addresses stable. The snapshot can only be restored to this address space.
+    struct Snapshot
+    {
+        struct Run
+        {
+            uint32_t first_page;
+            uint32_t pages;
+            uint8_t* host;
+        };
+
+        std::shared_ptr<const std::vector<Run>> runs; // shared with the previous snapshot while the mapping is the same
+        uint64_t generation = 0;
+        bool fault = false;
+        uint32_t fault_address = 0;
+        bool fault_write = false;
+    };
+
     static constexpr uint32_t kPageBits = 12;
     static constexpr uint32_t kPageSize = 1u << kPageBits;
     static constexpr uint32_t kPageMask = kPageSize - 1;
@@ -138,33 +156,15 @@ public:
     void ZeroBlock(uint32_t vaddr, std::size_t size);
     std::string ReadCString(uint32_t vaddr, std::size_t max) const;
 
+    // Takes a snapshot, reusing `previous`'s runs if nothing has been mapped or unmapped since.
+    Snapshot Save(const Snapshot* previous) const;
+    void Restore(const Snapshot& snapshot);
+
     // Set by the first access to unmapped memory. Cpu::Run stops with StopReason::kFault, and the caller clears the
     // flag once it has handled the fault.
     bool fault_ = false;
     uint32_t fault_address_ = 0;
     bool fault_write_ = false;
-
-    // Snapshot of the mapping: runs of pages mapped to consecutive host memory. The kernel and system own the host
-    // memory and keep its addresses stable. The snapshot can only be restored to this address space.
-    struct Snapshot
-    {
-        struct Run
-        {
-            uint32_t first_page;
-            uint32_t pages;
-            uint8_t* host;
-        };
-
-        std::shared_ptr<const std::vector<Run>> runs; // shared with the previous snapshot while the mapping is the same
-        uint64_t generation = 0;
-        bool fault = false;
-        uint32_t fault_address = 0;
-        bool fault_write = false;
-    };
-
-    // Takes a snapshot, reusing `previous`'s runs if nothing has been mapped or unmapped since.
-    Snapshot Save(const Snapshot* previous) const;
-    void Restore(const Snapshot& snapshot);
 
 private:
     // A write to a watched page (see WatchWrites) or an unmapped one.
@@ -212,6 +212,7 @@ struct CpuState
     bool n = false, z = false, c = false, v = false, q = false;
     uint8_t ge = 0; // GE[3:0]
     bool thumb = false;
+
     std::array<uint32_t, 32> vfp{}; // S0..S31; D0..D15 alias the pairs (VFPv2 has 16 D registers)
     uint32_t fpscr = 0;
     uint32_t tls = 0;      // CP15 c13, c0, 3: user read-only thread ID register (the TLS pointer)
@@ -232,6 +233,18 @@ enum class StopReason
 class Cpu
 {
 public:
+    // The CPU's state between runs, for a snapshot.
+    struct Snapshot
+    {
+        CpuState state;
+        uint32_t svc_number = 0;
+        uint32_t stop_pc = 0;
+        uint32_t stop_opcode = 0;
+        uint64_t executed = 0;
+        bool exclusive_valid = false;
+        uint32_t exclusive_addr = 0;
+    };
+
     explicit Cpu(Memory& memory) : mem_(memory)
     {
     }
@@ -246,18 +259,6 @@ public:
     }
 
     std::string Describe() const;
-
-    // The CPU's state between runs, for a snapshot.
-    struct Snapshot
-    {
-        CpuState state;
-        uint32_t svc_number = 0;
-        uint32_t stop_pc = 0;
-        uint32_t stop_opcode = 0;
-        uint64_t executed = 0;
-        bool exclusive_valid = false;
-        uint32_t exclusive_addr = 0;
-    };
 
     Snapshot Save() const
     {

@@ -992,6 +992,7 @@ void Channel::Stop()
     voice_ = nullptr;
     engine_->Voices().FreeVoice(v);
     active_ = false;
+
     auto cb = callback_;
     if (cb)
     {
@@ -1053,6 +1054,7 @@ Channel* ChannelManager::AllocChannel(int channel_count, int priority, Channel::
 void ChannelManager::Free(Channel* ch)
 {
     active_list_.remove(ch);
+
     for (auto it = pool_.begin(); it != pool_.end(); ++it)
     {
         if (it->get() == ch)

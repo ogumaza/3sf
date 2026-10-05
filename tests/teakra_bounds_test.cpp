@@ -88,6 +88,7 @@ void TestDwordTransferEnds()
 void TestLongTransferRefused()
 {
     Teakra::Teakra teakra(Teakra::UserConfig{});
+
     bool refused = false;
     try
     {

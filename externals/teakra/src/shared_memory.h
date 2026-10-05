@@ -10,8 +10,9 @@ struct SharedMemory {
     std::unique_ptr<std::array<u8, 0x80000>> own_memory;
     // Points to either own own memory or user-supplied memory
     u8* raw;
-    // Counts the writes to program memory that the DSP makes itself (movd, and DMA that wraps
-    // around into it), for the JIT (jit.h). Writes through `raw` aren't counted.
+    // Counts the changes to program memory, for the JIT (jit.h): the writes the DSP makes itself
+    // (movd, and DMA that wraps around into it), Teakra::ProgramWrite, NotifyProgramWrite and
+    // LoadState. Writes through `raw` aren't counted.
     u64 program_writes = 0;
     static constexpr u32 ProgramWords = 0x20000;
 

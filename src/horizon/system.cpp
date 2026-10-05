@@ -80,6 +80,7 @@ System::System(const ProcessImage& image, const KernelConfig& config)
 
     // DSP RAM (the application maps the shared-memory windows; map all of it).
     k.MapExternal(kDspRamBase, dsp_->Ram(), dsp::kRamSize);
+
     // Notify Teakra of writes to the program half so it can invalidate translated code.
     k.Memory().WatchWrites(dsp_->Ram(), dsp::kRamSize / 2, [this] { dsp_->ProgramWritten(); });
 
@@ -123,13 +124,6 @@ std::shared_ptr<System::Snapshot> System::Save(const Snapshot* previous)
     snapshot->kernel = kernel_->Save(previous ? previous->kernel.get() : nullptr);
 
     return snapshot;
-}
-
-std::size_t System::SnapshotBytes(const Snapshot& snapshot, const Snapshot* previous)
-{
-    return snapshot.fcram.Bytes(previous ? &previous->fcram : nullptr) +
-           snapshot.dsp.Bytes(previous ? &previous->dsp : nullptr) +
-           snapshot.kernel->Bytes(previous ? previous->kernel.get() : nullptr);
 }
 
 void System::Restore(const Snapshot& snapshot)

@@ -92,6 +92,7 @@ private:
     T Load(std::size_t off) const
     {
         Check(off, sizeof(T));
+
         const uint8_t* p = data_.data() + off;
         if constexpr (sizeof(T) == 2)
         {

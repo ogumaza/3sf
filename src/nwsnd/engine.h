@@ -36,6 +36,28 @@ struct EngineOptions
 class Engine
 {
 public:
+    struct LoadedWarc
+    {
+        std::span<const uint8_t> file;
+        PAddr base = 0; // the whole CWAR's address in FCRAM
+        csar::WaveArchive archive;
+    };
+
+    // The engine's state, for a snapshot of the model (see ArchiveModel::Snapshot): the voices and channels in use, the
+    // players' values and the caches. It keeps alive everything it points at.
+    struct Snapshot
+    {
+        VoiceManager::Snapshot voices;
+        ChannelManager::Snapshot channels;
+        Random random;
+        std::vector<SequenceSoundPlayer> players;
+        std::map<uint32_t, std::shared_ptr<const csar::Bank>> banks;
+        std::map<uint32_t, std::shared_ptr<const LoadedWarc>> warcs;
+        std::map<std::pair<uint32_t, uint32_t>, std::optional<WaveInfo>> waves;
+        uint64_t frame_count = 0;
+        std::array<int16_t, 16> global_vars{};
+    };
+
     Engine(nnsnd::SoundSystem& snd, Fcram& fcram, const csar::SoundArchive& archive, EngineOptions options = {});
     ~Engine();
 
@@ -89,28 +111,6 @@ public:
         return global_vars_;
     }
 
-    struct LoadedWarc
-    {
-        std::span<const uint8_t> file;
-        PAddr base = 0; // the whole CWAR's address in FCRAM
-        csar::WaveArchive archive;
-    };
-
-    // The engine's state, for a snapshot of the model (see ArchiveModel::Snapshot): the voices and channels in use, the
-    // players' values and the caches. It keeps alive everything it points at.
-    struct Snapshot
-    {
-        VoiceManager::Snapshot voices;
-        ChannelManager::Snapshot channels;
-        Random random;
-        std::vector<SequenceSoundPlayer> players;
-        std::map<uint32_t, std::shared_ptr<const csar::Bank>> banks;
-        std::map<uint32_t, std::shared_ptr<const LoadedWarc>> warcs;
-        std::map<std::pair<uint32_t, uint32_t>, std::optional<WaveInfo>> waves;
-        uint64_t frame_count = 0;
-        std::array<int16_t, 16> global_vars{};
-    };
-
     // Between frames.
     Snapshot Save() const;
 
@@ -135,11 +135,12 @@ private:
     // Declared after channels_ so players are destroyed first, after the destructor detaches their tracks' channels.
     std::vector<std::unique_ptr<SequenceSoundPlayer>> players_;
 
-    // Caches of what the archive's files hold. Entries never change once made, and they're shared, so that snapshots
-    // can hold them and players can keep pointers to them.
+    // Caches of what the archive's files hold. Entries never change once made. The banks and wave archives are shared,
+    // so that snapshots can hold them, and players keep pointers to the banks.
     std::map<uint32_t, std::shared_ptr<const csar::Bank>> banks_;
     std::map<uint32_t, std::shared_ptr<const LoadedWarc>> warcs_;
     std::map<std::pair<uint32_t, uint32_t>, std::optional<WaveInfo>> waves_;
+
     uint64_t frame_count_ = 0;
     std::array<int16_t, 16> global_vars_;
 };
@@ -151,10 +152,6 @@ inline constexpr std::size_t kArchiveModeFcram = 64 * 1024 * 1024;
 // the ripper's length analysis both build it this way. A sample sink goes on `dsp` before Start.
 struct ArchiveModel
 {
-    // Starts `firmware` on the DSP and then the engine on `archive`, which has to outlive the engine, with
-    // `output_mode` (0 mono, 1 stereo, 2 surround). Returns false if the firmware didn't start.
-    bool Start(std::span<const uint8_t> firmware, const csar::SoundArchive& archive, uint8_t output_mode = 1);
-
     // Snapshot of FCRAM, the DSP, nn::snd and the engine. Keeps active voices and channels alive. It holds pointers to
     // this model's objects, so it can only be restored to this model.
     struct Snapshot
@@ -164,6 +161,10 @@ struct ArchiveModel
         nnsnd::SoundSystem snd;
         std::optional<Engine::Snapshot> engine;
     };
+
+    // Starts `firmware` on the DSP and then the engine on `archive`, which has to outlive the engine, with
+    // `output_mode` (0 mono, 1 stereo, 2 surround). Returns false if the firmware didn't start.
+    bool Start(std::span<const uint8_t> firmware, const csar::SoundArchive& archive, uint8_t output_mode = 1);
 
     // Takes a snapshot between frames, sharing the memory pages that haven't changed since `previous`.
     Snapshot Save(const Snapshot* previous);

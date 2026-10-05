@@ -162,7 +162,6 @@ void DspLink::Commit()
     // where it gets lost (the firmware then idles until a ~116M-cycle recovery). Model the ARM's processing time before
     // committing.
     BeforeDspRuns();
-
     for (uint64_t run = 0; run < kArmLatencyCycles; run += 256)
     {
         dsp_->Run(256);

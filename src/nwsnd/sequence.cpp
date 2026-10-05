@@ -6,7 +6,6 @@
 #include <array>
 #include <bit>
 #include <cstdint>
-#include <memory>
 #include <span>
 
 #include "nwsnd/engine.h"
@@ -21,8 +20,9 @@ namespace
 const float kOneOver60000 = std::bit_cast<float>(0x378bcf65u);    // 1/60000 (ms per minute)
 const float kArmClock = std::bit_cast<float>(0x4d7fb0ffu);        // 268111856
 const float kOneOverArmClock = std::bit_cast<float>(0x3180278du); // 1/268111856
-constexpr uint64_t kFrameMilliCycles = 0x4e200000;                // one sound frame (160 samples) in ARM cycles x 1000
-constexpr int kParseLimit = 10000;                                // commands per tick (0x31dd08)
+
+constexpr uint64_t kFrameMilliCycles = 0x4e200000; // one sound frame (160 samples) in ARM cycles x 1000
+constexpr int kParseLimit = 10000;                 // commands per tick (0x31dd08)
 
 } // namespace
 
@@ -1342,7 +1342,6 @@ void SequenceSoundPlayer::UpdateTick()
             if (t->ParseNextTick(true) < 0)
             {
                 t->Close();
-                t->DetachChannels();
                 tracks_[i].reset();
                 continue; // the freed track reads as closed
             }
@@ -1360,7 +1359,6 @@ void SequenceSoundPlayer::UpdateTick()
                 if (t)
                 {
                     t->Close();
-                    t->DetachChannels();
                     t.reset();
                 }
             }

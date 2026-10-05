@@ -37,6 +37,9 @@ struct ProcessImage
 class System
 {
 public:
+    // Snapshot of the system between kernel runs, excluding output_. Can only be restored to this system.
+    struct Snapshot;
+
     System(const ProcessImage& image, const KernelConfig& config);
     ~System();
 
@@ -45,18 +48,12 @@ public:
         return *kernel_;
     }
 
-    // Stereo samples produced by the DSP so far (interleaved L, R at 32728 Hz).
-    std::vector<int16_t> output_;
-
-    // Snapshot of the system between kernel runs, excluding output_. Can only be restored to this system.
-    struct Snapshot;
-
     // Takes a snapshot, sharing the memory pages that haven't changed since `previous`.
     std::shared_ptr<Snapshot> Save(const Snapshot* previous);
     void Restore(const Snapshot& snapshot);
 
-    // Approximate memory used by `snapshot`, excluding pages shared with `previous`.
-    static std::size_t SnapshotBytes(const Snapshot& snapshot, const Snapshot* previous);
+    // Stereo samples produced by the DSP so far (interleaved L, R at 32728 Hz).
+    std::vector<int16_t> output_;
 
 private:
     std::unique_ptr<Fcram> fcram_;

@@ -23,6 +23,9 @@ public:
     RegisterState& GetRegisterState();
     const RegisterState& GetRegisterState() const;
 
+    // The instructions that translated code has run.
+    u64 JitInstructions() const;
+
     // Saves or loads the registers and the interpreter's state (see state.h).
     void Serialize(StateWriter& ar);
     void Serialize(StateReader& ar);

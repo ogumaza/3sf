@@ -69,8 +69,8 @@ constexpr uint16_t kSilentFirmware[] = {0x4180, 0x0000};
 constexpr uint16_t kZerosFirmware[] = {0x5E00, 0x80C0, 0x5E01, 0x0000, 0x1820, 0x4180, 0x0004};
 
 // A firmware that sends 0x1000 on reply register 2 as its pipe table's word address, then loops. Each time round, it
-// copies command register 2 to data word 0x0102. It answers a stop request (0x8000) with 0x0077 on reply register 2
-// and then spins. The test drives it through data words 0x0100 to 0x0104 (see Fire).
+// copies command register 2 to data word 0x0102. It answers a stop request (0x8000) with 0x0077 on reply register 2 and
+// then spins. The test drives it through data words 0x0100 to 0x0104 (see Fire).
 //
 // segment p 0000
 // mov 0x$1000 r1 // the pipe table's word address
@@ -175,8 +175,8 @@ constexpr uint16_t kEndFirmware[] = {0x5E01, 0x1000, 0x5E00, 0x80C8, 0x1820, 0x4
 constexpr uint32_t kEndFirmwareAddress = 0x1FFF9;
 static_assert(2 * kEndFirmwareAddress + sizeof(kEndFirmware) == 0x40000);
 
-// Returns a DSP1 image that loads `program` into program memory at word address `address`: a header with the magic,
-// the flags and one segment record, then the code. The glue doesn't check the signature or the segment's SHA-256, so
+// Returns a DSP1 image that loads `program` into program memory at word address `address`: a header with the magic, the
+// flags and one segment record, then the code. The glue doesn't check the signature or the segment's SHA-256, so
 // they're left as zeros.
 std::vector<uint8_t> MakeImage(std::span<const uint16_t> program, uint8_t flags = 0, uint32_t address = 0)
 {
@@ -349,6 +349,7 @@ void TestSegmentFillsProgramMemory()
 {
     Fcram fcram(1 << 20);
     TeakraDsp dsp(fcram);
+
     THREESF_CHECK(ErrorOf([&] { dsp.LoadComponent(MakeImage(kEndFirmware, 0, kEndFirmwareAddress)); }).empty());
     THREESF_CHECK(LoadLe16(dsp.Ram() + 0x3FFFE) == kEndFirmware[std::size(kEndFirmware) - 1]);
 }
@@ -358,6 +359,7 @@ void TestWithoutFirmware()
 {
     Fcram fcram(1 << 20);
     TeakraDsp dsp(fcram);
+
     THREESF_CHECK(ThrowsDspError([&] { dsp.ReadReply(3); }));
     THREESF_CHECK(ThrowsDspError([&] { dsp.ReplyReady(3); }));
     THREESF_CHECK(ThrowsDspError([&] { dsp.ReadReply(0xFFFFFFFF); }));
@@ -435,10 +437,13 @@ void TestPipeRings()
     THREESF_CHECK(to_dsp[6] == 1 && to_dsp[7] == 2 && to_dsp[0] == 3 && to_dsp[1] == 4);
     THREESF_CHECK(WritePosition(dsp, 5) == 0x0002);
 
+    // A read from the other ring, so that the firmware reads what that write sent.
+    THREESF_CHECK(dsp.ReadPipe(Pipe::kAudio, 1).size() == 1);
+
     // Each read and write that moved a position sent the entry's number on command register 2. The DSP doesn't run in
     // between, so each send after the first found the last one unread and waited one slice for the firmware to read it.
     // The firmware has read the last write's 5 by now.
-    THREESF_CHECK(dsp.Cycles() == 4 * kWaitSlice);
+    THREESF_CHECK(dsp.Cycles() == 5 * kWaitSlice);
     THREESF_CHECK(Word(dsp, kCommandWord) == 5);
 }
 
@@ -473,17 +478,17 @@ void TestNotifications()
     TeakraDsp dsp(fcram);
     Interrupts interrupts;
     uint64_t reply0_wait = 1; // the cycles the DSP ran while the handler read reply register 0
-    dsp.SetInterruptHandler(
-        [&](Interrupt interrupt, Pipe pipe)
+    const auto on_interrupt = [&](Interrupt interrupt, Pipe pipe)
+    {
+        interrupts.push_back({interrupt, pipe});
+        if (interrupt == Interrupt::kReply0)
         {
-            interrupts.push_back({interrupt, pipe});
-            if (interrupt == Interrupt::kReply0)
-            {
-                const uint64_t before = dsp.Cycles();
-                THREESF_CHECK(dsp.ReadReply(0) == 0x1234);
-                reply0_wait = dsp.Cycles() - before;
-            }
-        });
+            const uint64_t before = dsp.Cycles();
+            THREESF_CHECK(dsp.ReadReply(0) == 0x1234);
+            reply0_wait = dsp.Cycles() - before;
+        }
+    };
+    dsp.SetInterruptHandler(on_interrupt);
 
     // The start takes one slice, and the firmware's reply with the pipe table's address raises nothing. A second
     // LoadComponent while the firmware runs does nothing.
@@ -554,12 +559,12 @@ void TestNotifications()
     // (here a long string, which std::function keeps on the heap) last until it returns.
     std::string seen;
     const std::string text(1000, 'x');
-    dsp.SetInterruptHandler(
-        [&dsp, &seen, text](Interrupt, Pipe)
-        {
-            dsp.SetInterruptHandler([&seen](Interrupt, Pipe) { seen += "second;"; });
-            seen += text.substr(0, 5) + ";";
-        });
+    const auto replace_itself = [&dsp, &seen, text](Interrupt, Pipe)
+    {
+        dsp.SetInterruptHandler([&seen](Interrupt, Pipe) { seen += "second;"; });
+        seen += text.substr(0, 5) + ";";
+    };
+    dsp.SetInterruptHandler(replace_itself);
     Fire(dsp, 2, 4, 0x0001);
     Fire(dsp, 2, 4, 0x0001);
     THREESF_CHECK(seen == "xxxxx;second;");
@@ -663,6 +668,7 @@ void TestStartTimeouts()
     {
         Fcram fcram(1 << 20);
         TeakraDsp dsp(fcram);
+
         THREESF_CHECK(ThrowsDspError([&] { dsp.LoadComponent(MakeImage(c.program, c.flags)); }));
         THREESF_CHECK(dsp.Cycles() == kWaitLimitCycles);
 

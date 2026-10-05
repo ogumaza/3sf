@@ -36,6 +36,10 @@ public:
         kError
     };
 
+    // Snapshot of the player between emulation steps. Unchanged memory pages are shared with the previous snapshot. It
+    // holds pointers into this player's emulation and can only be restored to this player, before the next Start.
+    class Snapshot;
+
     // The rate players report. The exact rate is 268111856 / 8192 = 32728.498 Hz.
     static constexpr int kSampleRate = kPlayerSampleRate;
 
@@ -97,20 +101,13 @@ public:
         return set_;
     }
 
-    // Snapshot of the player between emulation steps. Unchanged memory pages are shared with the previous snapshot. It
-    // holds pointers into this player's emulation and can only be restored to this player, before the next Start.
-    class Snapshot;
-
     // Takes a snapshot, sharing pages with `previous` (best the latest snapshot). Returns nullptr when the player isn't
     // playing, or if saving failed, which leaves the player as it was.
     std::shared_ptr<const Snapshot> Save(const Snapshot* previous = nullptr);
 
-    // Restores `snapshot`, including any audio waiting to be delivered. Returns false if the snapshot belongs to
-    // another player or an earlier run, or if restoration fails (see Error()).
+    // Restores `snapshot`, including any audio waiting to be delivered. Returns false if the snapshot belongs to an
+    // earlier run, or if restoration fails (see Error()).
     bool Restore(const Snapshot& snapshot);
-
-    // Approximate memory used by `snapshot`, excluding pages shared with `previous`.
-    static std::size_t SnapshotBytes(const Snapshot& snapshot, const Snapshot* previous);
 
 private:
     bool Fail(const std::string& message);

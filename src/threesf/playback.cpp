@@ -151,6 +151,7 @@ std::size_t Playback::Render(int16_t* out, std::size_t frames)
         {
             end = std::min(end, *finished_at_ + kSampleRate / 2);
         }
+
         if (position_ >= end)
         {
             return 0;
@@ -196,33 +197,57 @@ std::size_t Playback::Render(int16_t* out, std::size_t frames)
     return got;
 }
 
-bool Playback::Seek(uint64_t frame, const std::function<bool()>& abort)
+Playback::Route Playback::RouteTo(uint64_t frame) const
 {
-    // The latest snapshot at or before the target, unless the current position is nearer and the player can go on
-    // from it.
+    // Use the latest snapshot at or before the target, unless the current position is nearer and the player can
+    // continue from it.
     const bool can_go_on =
         player_.GetState() == Player::State::kPlaying || player_.GetState() == Player::State::kFinished;
     const auto it = std::ranges::upper_bound(saved_, frame, {}, &SavedState::position);
     const SavedState* from = it == saved_.begin() ? nullptr : &*std::prev(it);
     if (from && (!can_go_on || frame < position_ || from->position > position_))
     {
-        if (player_.Restore(*from->snapshot))
+        return {from, false};
+    }
+
+    return {nullptr, !can_go_on || frame < position_};
+}
+
+uint64_t Playback::SeekStart(uint64_t frame) const
+{
+    const Route route = RouteTo(frame);
+    return route.from ? route.from->position : route.restart ? 0 : position_;
+}
+
+void Playback::SetSnapshots(bool on)
+{
+    options_.snapshots = on;
+    if (!on)
+    {
+        saved_.clear();
+        latest_.reset();
+    }
+}
+
+bool Playback::Seek(uint64_t frame, const std::function<bool()>& abort)
+{
+    const Route route = RouteTo(frame);
+    if (route.from)
+    {
+        if (player_.Restore(*route.from->snapshot))
         {
-            position_ = from->position;
-            finished_at_ = from->finished_at;
-            latest_ = from->snapshot;
+            position_ = route.from->position;
+            finished_at_ = route.from->finished_at;
+            latest_ = route.from->snapshot;
         }
         else if (!Start())
         {
             return false;
         }
     }
-    else if (!can_go_on || frame < position_)
+    else if (route.restart && !Start())
     {
-        if (!Start())
-        {
-            return false;
-        }
+        return false;
     }
 
     scratch_.resize(kSeekBlock * 2);

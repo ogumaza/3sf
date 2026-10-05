@@ -10,7 +10,6 @@
 #include <teakra/impl/register.h>
 #include <teakra/teakra.h>
 
-#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -50,6 +49,16 @@ std::string Run(Teakra::Teakra& dsp)
 
 int threw = 0; // trials that ended in an exception, in both DSPs
 
+// The instructions that translated code ran, on the DSPs with the JIT and without.
+uint64_t translated = 0;
+uint64_t translated_without = 0;
+
+#if defined(__x86_64__) || defined(_M_X64)
+constexpr bool kHostHasJit = true;
+#else
+constexpr bool kHostHasJit = false;
+#endif
+
 // One program from one state on both DSPs. Returns false, after a report, if they differ.
 bool Trial(uint64_t seed, std::unique_ptr<Teakra::Teakra>* keep_jit = nullptr,
            std::unique_ptr<Teakra::Teakra>* keep_reference = nullptr)
@@ -70,6 +79,8 @@ bool Trial(uint64_t seed, std::unique_ptr<Teakra::Teakra>* keep_jit = nullptr,
 
     const std::string jit_result = Run(jit);
     const std::string reference_result = Run(reference);
+    translated += jit.JitInstructions();
+    translated_without += reference.JitInstructions();
     if (std::getenv("JIT_TEST_VERBOSE"))
     {
         std::fprintf(stderr, "seed %llu: %s / %s; lp %u bcn %u / lp %u bcn %u\n", static_cast<unsigned long long>(seed),
@@ -226,6 +237,15 @@ int main(int argc, char** argv)
 
     std::fprintf(stderr, "%d of %d random programs ran differently with the JIT (%d ended in an exception)\n", failed,
                  trials, threw);
+
+    // Without translated code on the first DSP, or with some on the second, the test compared a DSP with itself. A
+    // program can throw before a block runs, so only a run of 100 programs or more must have run translated code.
+    if ((kHostHasJit && trials >= 100 && translated == 0) || translated_without != 0)
+    {
+        std::fprintf(stderr, "translated code ran %llu instructions with the JIT and %llu without\n",
+                     static_cast<unsigned long long>(translated), static_cast<unsigned long long>(translated_without));
+        failed++;
+    }
 
     return failed == 0 ? 0 : 1;
 }

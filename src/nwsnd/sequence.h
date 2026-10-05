@@ -9,7 +9,6 @@
 #include <array>
 #include <cstdint>
 #include <functional>
-#include <memory>
 #include <optional>
 #include <span>
 
@@ -190,11 +189,11 @@ public:
         return finished_;
     }
 
-    // Loop detection for rendering: called by track 0 when it jumps backwards.
-    std::function<void()> on_loop_;
-
     // Detaches every track's channels (see SequenceTrack::DetachChannels), before the player goes away.
     void DetachChannels();
+
+    // Loop detection for rendering: called by track 0 when it jumps backwards.
+    std::function<void()> on_loop_;
 
 private:
     friend class SequenceTrack;

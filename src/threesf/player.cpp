@@ -45,6 +45,7 @@ public:
 };
 
 Player::Player() = default;
+
 Player::~Player() = default;
 
 bool Player::Fail(const std::string& message)
@@ -168,7 +169,9 @@ bool Player::StartImpl()
     horizon::KernelConfig config;
     config.app_memory = d.app_memory;
     system_ = std::make_unique<horizon::System>(image, config);
-    system_->GetKernel().log_ = [](const std::string&) {}; // drop the guest's debug output
+    system_->GetKernel().log_ = [](const std::string&) // drop the guest's debug output
+    {
+    };
 
     consumed_ = 0;
     error_.clear();
@@ -326,22 +329,6 @@ std::shared_ptr<const Player::Snapshot> Player::Save(const Snapshot* previous)
     }
 
     return snapshot;
-}
-
-std::size_t Player::SnapshotBytes(const Snapshot& snapshot, const Snapshot* previous)
-{
-    std::size_t bytes = snapshot.pending.size() * sizeof(int16_t);
-    if (snapshot.archive)
-    {
-        bytes += ArchivePlayer::SnapshotBytes(*snapshot.archive, previous ? previous->archive.get() : nullptr);
-    }
-
-    if (snapshot.system)
-    {
-        bytes += horizon::System::SnapshotBytes(*snapshot.system, previous ? previous->system.get() : nullptr);
-    }
-
-    return bytes;
 }
 
 bool Player::Restore(const Snapshot& snapshot)

@@ -76,6 +76,7 @@ Outcome Finish(Teakra::Teakra& dsp, uint32_t cycles, std::vector<Sample>& sample
     o.registers.assign(regs, regs + sizeof(RegisterState));
     o.memory.assign(dsp.GetDspMemory(), dsp.GetDspMemory() + kMemoryBytes);
     o.samples = samples;
+
     return o;
 }
 
@@ -93,8 +94,8 @@ bool Compare(uint64_t seed, const char* what, const Outcome& expected, const Out
     // After an exception the interpreter's pc is the one it had when RunOrdinary began, which differs with the JIT, so
     // it isn't compared then (as in teakra_jit_test).
     const RegisterState layout;
-    const std::size_t pc_offset =
-        static_cast<std::size_t>(reinterpret_cast<const uint8_t*>(&layout.pc) - reinterpret_cast<const uint8_t*>(&layout));
+    const std::size_t pc_offset = static_cast<std::size_t>(reinterpret_cast<const uint8_t*>(&layout.pc) -
+                                                           reinterpret_cast<const uint8_t*>(&layout));
     int reported = 0;
     for (std::size_t i = 0; i < expected.registers.size(); ++i)
     {
@@ -102,6 +103,7 @@ bool Compare(uint64_t seed, const char* what, const Outcome& expected, const Out
         {
             continue;
         }
+
         if (got.registers[i] != expected.registers[i])
         {
             if (reported++ < 8)
@@ -227,6 +229,7 @@ void SetUpComponents(Teakra::Teakra& dsp, std::mt19937_64& rng)
         dsp.MMIOWrite(static_cast<uint16_t>(0x206 + 2 * i), static_cast<uint16_t>(rng() & kRequests));
     }
     dsp.MMIOWrite(0x20C, static_cast<uint16_t>(rng() & kRequests));
+
     for (uint16_t irq = 0; irq < 16; ++irq)
     {
         dsp.MMIOWrite(static_cast<uint16_t>(0x212 + irq * 4),
@@ -311,6 +314,7 @@ bool Trial(uint64_t seed, bool idle)
     std::unique_ptr<Teakra::Teakra> first = MakeDsp(true);
     first->SetAudioCallback(collect);
     std::memcpy(first->GetDspMemory(), memory.data(), kMemoryBytes);
+
     RegisterState& regs = first->GetRegisterState();
     if (idle)
     {
@@ -327,25 +331,38 @@ bool Trial(uint64_t seed, bool idle)
     {
         Randomize(regs, rng);
     }
+
     SetUpComponents(*first, rng);
 
+    // An idle program and its handlers are valid code, so it mustn't throw. A random program may.
     const uint32_t before = 1 + static_cast<uint32_t>(rng() % (cycles - 1));
     const uint32_t after = cycles - before;
-    if (!Run(*first, before).empty())
+    if (const std::string threw = Run(*first, before); !threw.empty())
     {
         ++threw_before;
-        return true;
+        if (idle)
+        {
+            std::fprintf(stderr, "seed %llu: the idle program %s\n", static_cast<unsigned long long>(seed),
+                         threw.c_str());
+        }
+
+        return !idle;
     }
 
     const std::vector<uint8_t> state = first->SaveState();
     const std::vector<uint8_t> saved_memory(first->GetDspMemory(), first->GetDspMemory() + kMemoryBytes);
     const Outcome expected = Finish(*first, after, samples);
+    bool same = true;
     if (!expected.threw.empty())
     {
         ++threw_after;
+        if (idle)
+        {
+            std::fprintf(stderr, "seed %llu: the idle program %s after the save\n",
+                         static_cast<unsigned long long>(seed), expected.threw.c_str());
+            same = false;
+        }
     }
-
-    bool same = true;
 
     // A new DSP, without the JIT.
     std::unique_ptr<Teakra::Teakra> second = MakeDsp(false);
@@ -370,7 +387,7 @@ bool Trial(uint64_t seed, bool idle)
     return same;
 }
 
-// LoadState refuses bytes that SaveState didn't make, and leaves the DSP as it was when the first words are wrong.
+// LoadState refuses bytes that SaveState didn't make.
 bool BadStates()
 {
     std::unique_ptr<Teakra::Teakra> dsp = MakeDsp(false);
@@ -387,6 +404,7 @@ bool BadStates()
         {
             return;
         }
+
         std::fprintf(stderr, "LoadState took %s\n", what);
         ok = false;
     };
@@ -425,8 +443,7 @@ int main(int argc, char** argv)
 
     const bool bad_states = BadStates();
 
-    std::fprintf(stderr,
-                 "%d of %d programs ran differently after LoadState (%d threw before the save, %d after it)\n",
+    std::fprintf(stderr, "%d of %d programs ran differently after LoadState (%d threw before the save, %d after it)\n",
                  failed, trials, threw_before, threw_after);
 
     return failed == 0 && bad_states ? 0 : 1;

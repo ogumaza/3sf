@@ -94,8 +94,8 @@ private:
 
     static const Page& Zeros()
     {
-        static const Page zeros{};
-        return zeros;
+        static const Page kZeros{};
+        return kZeros;
     }
 
     std::size_t size_ = 0;
