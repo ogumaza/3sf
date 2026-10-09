@@ -129,6 +129,7 @@ public:
     }
 
     // nn::snd's internals, which SoundSystem calls every frame.
+    void ApplyPendingState(DspLink& link); // the DSP side of SetState: 0x18edc4 and 0x18eecc
     void UpdateParameters(DspLink& link);  // 0x186134
     void UpdateWaveBuffers(DspLink& link); // 0x18f678
     void ProcessStatus(DspLink& link);     // 0x18f46c
@@ -140,6 +141,12 @@ public:
         return !enabled_on_dsp_;
     }
 
+    // The DSP cycles the voice takes a frame, as UpdateParameters last worked them out.
+    uint32_t DspCost() const
+    {
+        return dsp_cost_;
+    }
+
     // Called when the voice is (re)allocated (0x191404).
     void Reset();
 
@@ -148,6 +155,9 @@ public:
 
 private:
     void ResetWaveBuffers(); // 0x18d9f4
+
+    // The DSP cycles a frame for the voice's format, rate, interpolation, filters and buses (0x1862ac).
+    uint32_t ComputeDspCost() const;
 
     int id_;
     int priority_ = 0;
@@ -165,6 +175,7 @@ private:
     uint32_t sample_rate_ = 32728;                                    // +0x20
     float pitch_ = 1.0f;                                              // +0x24
     float rate_ = 1.0f;                                               // +0x28
+    uint32_t dsp_cost_ = 0;                                           // +0x2c
     WaveBuffer* wave_head_ = nullptr;                                 // +0x30
     int16_t queued_ = 0;                                              // +0x34
     int16_t queue_slot_ = 0;                                          // +0x36

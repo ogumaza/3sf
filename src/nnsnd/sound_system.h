@@ -49,15 +49,32 @@ public:
     // Writes all voice and DSP parameters and commits the frame.
     void SendParameterToDsp();
 
+    // Where a DSP voice is in its wave, for the ripper's length analysis. A voice plays while it's allocated, its state
+    // is play and the DSP reports it enabled. Its wave loops when one of its queued buffers loops. The position counts
+    // the samples into the buffer that the DSP plays. It falls each time the wave goes back to its loop start.
+    struct VoicePlace
+    {
+        bool playing = false;
+        bool loops = false;
+        uint32_t position = 0;
+    };
+
+    VoicePlace PlaceOf(int id) const;
+
 private:
     void WriteDspDefaults(const DspDefaults& defaults);
     void InsertByPriority(Voice* voice);
+
+    // Frees a voice, to make room or because it doesn't fit the frame's DSP cycles, then calls its owner's drop
+    // callback (0x18d444).
+    void DropVoice(Voice* voice);
 
     DspLink link_;
     std::array<Voice, kNumSources> voices_;
     std::array<bool, kNumSources> allocated_{};
     std::array<DropCallback, kNumSources> drop_callbacks_;
     std::list<Voice*> priority_list_; // highest priority first
+    int32_t voice_cycles_ = 0;        // the DSP cycles a frame that voices may take
 };
 
 } // namespace threesf::nnsnd

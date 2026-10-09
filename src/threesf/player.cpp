@@ -8,10 +8,10 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
-#include <cstdlib>
 #include <exception>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -384,10 +384,10 @@ double Player::Volume() const
         return 1.0;
     }
 
-    // A value that isn't a finite number, such as nan, is ignored: it would turn every sample into nonsense.
-    char* end = nullptr;
-    const double v = std::strtod(it->second.c_str(), &end);
-    return end != it->second.c_str() && std::isfinite(v) ? v : 1.0;
+    // Text after the number, as in "0.5dB", is ignored. So is a value that isn't a finite number, such as 1e999: it
+    // would turn every sample into nonsense.
+    const std::optional<DecimalNumber> volume = ReadDecimal(it->second);
+    return volume && std::isfinite(volume->value) ? volume->value : 1.0;
 }
 
 } // namespace threesf

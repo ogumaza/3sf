@@ -235,6 +235,7 @@ public:
     uint8_t key_ = 60, original_key_ = 60;            // +0x126
     uint8_t key_group_ = 0;                           // +0x128
     uint8_t interpolation_type_ = 0;                  // +0x129
+    bool wave_loops_ = false;                         // whether the wave loops, for the ripper's length analysis
     Callback callback_;                               // +0x12c
     Voice* voice_ = nullptr;                          // +0x134
     Channel* next_in_track_ = nullptr;                // +0x138
@@ -281,6 +282,9 @@ public:
     void UpdateAllChannel();
 
     int ActiveCount() const;
+
+    // Whether a channel's envelope is in its attack, hold, decay or release, for the ripper's length analysis.
+    bool AnyChanging() const;
 
     // Releases channel objects freed during the frame.
     void CollectGarbage()

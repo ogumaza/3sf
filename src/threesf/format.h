@@ -58,12 +58,37 @@ std::string FormatTagArea(const Tags& tags);
 std::vector<uint8_t> WritePsf(uint8_t version, const std::vector<uint8_t>& reserved,
                               const std::vector<uint8_t>& program, const Tags& tags);
 
+// A number read from the start of a tag's value, and the number of characters it took.
+struct DecimalNumber
+{
+    double value;
+    std::size_t length;
+};
+
+// Reads a decimal number from the start of `text` the same way in every locale: an optional sign, digits with an
+// optional '.' or ',' before decimals, and an optional exponent ("1.5e3"). Returns nullopt if `text` doesn't start
+// with one. Unlike std::strtod, it reads no white space, hex, infinity or NaN.
+std::optional<DecimalNumber> ReadDecimal(std::string_view text);
+
 // Parses a PSF length or fade tag ("seconds", "m:s" or "h:m:s", with '.' or ',' before decimals) into milliseconds.
 // Returns -1 if the tag is empty or malformed.
 long long ParseTime(const std::string& text);
 
 // Formats milliseconds as a PSF time ("m:ss.fff").
 std::string FormatTime(long long ms);
+
+// The sequence variables that a 3sf_var tag sets before a sequence starts, by number: 0 to 15 are the sound's player
+// variables, and 16 to 31 the global ones (docs/3sf.md, "Tags").
+using Variables = std::map<int, int16_t>;
+
+// Parses a 3sf_var tag: one or more assignments "N=V", separated by commas or white space, line breaks included. N is
+// 0 to 31 and V -32768 to 32767, each in decimal or in hex with a 0x prefix, and either may have a minus sign. A later
+// assignment to the same variable wins. Returns nullopt if any part is malformed or out of range, or if there's no
+// assignment.
+std::optional<Variables> ParseVariables(std::string_view text);
+
+// The 3sf_var tag for `variables`: the assignments in increasing order of N, in decimal, separated by ", ".
+std::string FormatVariables(const Variables& variables);
 
 // The process descriptor: the reserved area of a game-mode set (docs/3sf.md, "Process descriptor").
 struct ProcessDescriptor

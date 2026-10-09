@@ -18,6 +18,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -61,10 +62,12 @@ advconfig_checkbox_factory cfg_render_ahead("Render ahead during playback (quick
 constexpr std::size_t kBlockFrames = 1024;      // frames decoded per decode_run call
 constexpr t_filesize kMaxFileSize = 256u << 20; // largest file read into memory
 
-// PSF tags that aren't metadata. Editing the tags keeps them as they are.
+// PSF tags that aren't metadata. Editing the tags keeps them as they are. 3sf_var is among them: a sequence that waits
+// for its variables would go silent if removing the tags dropped it.
 bool IsSystemTag(const std::string& name)
 {
-    return name.starts_with("_lib") || name == "length" || name == "fade" || name == "volume" || name == "utf8";
+    return name.starts_with("_lib") || name == "length" || name == "fade" || name == "volume" || name == "utf8" ||
+           name == "3sf_var";
 }
 
 // The foobar2000 field name for a PSF tag name.

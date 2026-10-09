@@ -281,6 +281,18 @@ length of N samples as N / 32,728 seconds, rounded to the millisecond.
 When there's no `length` tag, a player should play until the driver reports that the sound
 finished, or to a default length.
 
+`3sf_var` sets sequence variables before a sequence starts. Some sequences play nothing until
+the game sets one of their variables. The value is one or more assignments `N=V`, separated by
+commas or white space. Line breaks count as white space. A tag on several lines therefore works
+too. N is 0 to 15 for the sound's player variables, and 16 to 31 for the global variables
+(global variable N − 16). V is −32,768 to 32,767. Each number is decimal, or hex with a `0x`
+prefix, and may have a minus sign. A later assignment to the same variable wins. In archive
+mode, a player sets the variables after it sets up the sequence and before the sequence's first
+tick. A player ignores the whole tag if any part of it is malformed or out of range. Game mode
+ignores the tag: version 1's driver can't set variables. `3sfrip --var N=V` writes the tag,
+with the assignments in increasing order of N, in decimal, separated by ", ":
+`3sf_var=0=1, 17=-1`.
+
 ## Ripping
 
 `3sfrip` builds a set from a decrypted ROM image (`.3ds`/`.cci`, `.cxi` or `.cia`), from an
@@ -302,8 +314,7 @@ The `.3sflib` contains:
 - a process descriptor.
 
 Each `.mini3sf` selects one sequence or wave sound. A sequence's length comes from playing it
-on 3SF's model of the sound player (see "Archive mode"): two loops plus a fade for a looping
-sequence, or up to the sequence's end.
+on 3SF's model of the sound player (see "Lengths").
 
 Game profiles (function addresses) are specific to each game and version, and are matched by
 program ID and the CRC-32 of the decompressed `code.bin`. Version 1 knows Pokemon X (Japan,
@@ -314,7 +325,8 @@ reported, and `--mode archive` rips them.
 
 The `.3sflib` holds the sound archive and a DSP firmware as `FILE` chunks, with an archive
 descriptor. Each `.mini3sf` selects one sequence with a `SND ` chunk. Lengths come from the same
-analysis as in game mode.
+analysis as in game mode. `--var` sets variables for every sequence ripped, in the analysis and
+in the `3sf_var` tag.
 
 A sound archive doesn't contain the firmware that plays it. For a game, the ripper uses the
 game's: a DSP1 `.cdc` file in the RomFS, or else a DSP1 image linked into the game's code,
@@ -327,8 +339,64 @@ the archive (external files, or a truncated archive) are listed and skipped, and
 aren't ripped.
 
 Tags written by `3sfrip`: `title` and `3sf_sound` (the sound's label), `game`, `length` and
-`fade` (sequences only), `3sf_mode`, `3sfby`, `utf8=1`, and optionally `artist`, `year` and
-`copyright`.
+`fade` (sequences only), `3sf_mode`, `3sfby`, `utf8=1`, and optionally `3sf_var`, `artist`,
+`year` and `copyright`.
+
+### Lengths
+
+`3sfrip` works out a sequence's length by playing it on 3SF's model of the sound player (see
+"Archive mode") with the rip's DSP firmware. A looping sequence gets two loops and a
+10-second fade. A sequence that ends plays until half a second after its last sound. Any
+silence before the sequence ends is cut. A sequence still playing at 600 seconds gets a length
+of 600 seconds and the fade. Sound means a sample louder than 8 of 32,767 (−72 dB). In either
+mode, the ripper lists and skips the sounds that make no sound: a sequence that the analysis
+finds never sounds, and a sound whose volume in the archive is 0. The sound library multiplies
+everything a sound plays by that volume.
+
+A note of 9,600 ticks or more (200 beats at the default timebase) is a held note. A sound that
+plays until the game stops it gives its notes such lengths. The game then stops the sound
+first.
+
+A sequence loops when its main track jumps back to a command it has already played, or reaches
+the end of a loop that repeats forever. A jump back inside a subroutine doesn't count, with two
+exceptions. One is an unconditional jump whose pass ran no conditional command: nothing can
+leave that loop. The other is an unconditional jump in a subroutine that the track can't leave
+while it holds a held note or a note of length 0 on a looping wave at its sustain level. A
+track's pass is what the track plays from the command it jumps back to until the jump. A pass
+changes the sound when the track plays a note, changes a setting of the track or the player, or
+opens a track. A tie or a monophonic note that continues the newest note at the same key and
+volume, with no sweep, changes nothing. A pass that changes nothing is idle. A track that only
+polls or counts a variable makes idle passes. An idle pass is never a loop. Any other pass of the
+first track is a loop. A pass of a later track is a loop if the track played a note during it
+and is the main track. A pass that played no note is a loop too while the track holds a held
+note or a note of length 0 on a looping wave at its sustain level and every other track still
+playing rests. A track rests when it waits forever, or when its last pass was idle and it has
+changed nothing since. A track is the main track when no earlier track still playing has loops
+that would count. The first track's loops count unless its last pass was idle or it waits
+forever. A later track's loops count only if its last pass played a note and wasn't idle, and
+the track doesn't wait forever. Two loops count together only if they come from the same track
+and go back to the same command. A loop of another track, or one that goes back elsewhere,
+starts the count again. Loops before the first sound don't count. A loop that completed without
+a sound ends the sequence at its last sound instead.
+
+A track waits forever when it waits a negative number of ticks, waits out a held note, or waits
+for its notes to end while one of them has no length and plays a looping wave. A length or a
+wait taken from a variable left at its default of −1 makes a negative wait. A track can't
+change the sound while its notes sound in three cases. It may wait for its notes of length 0
+to end. It may wait forever. Or it may make still passes while none of its notes has length
+left to run out. A held note and a note under the damper don't count there. A still pass is
+idle and draws no random number. It also leaves every variable that a track reads with the
+value that the pass before left. When no track can change the sound, or the tempo or timebase
+is 0, the sequence becomes steady once nothing else changes. No note's envelope is in its
+attack, hold, decay or release, no track's volume, pan, surround pan or pitch bend is moving,
+and no voice starts or stops. A steady sequence loops when every voice that plays has gone back
+to its wave's loop start twice since the sound last changed. If it has made no sound since
+then, it ended at its last sound instead. A sequence whose tracks will never change the sound
+again has ended once no note sounds. A track that makes still passes with notes in them can
+still change the sound. Once its notes end, its next pass starts a new one.
+
+A sequence that stays busy without a sound for 180 seconds ended where it fell silent. An
+example is one whose music has ended while a track that plays no notes runs on.
 
 ## Copyright
 

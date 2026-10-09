@@ -109,7 +109,8 @@ private:
     {
         if (off > data_.size() || len > data_.size() - off)
         {
-            throw std::runtime_error("read out of bounds at offset " + std::to_string(off));
+            throw std::runtime_error("the data ends before offset " + std::to_string(off) +
+                                     " (the file is cut short or damaged)");
         }
     }
 

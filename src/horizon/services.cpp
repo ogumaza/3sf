@@ -638,9 +638,15 @@ void CfgService::HandleRequest(Kernel& kernel, uint32_t cmdbuf)
             const uint32_t desc = ctx.Word(3);
             const uint32_t addr = ctx.Word(4);
             std::vector<uint8_t> data(size, 0);
+            // A block of size 0 gets nothing. Its empty vector may have no storage, and memcpy mustn't be given a null
+            // pointer.
             const auto put = [&](const uint8_t* src, std::size_t n)
             {
-                std::memcpy(data.data(), src, std::min<std::size_t>(n, size));
+                const std::size_t count = std::min<std::size_t>(n, size);
+                if (count)
+                {
+                    std::memcpy(data.data(), src, count);
+                }
             };
 
             switch (block)

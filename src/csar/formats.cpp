@@ -6,6 +6,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <map>
 #include <optional>
 #include <span>
@@ -50,6 +51,20 @@ std::map<uint16_t, std::pair<uint32_t, uint32_t>> BlockTable(const Reader& r, co
     return blocks;
 }
 
+// The offset and size of block `type` in a table from BlockTable. Throws std::runtime_error, naming the file and the
+// block, when the file has no such block.
+std::pair<uint32_t, uint32_t> FindBlock(const std::map<uint16_t, std::pair<uint32_t, uint32_t>>& blocks, uint16_t type,
+                                        const char* file, const char* block)
+{
+    const auto it = blocks.find(type);
+    if (it == blocks.end())
+    {
+        throw std::runtime_error(std::string(file) + " has no " + block + " block");
+    }
+
+    return it->second;
+}
+
 // A region table entry that plays nothing.
 constexpr std::size_t kNpos = static_cast<std::size_t>(-1);
 
@@ -84,8 +99,8 @@ Wave Wave::Parse(std::span<const uint8_t> file)
 {
     Reader r(file);
     auto blocks = BlockTable(r, "CWAV");
-    const uint32_t info_off = blocks.at(0x7000).first;
-    const auto [data_off, data_size] = blocks.at(0x7001);
+    const uint32_t info_off = FindBlock(blocks, 0x7000, "a wave (CWAV)", "INFO").first;
+    const auto [data_off, data_size] = FindBlock(blocks, 0x7001, "a wave (CWAV)", "DATA");
 
     const std::size_t b = info_off + 8;
     Wave w;
@@ -135,8 +150,8 @@ WaveArchive WaveArchive::Parse(std::span<const uint8_t> file)
 {
     Reader r(file);
     auto blocks = BlockTable(r, "CWAR");
-    const uint32_t info_off = blocks.at(0x6800).first;
-    const uint32_t file_off = blocks.at(0x6801).first;
+    const uint32_t info_off = FindBlock(blocks, 0x6800, "a wave archive (CWAR)", "INFO").first;
+    const uint32_t file_off = FindBlock(blocks, 0x6801, "a wave archive (CWAR)", "FILE").first;
 
     WaveArchive war;
     const uint32_t n = r.U32(info_off + 8);
@@ -199,10 +214,12 @@ VelocityRegion ReadVelocityRegion(const Reader& r, std::size_t p)
     return v;
 }
 
-// Reads a region table (direct/range/index). Returns (lo, hi, target offset or kNpos).
-std::vector<std::tuple<uint8_t, uint8_t, std::size_t>> ReadRegionTable(const Reader& r, std::size_t p)
+// Reads a region table (direct/range/index). Returns (lo, hi, target offset or kNpos). As in Pokemon X's lookup
+// (code.bin 0x490a24), a direct table's one region covers any value, a range table's entry covers the values up to its
+// u8 bound that no earlier entry does, and an index table's entries cover its u8 minimum to its maximum.
+std::vector<std::tuple<int, int, std::size_t>> ReadRegionTable(const Reader& r, std::size_t p)
 {
-    std::vector<std::tuple<uint8_t, uint8_t, std::size_t>> out;
+    std::vector<std::tuple<int, int, std::size_t>> out;
     const Reference ref = ReadRef(r, p);
     const std::size_t q = p + ref.offset;
 
@@ -220,29 +237,29 @@ std::vector<std::tuple<uint8_t, uint8_t, std::size_t>> ReadRegionTable(const Rea
     switch (ref.type)
     {
     case 0x6000: // direct
-        out.emplace_back(uint8_t{0}, uint8_t{127}, target(q, q));
+        out.emplace_back(0, KeyRegion::kAnyValue, target(q, q));
         break;
 
     case 0x6001: // range: count, upper keys, refs
         {
             const uint32_t n = r.U32(q);
             const std::size_t refs = q + 4 + ((n + 3) & ~3u);
-            uint8_t lo = 0;
+            int lo = 0;
             for (uint32_t i = 0; i < n; i++)
             {
-                const uint8_t hi = r.U8(q + 4 + i);
+                const int hi = r.U8(q + 4 + i);
                 out.emplace_back(lo, hi, target(refs + i * 8, q));
-                lo = static_cast<uint8_t>(hi + 1);
+                lo = hi + 1;
             }
             break;
         }
 
     case 0x6002: // index: min, max, refs
         {
-            const uint8_t mn = r.U8(q), mx = r.U8(q + 1);
+            const int mn = r.U8(q), mx = r.U8(q + 1);
             for (int k = mn; k <= mx; k++)
             {
-                out.emplace_back(static_cast<uint8_t>(k), static_cast<uint8_t>(k), target(q + 4 + (k - mn) * 8, q));
+                out.emplace_back(k, k, target(q + 4 + (k - mn) * 8, q));
             }
             break;
         }
@@ -282,7 +299,7 @@ Bank Bank::Parse(std::span<const uint8_t> file)
 {
     Reader r(file);
     auto blocks = BlockTable(r, "CBNK");
-    const uint32_t info_off = blocks.at(0x5800).first;
+    const uint32_t info_off = FindBlock(blocks, 0x5800, "a bank (CBNK)", "INFO").first;
 
     const std::size_t b = info_off + 8;
     std::size_t wave_table = 0, inst_table = 0;
@@ -363,7 +380,7 @@ Sequence Sequence::Parse(std::span<const uint8_t> file)
 {
     Reader r(file);
     auto blocks = BlockTable(r, "CSEQ");
-    const auto [data_off, data_size] = blocks.at(0x5000);
+    const auto [data_off, data_size] = FindBlock(blocks, 0x5000, "a sequence (CSEQ)", "DATA");
 
     Sequence s;
     s.data = r.Sub(data_off + 8, data_size - 8);
@@ -377,13 +394,8 @@ SoundArchive SoundArchive::Load(std::vector<uint8_t> bytes)
     a.bytes_ = std::move(bytes);
     Reader r(a.bytes_);
     auto blocks = BlockTable(r, "CSAR");
-    if (!blocks.count(0x2001) || !blocks.count(0x2002))
-    {
-        throw std::runtime_error("no INFO or FILE block");
-    }
-
-    const uint32_t info_off = blocks.at(0x2001).first;
-    const uint32_t file_off = blocks.at(0x2002).first;
+    const uint32_t info_off = FindBlock(blocks, 0x2001, "the sound archive", "INFO").first;
+    const uint32_t file_off = FindBlock(blocks, 0x2002, "the sound archive", "FILE").first;
 
     if (r.U32(0x0C) > a.bytes_.size())
     {
@@ -466,7 +478,15 @@ SoundArchive SoundArchive::Load(std::vector<uint8_t> bytes)
 
     const auto for_each = [&](uint16_t type, auto fn)
     {
-        const std::size_t t = tables.at(type);
+        const auto table = tables.find(type);
+        if (table == tables.end())
+        {
+            char hex[8];
+            std::snprintf(hex, sizeof(hex), "%04X", type);
+            throw std::runtime_error(std::string("the sound archive's INFO block has no table of type 0x") + hex);
+        }
+
+        const std::size_t t = table->second;
         const uint32_t n = r.U32(t);
         for (uint32_t i = 0; i < n; i++)
         {
@@ -594,8 +614,8 @@ SoundArchive SoundArchive::Load(std::vector<uint8_t> bytes)
         const FileEntry& group = a.files_[group_file];
         const Reader g(std::span<const uint8_t>(a.bytes_).subspan(group.offset, group.size));
         const auto group_blocks = BlockTable(g, "CGRP");
-        const uint32_t items = group_blocks.at(0x7800).first + 8;
-        const uint32_t data = group_blocks.at(0x7801).first + 8;
+        const uint32_t items = FindBlock(group_blocks, 0x7800, "a group (CGRP)", "INFO").first + 8;
+        const uint32_t data = FindBlock(group_blocks, 0x7801, "a group (CGRP)", "FILE").first + 8;
 
         const uint32_t n = g.U32(items);
         for (uint32_t i = 0; i < n; i++)

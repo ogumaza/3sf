@@ -139,11 +139,60 @@ static void TestGameFirmware()
     THREESF_CHECK(!from_neither);
 }
 
+// --bgm's labels: a word that starts with BGM, a jingle or a fanfare, with or without a number, or SEQ_M_ at the start,
+// in any case. Other words, and the same letters inside another word, don't count.
+static void TestMusicLabels()
+{
+    for (const char* label : {"AB_BGM_C", "BGM_X", "SEQ_S_BGM1", "ab_bgm_c", "SEQ_JIN_X", "X_JINGLE2", "SQ_FANFARE_A",
+                              "SEQ_M_X", "seq-m-x"})
+    {
+        Check(rip::LabelMarksMusic(label), std::string(label) + " is music");
+    }
+
+    for (const char* label : {"SEQ_SE_JUMP", "SE_JINJA", "SE_M_FALL", "SEQ_12", "SE_SONG_A", "XBGM_A", "SEQ_BG_M", ""})
+    {
+        Check(!rip::LabelMarksMusic(label), std::string(label) + " isn't music");
+    }
+}
+
+// The walk counts the tracks a sequence opens and the notes on every path, each once. It sizes each command's arguments
+// as the parser does (prefixes, variable-length numbers), and reads on past a conditional jump.
+static void TestWalkSequence()
+{
+    const std::vector<uint8_t> data = {
+        0x88, 0x01, 0x00, 0x00, 0x10,             // 0x00: opentrack 1 at 0x10
+        0x88, 0x02, 0x00, 0x00, 0x20,             // 0x05: opentrack 2 at 0x20
+        0x3c, 0x64, 0x30,                         // 0x0a: a note, 48 ticks long
+        0xff, 0xff, 0xff,                         // 0x0d: fin
+        0x3e, 0x64, 0x30,                         // 0x10: a note
+        0x80, 0x30,                               // 0x13: wait
+        0x89, 0x00, 0x00, 0x10,                   // 0x15: jump back to 0x10
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, // 0x19: fin
+        0xa0, 0x40, 0x64, 0x00, 0x00, 0x00, 0x30, // 0x20: a note with a random length (4 bytes)
+        0xa2, 0x89, 0x00, 0x00, 0x30,             // 0x27: a conditional jump to 0x30, which doesn't end the track
+        0xff, 0xff, 0xff, 0xff,                   // 0x2c: fin
+        0x41, 0x64, 0x81, 0x00,                   // 0x30: a note 128 ticks long (a two-byte length)
+        0xff,                                     // 0x34: fin
+    };
+    const std::vector<uint8_t> past_condition = {0xa2, 0x89, 0x00, 0x00, 0x08, 0x3c, 0x64, 0x30, 0xff};
+    const std::vector<uint8_t> cut_short = {0x88, 0x01};
+
+    const rip::SequenceShape shape = rip::WalkSequence(data, 0);
+    const rip::SequenceShape conditional = rip::WalkSequence(past_condition, 0);
+    const rip::SequenceShape truncated = rip::WalkSequence(cut_short, 0);
+
+    THREESF_CHECK(shape.tracks == 3 && shape.notes == 4);
+    THREESF_CHECK(conditional.tracks == 1 && conditional.notes == 1);
+    THREESF_CHECK(truncated.tracks == 2 && truncated.notes == 0);
+}
+
 int main()
 {
     TestFirmwareCandidates();
     TestFirmwareInCode();
     TestGameFirmware();
+    TestMusicLabels();
+    TestWalkSequence();
 
     if (failures)
     {

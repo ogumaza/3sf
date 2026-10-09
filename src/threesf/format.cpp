@@ -7,6 +7,8 @@
 #include <zlib.h>
 
 #include <algorithm>
+#include <array>
+#include <charconv>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -18,6 +20,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <utility>
 #include <vector>
 
@@ -349,15 +352,111 @@ std::string FormatTagArea(const Tags& tags)
     return text;
 }
 
+std::optional<DecimalNumber> ReadDecimal(std::string_view text)
+{
+    std::size_t at = 0;
+    const bool negative = !text.empty() && text[0] == '-';
+    if (!text.empty() && (text[0] == '-' || text[0] == '+'))
+    {
+        at++;
+    }
+
+    // Up to 19 significant digits fit in 64 bits. Later digits before the decimal point scale the value, and
+    // later digits after it are dropped.
+    constexpr int kMaxDigits = 19;
+    uint64_t digits = 0;
+    int significant = 0;
+    int exponent = 0; // of ten
+    bool any_digit = false;
+    bool point = false;
+    for (; at < text.size(); at++)
+    {
+        const char c = text[at];
+        if ((c == '.' || c == ',') && !point)
+        {
+            point = true;
+            continue;
+        }
+
+        if (c < '0' || c > '9')
+        {
+            break;
+        }
+
+        any_digit = true;
+        if (significant < kMaxDigits)
+        {
+            significant += digits != 0 || c != '0' ? 1 : 0;
+            digits = digits * 10 + static_cast<uint64_t>(c - '0');
+            exponent -= point ? 1 : 0;
+        }
+        else if (!point)
+        {
+            exponent++;
+        }
+    }
+
+    if (!any_digit)
+    {
+        return std::nullopt;
+    }
+
+    // An exponent counts only with a digit: "1e" is the number 1 followed by a letter.
+    constexpr int kMaxExponent = 100'000;
+    std::size_t end = at;
+    if (at < text.size() && (text[at] == 'e' || text[at] == 'E'))
+    {
+        std::size_t e = at + 1;
+        const bool negative_exponent = e < text.size() && text[e] == '-';
+        if (e < text.size() && (text[e] == '-' || text[e] == '+'))
+        {
+            e++;
+        }
+
+        const std::size_t first = e;
+        int value = 0;
+        for (; e < text.size() && text[e] >= '0' && text[e] <= '9'; e++)
+        {
+            value = std::min(value * 10 + (text[e] - '0'), kMaxExponent);
+        }
+
+        if (e > first)
+        {
+            exponent += negative_exponent ? -value : value;
+            end = e;
+        }
+    }
+
+    // While the digits fit in a double's 53 bits and the power of ten is at most 10^22, both are exact, and one
+    // multiplication or division rounds the value once and gives what std::strtod gives. Longer numbers and larger
+    // exponents round more than once and can differ from std::strtod in the last bit.
+    constexpr std::array<double, 23> kPowersOfTen = {1e0,  1e1,  1e2,  1e3,  1e4,  1e5,  1e6,  1e7,
+                                                     1e8,  1e9,  1e10, 1e11, 1e12, 1e13, 1e14, 1e15,
+                                                     1e16, 1e17, 1e18, 1e19, 1e20, 1e21, 1e22};
+    constexpr int kLargestPower = static_cast<int>(kPowersOfTen.size()) - 1;
+    double value = static_cast<double>(digits);
+    for (; exponent > kLargestPower; exponent -= kLargestPower)
+    {
+        value *= kPowersOfTen[kLargestPower];
+    }
+
+    for (; exponent < -kLargestPower; exponent += kLargestPower)
+    {
+        value /= kPowersOfTen[kLargestPower];
+    }
+
+    value = exponent < 0 ? value / kPowersOfTen[-exponent] : value * kPowersOfTen[exponent];
+
+    return DecimalNumber{negative ? -value : value, end};
+}
+
 long long ParseTime(const std::string& text)
 {
-    std::string time = Trim(text);
+    const std::string time = Trim(text);
     if (time.empty())
     {
         return -1;
     }
-
-    std::replace(time.begin(), time.end(), ',', '.');
 
     std::vector<std::string> parts;
     std::size_t start = 0;
@@ -391,11 +490,16 @@ long long ParseTime(const std::string& text)
         whole = whole * 60 + v;
     }
 
-    // The comparisons are written so that NaN and infinity fail them.
-    char* end = nullptr;
-    const double seconds = std::strtod(parts.back().c_str(), &end);
-    const double ms = (static_cast<double>(whole) * 60.0 + seconds) * 1000.0 + 0.5;
-    if (parts.back().empty() || !end || *end || !(seconds >= 0) || !(ms <= kMaxTimeMs))
+    const std::string seconds_text = Trim(parts.back());
+    const std::optional<DecimalNumber> seconds = ReadDecimal(seconds_text);
+    if (!seconds || seconds->length != seconds_text.size())
+    {
+        return -1;
+    }
+
+    // The comparisons are written so that infinity fails them.
+    const double ms = (static_cast<double>(whole) * 60.0 + seconds->value) * 1000.0 + 0.5;
+    if (!(seconds->value >= 0) || !(ms <= kMaxTimeMs))
     {
         return -1;
     }
@@ -409,6 +513,85 @@ std::string FormatTime(long long ms)
     std::snprintf(buf, sizeof(buf), "%lld:%02lld.%03lld", ms / 60000, (ms / 1000) % 60, ms % 1000);
 
     return buf;
+}
+
+namespace
+{
+
+// A whole number in decimal, or in hex with a 0x prefix, either with an optional minus sign. Unlike std::strtol, this
+// doesn't depend on the C locale, and it takes no white space or other characters around the number.
+std::optional<int64_t> ParseInteger(std::string_view text)
+{
+    const bool negative = text.starts_with('-');
+    if (negative)
+    {
+        text.remove_prefix(1);
+    }
+
+    const bool hex = text.starts_with("0x") || text.starts_with("0X");
+    if (hex)
+    {
+        text.remove_prefix(2);
+    }
+
+    uint32_t n = 0;
+    const char* last = text.data() + text.size();
+    const auto [end, error] = std::from_chars(text.data(), last, n, hex ? 16 : 10);
+    if (text.empty() || error != std::errc{} || end != last)
+    {
+        return std::nullopt;
+    }
+
+    return negative ? -static_cast<int64_t>(n) : static_cast<int64_t>(n);
+}
+
+} // namespace
+
+std::optional<Variables> ParseVariables(std::string_view text)
+{
+    constexpr std::string_view kSeparators = ", \t\r\n";
+
+    Variables variables;
+    std::size_t at = 0;
+    while ((at = text.find_first_not_of(kSeparators, at)) != std::string_view::npos)
+    {
+        const std::size_t end = std::min(text.find_first_of(kSeparators, at), text.size());
+        const std::string_view assignment = text.substr(at, end - at);
+        at = end;
+
+        const std::size_t equals = assignment.find('=');
+        if (equals == std::string_view::npos)
+        {
+            return std::nullopt;
+        }
+
+        const std::optional<int64_t> index = ParseInteger(assignment.substr(0, equals));
+        const std::optional<int64_t> value = ParseInteger(assignment.substr(equals + 1));
+        if (!index || !value || *index < 0 || *index > 31 || *value < INT16_MIN || *value > INT16_MAX)
+        {
+            return std::nullopt;
+        }
+
+        variables[static_cast<int>(*index)] = static_cast<int16_t>(*value);
+    }
+
+    if (variables.empty())
+    {
+        return std::nullopt;
+    }
+
+    return variables;
+}
+
+std::string FormatVariables(const Variables& variables)
+{
+    std::string text;
+    for (const auto& [index, value] : variables)
+    {
+        text += (text.empty() ? "" : ", ") + std::to_string(index) + "=" + std::to_string(value);
+    }
+
+    return text;
 }
 
 std::vector<uint8_t> ProcessDescriptor::Serialize() const

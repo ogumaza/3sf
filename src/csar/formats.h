@@ -7,6 +7,7 @@
 
 #include <array>
 #include <cstdint>
+#include <limits>
 #include <optional>
 #include <span>
 #include <string>
@@ -80,16 +81,20 @@ struct VelocityRegion
     Adshr adshr;
 };
 
+// The bounds are ints: a direct table covers every value, up to kAnyValue, and a velocity can pass 255 (a velocity
+// byte above 127 with a velocity range above 127).
 struct KeyRegion
 {
+    static constexpr int kAnyValue = std::numeric_limits<int>::max();
+
     // A velocity range and the region it plays, if any.
     struct Vel
     {
-        uint8_t lo, hi;
+        int lo, hi;
         std::optional<VelocityRegion> region;
     };
 
-    uint8_t lo = 0, hi = 127;
+    int lo = 0, hi = 127;
     std::vector<Vel> velocities;
 };
 

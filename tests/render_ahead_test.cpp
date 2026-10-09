@@ -33,6 +33,23 @@ namespace
 
 using Clock = std::chrono::steady_clock;
 
+constexpr auto kDelayBatch = std::chrono::milliseconds(20);
+
+// Delays the calling thread by `duration` on average. Windows rounds each sleep up to its timer period of about 15.6
+// ms. This test makes thousands of short delays, and they took minutes in all on Windows. Short delays add up per
+// thread instead, and the thread sleeps once they reach kDelayBatch. Any extra time slept counts towards later delays.
+void Delay(std::chrono::microseconds duration)
+{
+    thread_local std::chrono::nanoseconds owed{0};
+    owed += duration;
+    if (owed >= kDelayBatch)
+    {
+        const auto start = Clock::now();
+        std::this_thread::sleep_for(owed);
+        owed -= Clock::now() - start;
+    }
+}
+
 // The sample at `frame` in `channel`. No two frames have the same pair below 2^32 frames.
 int16_t Sample(uint64_t frame, int channel)
 {
@@ -78,7 +95,7 @@ public:
     {
         if (settings_.delay.count() > 0)
         {
-            std::this_thread::sleep_for(settings_.delay);
+            Delay(settings_.delay);
         }
 
         const uint64_t end = std::min(settings_.length, settings_.fail_at.value_or(UINT64_MAX));
@@ -117,7 +134,7 @@ public:
 
             if (settings_.seek_delay.count() > 0)
             {
-                std::this_thread::sleep_for(settings_.seek_delay);
+                Delay(settings_.seek_delay);
             }
 
             if (Render(block.data(), static_cast<std::size_t>(std::min<uint64_t>(4096, frame - position_))) == 0)
@@ -440,7 +457,7 @@ void TestRandom(int rounds)
                 ahead->Seek(position);
                 if (rng() % 2)
                 {
-                    std::this_thread::sleep_for(std::chrono::microseconds(rng() % 2000));
+                    Delay(std::chrono::microseconds(rng() % 2000));
                 }
 
                 continue;

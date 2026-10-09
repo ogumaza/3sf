@@ -16,4 +16,8 @@ namespace threesf
 // an error message on failure.
 std::optional<std::string> WriteAudio(const std::string& path, const std::vector<int16_t>& pcm, uint32_t rate);
 
+// Returns the error that WriteAudio would give for `frames` stereo frames because the file `path` names can't hold
+// them, or nullopt if it can. A WAV file's sizes are 32-bit. It holds a little over 9 hours at 32,728 Hz.
+std::optional<std::string> CheckAudioLength(const std::string& path, uint64_t frames);
+
 } // namespace threesf

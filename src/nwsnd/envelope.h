@@ -82,6 +82,8 @@ struct LfoParam
         *this = LfoParam{};
     }
 
+    bool operator==(const LfoParam&) const = default;
+
     float depth = 0.0f;  // 0..1 (MML mod_depth / 128)
     float speed = 6.25f; // Hz (MML mod_speed * 100/256)
     uint32_t delay = 0;  // ms (MML mod_delay * 5)

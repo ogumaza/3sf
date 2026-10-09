@@ -5,8 +5,12 @@
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <cstddef>
 #include <cstdint>
+#include <functional>
+#include <optional>
 #include <span>
+#include <vector>
 
 #include "nwsnd/engine.h"
 #include "nwsnd/util.h"
@@ -23,6 +27,10 @@ const float kOneOverArmClock = std::bit_cast<float>(0x3180278du); // 1/268111856
 
 constexpr uint64_t kFrameMilliCycles = 0x4e200000; // one sound frame (160 samples) in ARM cycles x 1000
 constexpr int kParseLimit = 10000;                 // commands per tick (0x31dd08)
+
+// A note this long or longer is held: it sounds until the game stops the sound. A track that waits it out, with note
+// wait on, waits for ever as far as the ripper's length analysis is concerned (SequenceTrack::WaitsForEver).
+constexpr int32_t kHeldTicks = 9600;
 
 } // namespace
 
@@ -266,7 +274,7 @@ int SequenceTrack::ParseNextTick(bool do_note_on)
             break;
         }
 
-        if (Parse(do_note_on) == 1)
+        if (RunCommand(do_note_on) == 1)
         {
             return -1;
         }
@@ -324,6 +332,7 @@ int32_t SequenceTrack::ReadArg(int type)
             const uint32_t l2 = ReadByte();
             const int32_t hi = static_cast<int16_t>(((h2 << 8) & 0xffff) | l2);
             const uint32_t r = player_->GetEngine().Rng().Next();
+            drew_at_ = player_->commands_run_;
 
             // 32-bit wrapping multiply, arithmetic shift (as the ARM code does).
             const int32_t prod = static_cast<int32_t>(static_cast<uint32_t>((hi - lo) + 1) * r);
@@ -333,6 +342,7 @@ int32_t SequenceTrack::ReadArg(int type)
     case kArgVariable:
         {
             const uint8_t idx = ReadByte();
+            MarkRead(idx);
             int16_t* var = nullptr;
             if (idx < 0x20)
             {
@@ -355,15 +365,89 @@ int32_t SequenceTrack::ReadArg(int type)
     }
 }
 
+SequenceTrack::SoundState SequenceTrack::State() const
+{
+    SoundState state{};
+    state.prg_no = prg_no_;
+    state.bank_index = bank_index_;
+    state.transpose = transpose_;
+    state.velocity_range = velocity_range_;
+    state.bend_range = bend_range_;
+    state.priority = priority_;
+    state.porta_key = porta_key_;
+    state.porta_time = porta_time_;
+    state.main_send = main_send_;
+    state.volume2 = volume2_;
+    state.biquad_type = biquad_type_;
+    state.init_pan = init_pan_;
+    state.envelope = {attack_, decay_, sustain_, release_};
+    state.hold = hold_;
+    state.fx_send = fx_send_;
+    state.lpf = lpf_;
+    state.biquad_value = biquad_value_;
+    state.sweep_pitch = sweep_pitch_;
+    state.lfo = lfo_;
+    state.lfo_type = lfo_type_;
+    state.mute = mute_;
+    state.tie = tie_;
+    state.mono = mono_;
+    state.porta = porta_;
+    state.damper = damper_;
+    state.front_bypass = front_bypass_;
+    state.note_wait = note_wait_;
+
+    std::size_t at = 0;
+    const auto ramp = [&state, &at](const auto& value)
+    {
+        state.ramps[at++] = value.Get();
+        state.ramps[at++] = value.target;
+        state.ramps[at++] = value.duration - value.counter;
+    };
+    ramp(vol_);
+    ramp(pan_move_);
+    ramp(span_move_);
+    ramp(bend_);
+
+    state.newest = channel_list_;
+    state.timebase = player_->timebase_;
+    state.main_volume = player_->main_volume_;
+    state.tempo = player_->tempo_;
+
+    return state;
+}
+
+int SequenceTrack::RunCommand(bool do_note_on)
+{
+    if (!player_->on_loop_)
+    {
+        return Parse(do_note_on);
+    }
+
+    const uint64_t now = ++player_->commands_run_;
+    run_.resize(data_.size() + 1);
+    run_[std::min<std::size_t>(current_, data_.size())] = now;
+    const SoundState before = State();
+    const int result = Parse(do_note_on);
+    if (State() != before)
+    {
+        MarkChange();
+    }
+
+    return result;
+}
+
 int SequenceTrack::Parse(bool do_note_on)
 {
     // 0x49036c (MmlParser::Parse). Returns 1 on FIN.
     int arg_type = kArgNone;
     int time_type = kArgNone;
     bool cond = true;
+    held_wait_ = false;
     uint32_t cmd = ReadByte();
-    if (cmd == 0xa2) // if
+    conditional_ = cmd == 0xa2;
+    if (conditional_) // if
     {
+        conditional_at_ = player_->commands_run_;
         cmd = ReadByte();
         cond = cmp_flag_;
     }
@@ -413,14 +497,17 @@ int SequenceTrack::Parse(bool do_note_on)
         }
 
         const int key = std::clamp(static_cast<int>(transpose_) + static_cast<int>(cmd), 0, 127);
-        if (!mute_ && do_note_on)
+        noted_at_ = player_->commands_run_;
+        holds_ = length >= kHeldTicks;
+        if (!mute_ && do_note_on && NoteOn(key, velocity, length > 0 ? length : -1, tie_))
         {
-            NoteOn(key, velocity, length > 0 ? length : -1, tie_);
+            MarkChange();
         }
 
         if (note_wait_)
         {
             wait_ = length;
+            held_wait_ = holds_;
             if (length == 0)
             {
                 note_finish_wait_ = true;
@@ -603,6 +690,11 @@ void SequenceTrack::CommandProc(uint32_t cmd, int32_t arg1, int32_t arg2)
             }
         }
 
+        if ((op & 0xf0) == 0x90)
+        {
+            MarkRead(arg1);
+        }
+
         const int32_t v = arg2;
         const int16_t v16 = static_cast<int16_t>(v);
         switch (op)
@@ -658,6 +750,7 @@ void SequenceTrack::CommandProc(uint32_t cmd, int32_t arg1, int32_t arg2)
                 int32_t r = static_cast<int32_t>(static_cast<uint32_t>(player_->GetEngine().Rng().Next()) *
                                                  static_cast<uint32_t>(range + 1)) >>
                             16;
+                drew_at_ = player_->commands_run_;
                 if (neg)
                 {
                     r = -r;
@@ -743,17 +836,34 @@ void SequenceTrack::CommandProc(uint32_t cmd, int32_t arg1, int32_t arg2)
             target->Close();
             target->SetSeqData(data_, static_cast<uint32_t>(arg2));
             target->Open();
+            MarkChange(); // the new track's sound is this pass's change
             break;
         }
 
     case 0x89: // jump
-        if (static_cast<uint32_t>(arg1) < current_ && index_ == 0 && player_->on_loop_)
         {
-            player_->on_loop_();
-        }
+            // A jump back to a command that the track has run is a loop, outside a subroutine. Inside a subroutine,
+            // such as one that draws a random value again until it differs from the last, the jump isn't a loop. An
+            // unconditional jump inside a subroutine is still a loop when its pass ran no conditional command: then
+            // nothing can leave the loop. So is one while the track holds a note that sounds until the game stops it.
+            // A subroutine that bends a held note's pitch for ever is an example.
+            const auto target = static_cast<uint32_t>(arg1);
+            if (target < current_ && target < run_.size() && run_[target] != 0)
+            {
+                const auto call = [](const CallStackEntry& entry)
+                {
+                    return !entry.is_loop;
+                };
+                const bool in_call = std::any_of(call_stack_.begin(), call_stack_.begin() + call_depth_, call);
+                if (!in_call || (!conditional_ && (conditional_at_ < run_[target] || HoldsSustainedNote())))
+                {
+                    CountLoop(target);
+                }
+            }
 
-        current_ = static_cast<uint32_t>(arg1);
-        break;
+            current_ = target;
+            break;
+        }
 
     case 0x8a: // call
         if (call_depth_ >= 3)
@@ -968,11 +1078,6 @@ void SequenceTrack::CommandProc(uint32_t cmd, int32_t arg1, int32_t arg2)
             }
 
             uint8_t count = e.loop_count;
-            if (count == 0 && index_ == 0 && player_->on_loop_)
-            {
-                player_->on_loop_(); // infinite loop in the main track
-            }
-
             if (count != 0)
             {
                 count--;
@@ -981,6 +1086,11 @@ void SequenceTrack::CommandProc(uint32_t cmd, int32_t arg1, int32_t arg2)
                     call_depth_--;
                     break;
                 }
+            }
+            else
+            {
+                // A count of 0 loops for ever. On the main track, that's a loop of the sequence.
+                CountLoop(e.address);
             }
 
             e.loop_count = count;
@@ -1003,6 +1113,136 @@ void SequenceTrack::CommandProc(uint32_t cmd, int32_t arg1, int32_t arg2)
     default:
         break;
     }
+}
+
+void SequenceTrack::CountLoop(uint32_t target)
+{
+    if (!player_->on_loop_)
+    {
+        return;
+    }
+
+    // The pass began when the track last ran `target`. A still pass also left the variables that tracks read with the
+    // values that the pass before left. The first pass compares them with 0. A variable that no track reads doesn't
+    // count. The game may read it: a timing track can mark beats for the game.
+    const uint64_t begun = target < run_.size() ? run_[target] : 0;
+    std::array<int16_t, 48> variables{};
+    for (int i = 0; i < static_cast<int>(variables.size()); i++)
+    {
+        const int16_t* variable = IsRead(i) ? CommandVariable(i) : nullptr;
+        variables[static_cast<std::size_t>(i)] = variable ? *variable : 0;
+    }
+
+    idle_ = changed_at_ < begun;
+    still_ = idle_ && drew_at_ < begun && variables == loop_variables_;
+    loop_variables_ = variables;
+    looped_at_ = player_->commands_run_;
+    const bool alone = HoldsSustainedNote() && player_->OthersRest(index_);
+    const bool noted = noted_at_ != 0 && noted_at_ >= begun;
+    if (!idle_ && (index_ == 0 || (noted && player_->IsMainTrack(index_)) || alone))
+    {
+        player_->on_loop_(index_, target);
+    }
+
+    quiet_ = !noted;
+}
+
+void SequenceTrack::MarkChange()
+{
+    changed_at_ = player_->commands_run_;
+    player_->changed_at_ = changed_at_;
+}
+
+void SequenceTrack::MarkRead(int index)
+{
+    if (index >= 0 && index < 32)
+    {
+        player_->variables_read_ |= 1u << index;
+    }
+    else if (index >= 32 && index < 48)
+    {
+        variables_read_ = static_cast<uint16_t>(variables_read_ | 1u << (index - 32));
+    }
+}
+
+bool SequenceTrack::IsRead(int index) const
+{
+    if (index >= 0 && index < 32)
+    {
+        return (player_->variables_read_ >> index & 1) != 0;
+    }
+
+    if (index >= 32 && index < 48)
+    {
+        return (variables_read_ >> (index - 32) & 1) != 0;
+    }
+
+    return false;
+}
+
+int16_t* SequenceTrack::CommandVariable(int index)
+{
+    if (index < 0x20)
+    {
+        return player_->Variable(index);
+    }
+
+    if (index < 0x30)
+    {
+        return Variable(index - 0x20);
+    }
+
+    return nullptr;
+}
+
+bool SequenceTrack::HoldsSustainedNote() const
+{
+    for (const Channel* ch = channel_list_; ch; ch = ch->next_in_track_)
+    {
+        const bool endless = holds_ || ch->length_ < 0;
+        if (endless && ch->env_.GetStatus() == EnvGenerator::Status::kSustain && ch->wave_loops_)
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool SequenceTrack::HasEndingNote() const
+{
+    if (holds_ || damper_)
+    {
+        return false;
+    }
+
+    for (const Channel* ch = channel_list_; ch; ch = ch->next_in_track_)
+    {
+        if (ch->length_ > 0)
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool SequenceTrack::WaitsOnEndlessNote() const
+{
+    if (!note_finish_wait_)
+    {
+        return false;
+    }
+
+    for (const Channel* ch = channel_list_; ch; ch = ch->next_in_track_)
+    {
+        if (ch->length_ < 0 && ch->wave_loops_)
+        {
+            return true;
+        }
+    }
+
+    return false;
 }
 
 Channel::Callback SequenceTrack::MakeCallback()
@@ -1038,9 +1278,12 @@ void SequenceTrack::OnChannelEvent(Channel* ch, Channel::CallbackStatus status)
     }
 }
 
-void SequenceTrack::NoteOn(int key, int velocity, int32_t length, bool tie)
+bool SequenceTrack::NoteOn(int key, int velocity, int32_t length, bool tie)
 {
-    // 0x31e2a4
+    // 0x31e2a4. The newest channel's key and volume tell whether a note that carries it on changes the sound.
+    const Channel* const newest = channel_list_;
+    const uint8_t newest_key = newest ? newest->key_ : 0;
+    const float newest_volume = newest ? newest->init_volume_ : 0.0f;
     const int vel = velocity * velocity_range_ / 127;
     const auto tie_volume = [&]
     {
@@ -1091,7 +1334,7 @@ void SequenceTrack::NoteOn(int key, int velocity, int32_t length, bool tie)
         ch = player_->GetEngine().NoteOn(player_->GetBank(bank_index_), info);
         if (!ch)
         {
-            return;
+            return false;
         }
 
         if (ch->key_group_ != 0)
@@ -1162,6 +1405,8 @@ void SequenceTrack::NoteOn(int key, int velocity, int32_t length, bool tie)
     {
         ch->voice_->SetFrontBypass(front_bypass_);
     }
+
+    return ch != newest || ch->key_ != newest_key || ch->init_volume_ != newest_volume || sweep != 0.0f;
 }
 
 void SequenceTrack::UpdateChannelParam()
@@ -1274,6 +1519,82 @@ void SequenceSoundPlayer::DetachChannels()
             t->DetachChannels();
         }
     }
+}
+
+void SequenceSoundPlayer::SetVariable(int index, int16_t value)
+{
+    if (int16_t* variable = Variable(index))
+    {
+        *variable = value;
+    }
+}
+
+bool SequenceSoundPlayer::IsSettled() const
+{
+    const auto settled = [](const SequenceTrack& track)
+    {
+        return track.WaitsForNotes() || (track.IsStill() && !track.HasEndingNote());
+    };
+    return tempo_ == 0 || timebase_ == 0 || EveryOpenTrack(settled);
+}
+
+bool SequenceSoundPlayer::IsStuck() const
+{
+    const auto stuck = [](const SequenceTrack& track)
+    {
+        return track.WaitsForEver() || (track.IsStill() && track.IsQuiet());
+    };
+    return tempo_ == 0 || timebase_ == 0 || EveryOpenTrack(stuck);
+}
+
+bool SequenceSoundPlayer::IsMoving() const
+{
+    const auto still = [](const SequenceTrack& track)
+    {
+        return !track.IsMoving();
+    };
+    return !EveryOpenTrack(still);
+}
+
+bool SequenceSoundPlayer::IsMainTrack(int index) const
+{
+    for (int i = 0; i < index; i++)
+    {
+        const std::optional<SequenceTrack>& track = tracks_[i];
+        if (track && track->IsOpen() && !track->IsIdle() && !track->WaitsForEver() && (i == 0 || !track->IsQuiet()))
+        {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+bool SequenceSoundPlayer::OthersRest(int index) const
+{
+    for (int i = 0; i < 16; i++)
+    {
+        const std::optional<SequenceTrack>& track = tracks_[i];
+        if (i != index && track && track->IsOpen() && !track->IsIdle() && !track->WaitsForEver())
+        {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+bool SequenceSoundPlayer::EveryOpenTrack(const std::function<bool(const SequenceTrack& track)>& test) const
+{
+    for (const std::optional<SequenceTrack>& track : tracks_)
+    {
+        if (track && track->IsOpen() && !test(*track))
+        {
+            return false;
+        }
+    }
+
+    return true;
 }
 
 void SequenceSoundPlayer::Start()

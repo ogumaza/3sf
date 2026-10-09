@@ -3,7 +3,7 @@
 cmake_minimum_required(VERSION 3.20)
 # Shared version for 3sfrip, 3sfplay, the foobar2000 component, Windows file properties and macOS bundles
 # (threesf_add_version below). For a release, update it here and add notes in docs/release-notes/.
-project(threesf VERSION 1.1.0 LANGUAGES CXX)
+project(threesf VERSION 1.2.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -408,6 +408,10 @@ foreach (tool 3sfrip 3sfplay)
     add_test(NAME version_${tool} COMMAND ${tool} --version)
     set_tests_properties(version_${tool} PROPERTIES PASS_REGULAR_EXPRESSION "^${tool} ${version_pattern}[\r\n]*$")
 endforeach()
+
+# --var takes N=V with N from 0 to 31, and anything else is an error before an input is read.
+add_test(NAME var_out_of_range COMMAND 3sfrip --var 32=1 no-such-archive.bcsar)
+set_tests_properties(var_out_of_range PROPERTIES PASS_REGULAR_EXPRESSION "error: --var takes N=V")
 
 # Load local_tests.cmake from each immediate subdirectory to register tests that use locally supplied files.
 file(GLOB local_tests CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/*/local_tests.cmake)

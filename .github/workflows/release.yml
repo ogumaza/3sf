@@ -6,7 +6,8 @@
 #   3sf-X.Y.Z-win32.zip                 the same for 32-bit Windows
 #   foo_input_3sf-X.Y.Z.fb2k-component  the component for 64-bit and 32-bit foobar2000: the 32-bit DLL at the top
 #                                       level and the 64-bit one in x64/, with the licences
-# Manual runs (Actions > Release > Run workflow) build the same files as an artifact without publishing a release.
+# Manual runs (Actions > Release > Run workflow) build the same files as an artifact without publishing a release, even
+# when started from a tag.
 # The build downloads the foobar2000 SDK from foobar2000.org (.github/actions/foobar2000-sdk).
 name: Release
 
@@ -130,7 +131,7 @@ jobs:
           done
 
       - name: Publish the release
-        if: github.ref_type == 'tag'
+        if: github.event_name == 'push'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -138,7 +139,7 @@ jobs:
             --notes-file "docs/release-notes/$VERSION.md"
 
       - name: Upload files from a manual run
-        if: github.ref_type != 'tag'
+        if: github.event_name != 'push'
         uses: actions/upload-artifact@v7
         with:
           name: 3sf-${{ env.VERSION }}

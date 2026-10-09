@@ -14,6 +14,8 @@
 #include "csar/formats.h"
 #include "dsp/teakra_dsp.h"
 #include "nwsnd/engine.h"
+#include "nwsnd/sequence.h"
+#include "threesf/format.h"
 
 namespace threesf
 {
@@ -96,9 +98,19 @@ std::optional<std::string> ArchivePlayer::Start(const LoadedSet& set)
         return "the DSP firmware didn't start";
     }
 
-    if (!s.model.engine->StartSequence(index))
+    nwsnd::SequenceSoundPlayer* player = s.model.engine->StartSequence(index);
+    if (!player)
     {
         return "sound " + std::to_string(index) + " isn't a sequence, or its data isn't in the archive";
+    }
+
+    // The 3sf_var tag sets variables before the sequence's first tick. A tag that doesn't parse is ignored.
+    const auto tag = set.tags.find("3sf_var");
+    const std::optional<Variables> variables =
+        tag != set.tags.end() ? ParseVariables(tag->second) : std::optional<Variables>();
+    for (const auto& [number, value] : variables.value_or(Variables{}))
+    {
+        player->SetVariable(number, value);
     }
 
     return std::nullopt;

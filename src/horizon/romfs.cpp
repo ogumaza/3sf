@@ -345,7 +345,8 @@ RomFs::RomFs(std::vector<File> files)
 
 uint64_t RomFs::Read(uint64_t offset, uint64_t length, uint8_t* dst) const
 {
-    if (offset >= size_)
+    // A read of nothing may come without a buffer, and memset and memcpy mustn't be given a null pointer.
+    if (offset >= size_ || length == 0)
     {
         return 0;
     }

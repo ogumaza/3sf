@@ -115,6 +115,13 @@ int Render(const std::string& in, const fs::path& out, const Options& o)
         return 0;
     }
 
+    // Refuse a length the file can't hold before rendering it. The render would take hours.
+    if (const auto err = CheckAudioLength(out.string(), playback.LengthFrames()))
+    {
+        std::fprintf(stderr, "error: %s\n", err->c_str());
+        return 1;
+    }
+
     const auto t0 = std::chrono::steady_clock::now();
 
     if (!playback.Start())

@@ -250,6 +250,21 @@ void TestArchiveTables()
     THREESF_CHECK(names_error == "the names don't fit in the string block");
 }
 
+// A file without a block that it needs names the block in its error. The standard library's message was "map::at".
+void TestMissingBlocks()
+{
+    std::vector<uint8_t> bank(0x40);
+    std::vector<uint8_t> sequence(0x40);
+    PutHeader(bank, "CBNK", {});
+    PutHeader(sequence, "CSEQ", {{0x5001, 0x20, 0x20}});
+
+    const std::string bank_error = ErrorOf([&] { csar::Bank::Parse(bank); });
+    const std::string sequence_error = ErrorOf([&] { csar::Sequence::Parse(sequence); });
+
+    THREESF_CHECK(bank_error == "a bank (CBNK) has no INFO block");
+    THREESF_CHECK(sequence_error == "a sequence (CSEQ) has no DATA block");
+}
+
 void TestGroups()
 {
     const std::vector<uint8_t> kPayload = {'C', 'B', 'N', 'K', 1, 2, 3, 4, 5};
@@ -269,6 +284,7 @@ int main()
 {
     TestBankRegions();
     TestArchiveTables();
+    TestMissingBlocks();
     TestGroups();
 
     if (failures)

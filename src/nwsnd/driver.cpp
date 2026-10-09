@@ -41,15 +41,21 @@ float Clamp01(float v)
     return v;
 }
 
-// Sample offset -> byte offset (code.bin 0x186888).
+// Sample offset -> byte offset (code.bin 0x186888). DSP-ADPCM counts in nibbles: 16 for each frame of 14 samples, and
+// for a partial frame its header's two and one for each sample. Half the count is the byte that holds the sample.
 uint32_t SamplesToBytes(uint32_t samples, uint8_t nw_format)
 {
     switch (nw_format)
     {
     case 0:
         return samples;
+
     case 3:
-        return samples / 14 * 8;
+        {
+            const uint32_t rest = samples % 14;
+            return (samples / 14 * 16 + (rest ? rest + 2 : 0)) / 2;
+        }
+
     default:
         return samples * 2;
     }
@@ -819,6 +825,7 @@ void Channel::Start(const WaveInfo& info, int length)
 {
     // 0x320bdc
     length_ = length;
+    wave_loops_ = info.loop;
     lfo_.Reset();
     env_.Reset();
     sweep_counter_ = 0;
@@ -1082,6 +1089,15 @@ void ChannelManager::UpdateAllChannel()
 int ChannelManager::ActiveCount() const
 {
     return static_cast<int>(active_list_.size());
+}
+
+bool ChannelManager::AnyChanging() const
+{
+    const auto changing = [](const Channel* ch)
+    {
+        return ch->env_.GetStatus() != EnvGenerator::Status::kSustain;
+    };
+    return std::any_of(active_list_.begin(), active_list_.end(), changing);
 }
 
 ChannelManager::Snapshot ChannelManager::Save() const

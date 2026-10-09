@@ -568,6 +568,12 @@ std::optional<std::string> LoadGameDirectory(const std::string& dir, GameFiles& 
     out = GameFiles{};
 
     const fs::path exefs = fs::path(dir) / "exefs";
+    std::error_code exefs_error;
+    if (!fs::is_directory(exefs, exefs_error))
+    {
+        return dir + " isn't an extracted game: it has no exefs folder";
+    }
+
     if (!ReadFile(exefs / "exheader.bin", out.exheader) || out.exheader.size() < 0x400)
     {
         return "can't read " + (exefs / "exheader.bin").string();
@@ -592,11 +598,27 @@ std::optional<std::string> LoadGameDirectory(const std::string& dir, GameFiles& 
         out.code = std::move(*code);
     }
 
+    // Folders that are symbolic links are followed, but not into a folder that holds the link. That would loop. An
+    // entry that can't be read, such as a broken link, is passed over.
     const fs::path romfs = fs::path(dir) / "romfs";
     std::error_code ec;
-    for (fs::recursive_directory_iterator it(romfs, ec), end; !ec && it != end; it.increment(ec))
+    std::vector<fs::path> ancestors = {fs::canonical(romfs, ec)}; // the folders that hold the current entry
+    for (fs::recursive_directory_iterator it(romfs, fs::directory_options::follow_directory_symlink, ec), end;
+         !ec && it != end; it.increment(ec))
     {
-        if (it->is_regular_file(ec))
+        std::error_code entry_error;
+        if (it->is_directory(entry_error))
+        {
+            ancestors.resize(static_cast<std::size_t>(it.depth()) + 1);
+            const fs::path folder = fs::canonical(it->path(), entry_error);
+            if (entry_error || std::find(ancestors.begin(), ancestors.end(), folder) != ancestors.end())
+            {
+                it.disable_recursion_pending();
+            }
+
+            ancestors.push_back(folder);
+        }
+        else if (it->is_regular_file(entry_error))
         {
             out.romfs_files.push_back(it->path().lexically_relative(romfs).generic_string());
         }

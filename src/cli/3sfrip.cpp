@@ -14,22 +14,28 @@
 //                    3SF's model of the SDK sound player instead.
 //   --firmware FILE  the DSP firmware for archive mode: any 3DS game's dspaudio.cdc, or the dspfirm.cdc that homebrew
 //                    dumps from a console. By default, a .bcsar uses a firmware file given along with it or else one
-//                    in its own directory, and a game uses its own.
+//                    in the archive's directory, and a game uses the firmware the game has.
 //   --archive PATH   archive mode on a game: rip only this sound archive (RomFS path)
 //   --only REGEX     rip only sounds whose label matches (ECMAScript regex)
-//   --bgm            shortcut for --only '^SEQ_BGM'
-//   --no-length      don't analyze lengths (no length/fade tags)
+//   --bgm            rip only the music (rip::IsMusic), and with --only, only the music whose label matches
+//   --no-length      don't analyze lengths (no length/fade tags, and only the sounds at a volume of 0 are found to make
+//                    no sound)
+//   --var N=V        archive mode: set variable N (0 to 15 the player's, 16 to 31 the global ones) to V before each
+//                    sequence starts, and write it in the 3sf_var tag; repeat it for more variables
 //   --jobs N         length analyses run in parallel (default: the number of CPU threads, at most 8 in a 32-bit build)
 //   --game NAME      game tag (default: the profile's name, or else the name of the image, directory or archive)
 //   --artist NAME, --year YEAR, --copyright TEXT, --by NAME (3sfby)
 //   --version        print the version
 //
-// The inputs are ripped one after another, and one that fails doesn't stop the rest. Dropping files on the program
-// gives it the files as inputs.
+// Sequences whose data isn't all in the archive are listed and skipped, and so are the sounds that make no sound: those
+// whose volume in the archive is 0, and the sequences that the length analysis finds never sound. The inputs are ripped
+// one after another, and one that fails doesn't stop the rest. Dropping files on the program gives it the files as
+// inputs.
 
 #include <zlib.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
@@ -108,10 +114,11 @@ void ListArchives(const rip::GameFiles& game)
 struct Options
 {
     std::regex only{".*"};
-    std::string only_text; // the pattern --only (or --bgm) gave, or empty
+    std::string only_text; // the pattern --only gave, or empty
     std::string out_dir, mode, only_archive, game_name, artist, year, copyright, by = "3sfrip";
-    bool list = false, lengths = true;
+    bool list = false, lengths = true, bgm = false;
     unsigned jobs = 0;
+    Variables variables; // --var: set before each sequence starts, and written as the 3sf_var tag
 
     // The firmware --firmware names, and a firmware file among the inputs, which only loose sound archives use.
     std::string firmware_file, input_firmware_file;
@@ -153,12 +160,12 @@ struct Job
     std::optional<rip::Timing> timing;
 };
 
-// Length analysis runs every selected sequence through the nw::snd model and the DSP firmware; the sounds are
-// independent, so they're spread over several threads.
+// Length analysis runs every selected sequence through the nw::snd model and the DSP firmware, with `variables` set
+// before each starts. The sounds are independent, and the analysis spreads them over several threads.
 void AnalyzeLengths(std::vector<Job>& jobs, const std::vector<uint8_t>& archive, const std::vector<uint8_t>& firmware,
-                    unsigned threads)
+                    const Variables& variables, unsigned threads)
 {
-    const rip::LengthAnalyzer analyzer(archive, firmware);
+    const rip::LengthAnalyzer analyzer(archive, firmware, variables);
     std::atomic<std::size_t> next{0};
     std::atomic<std::size_t> done{0};
     std::atomic<bool> out_of_memory{false};
@@ -222,6 +229,58 @@ void AnalyzeLengths(std::vector<Job>& jobs, const std::vector<uint8_t>& archive,
     }
 }
 
+// Lists and drops the sounds whose volume in the archive is 0. The game's sound library multiplies everything a sound
+// plays by that volume. Such a sound therefore makes no sound. Returns how many it dropped.
+std::size_t DropMuted(std::vector<Job>& jobs, const csar::SoundArchive& archive)
+{
+    const auto muted = [&archive](const Job& job)
+    {
+        if (archive.Sounds()[job.index].volume != 0)
+        {
+            return false;
+        }
+
+        std::fprintf(stderr, "skipped %s: it makes no sound (volume 0)\n", job.label.c_str());
+        return true;
+    };
+    return std::erase_if(jobs, muted);
+}
+
+// Lists and drops the sequences that the length analysis found never sound, such as those that play no notes, or play
+// them at a volume of 0. Returns how many it dropped.
+std::size_t DropUnheard(std::vector<Job>& jobs)
+{
+    const auto unheard = [](const Job& job)
+    {
+        if (!job.timing || !job.timing->silent)
+        {
+            return false;
+        }
+
+        std::fprintf(stderr, "skipped %s: it makes no sound\n", job.label.c_str());
+        return true;
+    };
+    return std::erase_if(jobs, unheard);
+}
+
+// "; 3 sounds skipped (2 data outside the archive, 1 no sound)", or nothing when none were skipped.
+std::string SkippedText(std::size_t missing_data, std::size_t silent)
+{
+    const std::size_t total = missing_data + silent;
+    if (total == 0)
+    {
+        return "";
+    }
+
+    std::string why = missing_data ? "data outside the archive" : "no sound";
+    if (missing_data && silent)
+    {
+        why = std::to_string(missing_data) + " data outside the archive, " + std::to_string(silent) + " no sound";
+    }
+
+    return "; " + std::to_string(total) + (total == 1 ? " sound" : " sounds") + " skipped (" + why + ")";
+}
+
 // Returns the input's absolute path, without the trailing separator of a directory given as "game/" or ".".
 fs::path InputPath(const std::string& input)
 {
@@ -244,7 +303,13 @@ fs::path DefaultOutputDir(const std::string& input)
     return InputPath(input).parent_path() / (NameOfInput(input) + "_3sf");
 }
 
-std::vector<Job> SelectSounds(const csar::SoundArchive& archive, const std::regex& only, bool with_wave_sounds)
+// Whether --only or --bgm picks sounds, so that picking none is an error.
+bool PicksSounds(const Options& o)
+{
+    return o.bgm || !o.only_text.empty();
+}
+
+std::vector<Job> SelectSounds(const csar::SoundArchive& archive, const Options& o, bool with_wave_sounds)
 {
     std::vector<Job> jobs;
     const auto& sounds = archive.Sounds();
@@ -257,7 +322,7 @@ std::vector<Job> SelectSounds(const csar::SoundArchive& archive, const std::rege
             continue; // streams are out of scope
         }
 
-        if (std::regex_search(s.name, only))
+        if (std::regex_search(s.name, o.only) && (!o.bgm || rip::IsMusic(archive, s)))
         {
             jobs.push_back({static_cast<uint32_t>(i), s.name, sequence, std::nullopt});
         }
@@ -321,7 +386,7 @@ int RipArchive(const std::string& out_dir, rip::FileNames& names, const std::str
                      archive_path.c_str());
     }
 
-    std::vector<Job> jobs = SelectSounds(*archive, o.only, false);
+    std::vector<Job> jobs = SelectSounds(*archive, o, false);
     matched += jobs.size();
 
     std::size_t wave_sounds = 0;
@@ -357,9 +422,18 @@ int RipArchive(const std::string& out_dir, rip::FileNames& names, const std::str
         std::fprintf(stderr, "skipped %s: not in this archive: %s\n", job.label.c_str(), what.c_str());
     }
 
+    // The sequences that make no sound are left out too. The length analysis finds those that don't play at a volume of
+    // 0.
+    std::size_t silent = DropMuted(complete, *archive);
+    if (o.lengths && !complete.empty())
+    {
+        AnalyzeLengths(complete, archive_bytes, firmware, o.variables, o.jobs);
+        silent += DropUnheard(complete);
+    }
+
     if (complete.empty())
     {
-        std::fprintf(stderr, "%s: nothing to rip (%zu sequences skipped)\n", archive_path.c_str(), skipped);
+        std::fprintf(stderr, "%s: nothing to rip%s\n", archive_path.c_str(), SkippedText(skipped, silent).c_str());
         return 0;
     }
 
@@ -375,22 +449,21 @@ int RipArchive(const std::string& out_dir, rip::FileNames& names, const std::str
 
     std::fprintf(stderr, "wrote %s (%zu bytes)\n", lib_name.c_str(), lib.size());
 
-    if (o.lengths)
-    {
-        AnalyzeLengths(complete, archive_bytes, firmware, o.jobs);
-    }
-
     const auto build_mini = [&](uint32_t id, const Tags& tags)
     {
         return rip::BuildArchiveMini(id, lib_name, tags);
     };
-    const int count = WriteMinis(out_dir, names, complete, common, build_mini);
+    Tags mini_tags = common;
+    if (!o.variables.empty())
+    {
+        mini_tags["3sf_var"] = FormatVariables(o.variables);
+    }
+
+    const int count = WriteMinis(out_dir, names, complete, mini_tags, build_mini);
     if (count >= 0)
     {
-        std::fprintf(stderr,
-                     "%s: %d mini3sf files; %zu sequences skipped (data outside the archive); "
-                     "%zu wave sounds not ripped (archive mode only plays sequences)\n",
-                     archive_path.c_str(), count, skipped, wave_sounds);
+        std::fprintf(stderr, "%s: %d mini3sf files%s; %zu wave sounds not ripped (archive mode only plays sequences)\n",
+                     archive_path.c_str(), count, SkippedText(skipped, silent).c_str(), wave_sounds);
     }
 
     return count;
@@ -448,7 +521,8 @@ constexpr char kUsage[] =
     "after it with \"_3sf\" added. An input is a decrypted 3DS game (.3ds, .cci, .cxi or .cia), an\n"
     "extracted game folder or a sound archive (.bcsar). A sound archive needs a DSP firmware file\n"
     "(.cdc): give one along with the archive, or put one in the archive's folder. Files can also be\n"
-    "dropped on the program.\n"
+    "dropped on the program. Sounds that make no sound, and sequences whose data isn't all in the\n"
+    "archive, are listed and skipped.\n"
     "\n"
     "options:\n"
     "  -o, --output DIR     put the rips in DIR\n"
@@ -460,8 +534,15 @@ constexpr char kUsage[] =
     "                       dspfirm.cdc that homebrew dumps from a console\n"
     "  --archive PATH       archive mode on a game: rip only this sound archive (its RomFS path)\n"
     "  --only REGEX         rip only the sounds whose label matches\n"
-    "  --bgm                rip only the BGMs (--only '^SEQ_BGM')\n"
-    "  --no-length          skip length analysis and omit length and fade tags\n"
+    "  --bgm                rip only the music: the sounds whose labels mark them as BGM, jingles\n"
+    "                       or fanfares, and the sequences with 3 tracks or more and 50 notes or\n"
+    "                       more. With --only, the music whose label matches.\n"
+    "  --no-length          skip length analysis and omit length and fade tags. The analysis also\n"
+    "                       finds the sequences that make no sound; without it, only the sounds at\n"
+    "                       a volume of 0 are skipped.\n"
+    "  --var N=V            archive mode: set variable N (0-15 the player's, 16-31 the global\n"
+    "                       ones) to V before each sequence starts, for sequences that wait for the\n"
+    "                       game. N and V can be hex (0x...). Repeat it for more variables.\n"
     "  --jobs N             the number of length analyses that run at once (default: the number\n"
     "                       of CPU threads, and at most 8 in a 32-bit build)\n"
     "  --game NAME, --artist NAME, --year YEAR, --copyright TEXT, --by NAME\n"
@@ -491,10 +572,21 @@ bool IsFirmwareHead(const std::string& head)
     return head.size() >= 0x104 && head.compare(0x100, 4, "DSP1") == 0;
 }
 
-// Reports that --only (or --bgm) picked no sound, which is an error: nothing gets written.
+// Reports that --only or --bgm picked no sound, which is an error: nothing gets written.
 int NoSoundMatches(const Options& o)
 {
-    std::fprintf(stderr, "error: no sound matches '%s'\n", o.only_text.c_str());
+    if (!o.bgm)
+    {
+        std::fprintf(stderr, "error: no sound matches '%s'\n", o.only_text.c_str());
+    }
+    else if (o.only_text.empty())
+    {
+        std::fprintf(stderr, "error: --bgm found no music\n");
+    }
+    else
+    {
+        std::fprintf(stderr, "error: --bgm found no music that matches '%s'\n", o.only_text.c_str());
+    }
 
     return 1;
 }
@@ -587,7 +679,7 @@ int RipLooseArchive(const std::string& input, const fs::path& out_dir, const Opt
         return 1;
     }
 
-    if (matched == 0 && !o.only_text.empty())
+    if (matched == 0 && PicksSounds(o))
     {
         return NoSoundMatches(o);
     }
@@ -673,7 +765,7 @@ int RipGameInArchiveMode(const std::string& input, const rip::GameFiles& game, c
         total += n;
     }
 
-    if (matched == 0 && !o.only_text.empty() && !failed)
+    if (matched == 0 && PicksSounds(o) && !failed)
     {
         return NoSoundMatches(o);
     }
@@ -720,10 +812,26 @@ int RipGameInGameMode(const std::string& input, const rip::GameFiles& game, cons
         return 1;
     }
 
-    std::vector<Job> jobs = SelectSounds(archive, o.only, true);
-    if (jobs.empty() && !o.only_text.empty())
+    std::vector<Job> jobs = SelectSounds(archive, o, true);
+    if (jobs.empty() && PicksSounds(o))
     {
         return NoSoundMatches(o);
+    }
+
+    // The sounds that make no sound are left out. The length analysis finds the sequences that don't play at a volume
+    // of 0.
+    std::size_t silent = DropMuted(jobs, archive);
+    if (o.lengths && !jobs.empty())
+    {
+        AnalyzeLengths(jobs, archive_bytes, cdc, {}, o.jobs);
+        silent += DropUnheard(jobs);
+    }
+
+    const std::string input_name = InputPath(input).filename().string();
+    if (jobs.empty())
+    {
+        std::fprintf(stderr, "%s: nothing to rip%s\n", input_name.c_str(), SkippedText(0, silent).c_str());
+        return 0;
     }
 
     fs::create_directories(out_dir);
@@ -735,11 +843,6 @@ int RipGameInGameMode(const std::string& input, const rip::GameFiles& game, cons
 
     std::fprintf(stderr, "wrote %s (%zu bytes)\n", lib_name.c_str(), lib->size());
 
-    if (o.lengths)
-    {
-        AnalyzeLengths(jobs, archive_bytes, cdc, o.jobs);
-    }
-
     const auto build_mini = [&](uint32_t id, const Tags& tags)
     {
         return rip::BuildMini(id, lib_name, tags);
@@ -750,7 +853,7 @@ int RipGameInGameMode(const std::string& input, const rip::GameFiles& game, cons
         return 1;
     }
 
-    std::fprintf(stderr, "%s: %d mini3sf files\n", InputPath(input).filename().string().c_str(), count);
+    std::fprintf(stderr, "%s: %d mini3sf files%s\n", input_name.c_str(), count, SkippedText(0, silent).c_str());
     ReportOutput(out_dir);
 
     return 0;
@@ -790,9 +893,9 @@ int RipGame(const std::string& input, const fs::path& out_dir, const Options& o,
     }
 
     const std::string mode = o.mode.empty() ? (profile ? "game" : "archive") : o.mode;
-    if (mode == "game" && (!o.only_archive.empty() || !o.firmware_file.empty()))
+    if (mode == "game" && (!o.only_archive.empty() || !o.firmware_file.empty() || !o.variables.empty()))
     {
-        std::fprintf(stderr, "error: --archive and --firmware are for archive mode (--mode archive)\n");
+        std::fprintf(stderr, "error: --archive, --firmware and --var are for archive mode (--mode archive)\n");
         return 2;
     }
 
@@ -872,11 +975,25 @@ int ParseArgs(int argc, char** argv, Options& o, std::vector<std::string>& input
         }
         else if (a == "--bgm")
         {
-            only = "^SEQ_BGM";
+            o.bgm = true;
         }
         else if (a == "--no-length")
         {
             o.lengths = false;
+        }
+        else if (a == "--var")
+        {
+            const std::string v = next();
+            const std::optional<Variables> variables = ParseVariables(v);
+            if (!variables || variables->size() != 1 || v.find_first_of(", \t\r\n") != std::string::npos)
+            {
+                std::fprintf(stderr,
+                             "error: --var takes N=V, with N from 0 to 31 and V from -32768 to 32767, not '%s'\n",
+                             v.c_str());
+                return 2;
+            }
+
+            o.variables[variables->begin()->first] = variables->begin()->second;
         }
         else if (a == "--jobs")
         {
@@ -969,6 +1086,33 @@ int ParseArgs(int argc, char** argv, Options& o, std::vector<std::string>& input
     return 0;
 }
 
+// Reads the DSP firmware file at `path` into `firmware`. Returns false, after an error message, if it's a folder,
+// can't be read or isn't a DSP1 image.
+bool ReadFirmwareFile(const std::string& path, std::vector<uint8_t>& firmware)
+{
+    std::error_code ec;
+    if (fs::is_directory(path, ec))
+    {
+        std::fprintf(stderr, "error: %s is a folder, not a DSP firmware file such as a game's dspaudio.cdc\n",
+                     path.c_str());
+        return false;
+    }
+
+    if (!ReadWholeFile(path, firmware))
+    {
+        std::fprintf(stderr, "error: can't read %s\n", path.c_str());
+        return false;
+    }
+
+    if (!rip::IsDspFirmware(firmware))
+    {
+        std::fprintf(stderr, "error: %s isn't a DSP firmware image (DSP1)\n", path.c_str());
+        return false;
+    }
+
+    return true;
+}
+
 // Takes the DSP firmware files out of the inputs, for the sound archives to use. Returns 0, or the exit code.
 int TakeFirmwareInputs(std::vector<std::string>& inputs, Options& o)
 {
@@ -989,9 +1133,8 @@ int TakeFirmwareInputs(std::vector<std::string>& inputs, Options& o)
     if (!firmware_files.empty())
     {
         o.input_firmware_file = firmware_files[0];
-        if (!ReadWholeFile(o.input_firmware_file, o.input_firmware) || !rip::IsDspFirmware(o.input_firmware))
+        if (!ReadFirmwareFile(o.input_firmware_file, o.input_firmware))
         {
-            std::fprintf(stderr, "error: %s isn't a DSP firmware image (DSP1)\n", o.input_firmware_file.c_str());
             return 1;
         }
     }
@@ -1009,21 +1152,29 @@ int TakeFirmwareInputs(std::vector<std::string>& inputs, Options& o)
 }
 
 // Rips one input. Returns the exit code.
-int RipInput(const std::string& input, const Options& o, std::map<fs::path, rip::FileNames>& names)
+int RipInput(const std::string& input, const Options& o, std::map<std::string, rip::FileNames>& names)
 {
+    // Other consoles' sound archives, by their magic.
+    constexpr std::array<std::pair<const char*, const char*>, 3> kOtherArchives = {{
+        {"FSAR", "a Wii U or Switch sound archive (FSAR)"},
+        {"RSAR", "a Wii sound archive (RSAR)"},
+        {"SDAT", "a DS sound archive (SDAT)"},
+    }};
     const std::string head = ReadHead(input);
-    if (head.starts_with("FSAR"))
+    for (const auto& [magic, kind] : kOtherArchives)
     {
-        std::fprintf(stderr,
-                     "error: %s is a Wii U or Switch sound archive (FSAR); 3SF rips 3DS sound archives "
-                     "(CSAR, .bcsar)\n",
-                     input.c_str());
-        return 1;
+        if (head.starts_with(magic))
+        {
+            std::fprintf(stderr, "error: %s is %s; 3SF rips 3DS sound archives (CSAR, .bcsar)\n", input.c_str(), kind);
+            return 1;
+        }
     }
 
-    // Share the filename registry for rips in the same folder to prevent overwrites.
+    // Rips in the same folder share the registry of file names. That keeps them from overwriting each other's files.
+    // Folders whose names differ only in case count as the same. They're one folder on Windows and macOS, where two
+    // inputs named "Game.3ds" and "game.cia" rip into it.
     const fs::path out_dir = o.out_dir.empty() ? DefaultOutputDir(input) : fs::path(o.out_dir);
-    rip::FileNames& out_names = names[fs::absolute(out_dir).lexically_normal()];
+    rip::FileNames& out_names = names[AsciiLower(fs::absolute(out_dir).lexically_normal().string())];
     if (head.starts_with("CSAR"))
     {
         return RipLooseArchive(input, out_dir, o, out_names);
@@ -1056,13 +1207,9 @@ int Run(int argc, char** argv)
 
     SilenceStdout(); // Teakra reports unmodelled MMIO accesses on stdout
 
-    if (!o.firmware_file.empty())
+    if (!o.firmware_file.empty() && !ReadFirmwareFile(o.firmware_file, o.firmware))
     {
-        if (!ReadWholeFile(o.firmware_file, o.firmware) || !rip::IsDspFirmware(o.firmware))
-        {
-            std::fprintf(stderr, "error: %s isn't a DSP firmware image (DSP1)\n", o.firmware_file.c_str());
-            return 1;
-        }
+        return 1;
     }
 
     if (const int taken = TakeFirmwareInputs(inputs, o))
@@ -1071,7 +1218,7 @@ int Run(int argc, char** argv)
     }
 
     // Rip each input once, continuing after errors. Return the highest exit code.
-    std::map<fs::path, rip::FileNames> names;
+    std::map<std::string, rip::FileNames> names;
     std::set<fs::path> done;
     int result = 0;
     for (std::size_t i = 0; i < inputs.size(); i++)

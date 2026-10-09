@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 
@@ -47,6 +48,29 @@ const float kInvDspRate = std::bit_cast<float>(0x3800280du);
 
 // Polyphase sub-mode threshold (code.bin 0x1863b8).
 constexpr float kPolyphaseDownsampleThreshold = 4.0f / 3.0f;
+
+// The DSP cycles a voice takes a frame (UpdateParameters, 0x1862ac), from the tables at 0x56d860. Each has a column
+// for one channel and one for two. The sample format's cycles scale with the rate and add to 1,400 (0x1863c4).
+constexpr float kBaseCycles = 1400.0f;
+constexpr std::array<std::array<int32_t, 2>, 3> kFormatCycles = {{{1200, 1750}, {1100, 1800}, {3000, 0}}};
+constexpr std::array<std::array<uint32_t, 2>, 3> kInterpolationCycles = {{{800, 1300}, {1800, 3100}, {1800, 2900}}};
+// By the filter flags: none, the one-pole filter, the biquad, or both.
+constexpr std::array<std::array<uint32_t, 2>, 4> kFilterCycles = {
+    {{300, 150}, {850, 1200}, {2400, 4000}, {3250, 5200}}};
+// For each bus the voice mixes into: the main bus, and aux A or B when any of its gains isn't zero (0x18638c: 275 * 8).
+constexpr uint32_t kBusCycles = 2200;
+
+// The ARM11's VFP conversion to an unsigned integer (vcvt.u32.f32): it rounds towards zero, saturates, and turns NaN
+// into 0.
+uint32_t VfpToUnsigned(float value)
+{
+    if (!(value > 0.0f))
+    {
+        return 0;
+    }
+
+    return value >= 4294967296.0f ? UINT32_MAX : static_cast<uint32_t>(value);
+}
 
 } // namespace
 
@@ -223,8 +247,9 @@ void Voice::ResetWaveBuffers()
 void Voice::SetState(VoiceState state)
 {
     // 0x18da98 -> VoiceImpl::SetState 0x18dac4. The game writes the DSP side of Stop/Pause (enable = 0 via 0x18edc4;
-    // for Stop also the source reset flag via 0x18eecc) straight into the region being prepared; here they're deferred
-    // to UpdateParameters, which runs in the same frame before the frame counter is committed.
+    // for Stop also the source reset flag via 0x18eecc) straight into the region being prepared. Here they wait for
+    // ApplyPendingState. UpdateParameters calls it in the same frame before the frame counter is committed, and
+    // SoundSystem calls it again after the walk that drops voices for want of DSP cycles.
     if (state == VoiceState::kStop)
     {
         ResetWaveBuffers();
@@ -244,9 +269,8 @@ void Voice::SetState(VoiceState state)
     }
 }
 
-void Voice::UpdateParameters(DspLink& link)
+void Voice::ApplyPendingState(DspLink& link)
 {
-    // 0x186134
     auto& cfg = link.SourceParamsOf(id_);
     if (pending_disable_)
     {
@@ -262,7 +286,14 @@ void Voice::UpdateParameters(DspLink& link)
         cfg.dirty |= kCfgReset;
         pending_reset_ = false;
     }
+}
 
+void Voice::UpdateParameters(DspLink& link)
+{
+    // 0x186134
+    ApplyPendingState(link);
+
+    auto& cfg = link.SourceParamsOf(id_);
     if (adpcm_coefs_dirty_)
     {
         // 0x18b2c0: coefficients go to the region being written, dirty bit 2 in the config.
@@ -272,9 +303,13 @@ void Voice::UpdateParameters(DspLink& link)
         adpcm_coefs_dirty_ = false;
     }
 
+    // A change of the gains, the rate or the interpolation recomputes the voice's DSP cost. As in the game, a change
+    // of the filters alone doesn't.
+    bool cost_changes = false;
     if (dirty_ & kDirtyGains)
     {
         // 0x17990c -> 0x17f2bc
+        cost_changes = true;
         for (int bus = 0; bus < 3; bus++)
         {
             for (int ch = 0; ch < 4; ch++)
@@ -287,6 +322,7 @@ void Voice::UpdateParameters(DspLink& link)
 
     if (dirty_ & kDirtyPitch)
     {
+        cost_changes = true;
         rate_ = pitch_ * (static_cast<float>(static_cast<int32_t>(sample_rate_)) * kInvDspRate);
         cfg.rate = rate_;
         cfg.dirty |= kCfgRate;
@@ -345,9 +381,40 @@ void Voice::UpdateParameters(DspLink& link)
         }
 
         cfg.dirty |= kCfgInterpolation;
+        cost_changes = true;
+    }
+
+    if (cost_changes)
+    {
+        dsp_cost_ = ComputeDspCost();
     }
 
     dirty_ &= kDirtySyncCount;
+}
+
+uint32_t Voice::ComputeDspCost() const
+{
+    // 0x1862ac. Channel counts are 1 or 2, and the indices stay in the tables.
+    const std::size_t channels = (format_flags_ & 3) == 2 ? 1 : 0;
+    const auto format = std::min<std::size_t>(static_cast<std::size_t>((format_flags_ >> 2) & 3), 2);
+    const auto interpolation = std::min<std::size_t>(static_cast<std::size_t>(interpolation_), 2);
+    const auto filters = static_cast<std::size_t>(filter_flags_ & 3);
+
+    // vmla rounds the product before it adds.
+    const float format_cycles = static_cast<float>(kFormatCycles[format][channels]) * rate_;
+    const uint32_t cost = VfpToUnsigned(kBaseCycles + format_cycles) + kInterpolationCycles[interpolation][channels] +
+                          kFilterCycles[filters][channels];
+
+    // The gains are compared as bits: -0.0 counts as a gain.
+    uint32_t buses = 1;
+    for (int bus = 1; bus < 3; bus++)
+    {
+        const bool used = std::any_of(mix_.begin() + bus * 4, mix_.begin() + bus * 4 + 4,
+                                      [](float gain) { return std::bit_cast<uint32_t>(gain) != 0; });
+        buses += used ? 1 : 0;
+    }
+
+    return cost + buses * kBusCycles;
 }
 
 void Voice::UpdateWaveBuffers(DspLink& link)

@@ -24,6 +24,10 @@ namespace threesf
 namespace
 {
 
+// A WAV file's sizes are 32-bit, and the RIFF size counts 36 bytes of headers besides the audio.
+constexpr uint64_t kMaxWavDataBytes = 0xffffffffu - 36;
+constexpr const char* kWavTooLong = "a WAV file can't hold 4 GiB of audio; write FLAC instead";
+
 // True if the file name's extension is .flac, in any case.
 bool IsFlac(const std::string& path)
 {
@@ -32,11 +36,10 @@ bool IsFlac(const std::string& path)
 
 std::optional<std::string> WriteWav(const std::string& path, const std::vector<int16_t>& pcm, uint32_t rate)
 {
-    // A WAV file's sizes are 32-bit.
     const uint64_t data_bytes = uint64_t{pcm.size()} * 2;
-    if (data_bytes > 0xffffffffu - 36)
+    if (data_bytes > kMaxWavDataBytes)
     {
-        return "a WAV file can't hold 4 GiB of audio; write FLAC instead";
+        return kWavTooLong;
     }
 
     std::vector<uint8_t> file(44 + static_cast<std::size_t>(data_bytes));
@@ -122,6 +125,16 @@ std::optional<std::string> WriteFlac(const std::string& path, const std::vector<
 std::optional<std::string> WriteAudio(const std::string& path, const std::vector<int16_t>& pcm, uint32_t rate)
 {
     return IsFlac(path) ? WriteFlac(path, pcm, rate) : WriteWav(path, pcm, rate);
+}
+
+std::optional<std::string> CheckAudioLength(const std::string& path, uint64_t frames)
+{
+    if (!IsFlac(path) && frames > kMaxWavDataBytes / 4)
+    {
+        return kWavTooLong;
+    }
+
+    return std::nullopt;
 }
 
 } // namespace threesf
