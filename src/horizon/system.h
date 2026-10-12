@@ -5,7 +5,6 @@
 
 #pragma once
 
-#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <vector>
@@ -50,6 +49,7 @@ public:
 
     // Takes a snapshot, sharing the memory pages that haven't changed since `previous`.
     std::shared_ptr<Snapshot> Save(const Snapshot* previous);
+
     void Restore(const Snapshot& snapshot);
 
     // Stereo samples produced by the DSP so far (interleaved L, R at 32728 Hz).

@@ -4,25 +4,27 @@
 
 #include "rip/rip.h"
 
-#include <zlib.h>
-
 #include <algorithm>
 #include <array>
 #include <cstdint>
-#include <cstdio>
 #include <cstring>
 #include <exception>
 #include <iterator>
-#include <new>
 #include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
 
-#include "common/ascii.h"
-#include "common/bytes.h"
-#include "csar/formats.h"
+#include "ntdlib/rip/archive.h"
+#include "ntdlib/sar/formats.h"
+#include "xsflib/ascii.h"
+#include "xsflib/bytes.h"
+#include "xsflib/psf/streaming.h"
+#include "xsflib/rip/length.h"
+#include <zlib.h>
+
+#include "common/sar_options.h"
 #include "dsp/dsp.h"
 #include "nnsnd/dsp_abi.h"
 #include "nnsnd/sound_system.h"
@@ -40,22 +42,13 @@ static_assert(kDriverEnd - kDriverBase <= kDriverRegion, "the driver and its bss
 constexpr uint32_t kStatusAddress = kDriverParams + 0x08;
 constexpr uint32_t kSoundIdAddress = kDriverParams + 0x0c;
 
-// Length analysis: a looping sequence gets kLoops loops and a kFadeSeconds fade, and any sequence stops after
-// kMaxSeconds, which is kMaxFrames sound frames.
-constexpr int kLoops = 2;
-constexpr double kFadeSeconds = 10.0;
+// Length analysis (xsflib/rip/length.h): any sequence stops after kMaxSeconds. kMaxFrames is that time in sound frames.
 constexpr double kMaxSeconds = 600.0;
 constexpr uint64_t kMaxFrames = static_cast<uint64_t>(kMaxSeconds * dsp::kSampleRate / dsp::kSamplesPerFrame);
-
-// A sequence that ends gets this tail after its last sound.
-constexpr double kTailMs = 500.0;
 
 // A sequence that stays busy without a sound for this long has ended where it fell silent.
 constexpr double kSilentSeconds = 180.0;
 constexpr uint64_t kSilentFrames = static_cast<uint64_t>(kSilentSeconds * dsp::kSampleRate / dsp::kSamplesPerFrame);
-
-// A sample louder than this is sound (-72 dB).
-constexpr int kSilenceLevel = 8;
 
 // A frame's length in the tags. They count time at the rate players report rather than the DSP's exact rate, so that a
 // player that turns a length back into samples stops at the frame the analysis found.
@@ -73,12 +66,12 @@ constexpr unsigned kDspMaxSegments = 10;
 
 uint32_t Get32(const std::vector<uint8_t>& v, std::size_t off)
 {
-    return LoadLe32(v.data() + off);
+    return xsflib::LoadLe32(v.data() + off);
 }
 
 void Set32(std::vector<uint8_t>& v, std::size_t off, uint32_t x)
 {
-    StoreLe32(v.data() + off, x);
+    xsflib::StoreLe32(v.data() + off, x);
 }
 
 // True if a DSP1 image starts at `start` in `code`, its size and segments lie inside it, and it lies inside `code`.
@@ -165,7 +158,7 @@ std::vector<std::string> FirmwareCandidates(const GameFiles& game, const GamePro
     std::vector<std::string> named, dspaudio, others;
     for (const auto& path : game.romfs_files)
     {
-        const std::string lower = AsciiLower(path);
+        const std::string lower = xsflib::AsciiLower(path);
         if (lower.size() < 4 || lower.compare(lower.size() - 4, 4, ".cdc") != 0)
         {
             continue;
@@ -252,6 +245,7 @@ std::optional<std::vector<uint8_t>> BuildLibrary(const GameFiles& game, const Ga
         {
             *error = "the exheader's memory layout doesn't fit the game's profile";
         }
+
         return std::nullopt;
     }
 
@@ -296,7 +290,7 @@ std::optional<std::vector<uint8_t>> BuildLibrary(const GameFiles& game, const Ga
     };
     for (std::size_t i = 0; i < std::size(params); i++)
     {
-        StoreLe32(driver.data() + kParamsOffset + 4 * i, params[i]);
+        xsflib::StoreLe32(driver.data() + kParamsOffset + 4 * i, params[i]);
     }
 
     ProgramBuilder program;
@@ -312,6 +306,7 @@ std::optional<std::vector<uint8_t>> BuildLibrary(const GameFiles& game, const Ga
             {
                 *error = std::string("can't read ") + path + " from the RomFS";
             }
+
             return std::nullopt;
         }
 
@@ -331,7 +326,7 @@ std::optional<std::vector<uint8_t>> BuildLibrary(const GameFiles& game, const Ga
 std::vector<uint8_t> BuildMini(uint32_t sound_id, const std::string& lib_name, Tags tags)
 {
     uint8_t id[4];
-    StoreLe32(id, sound_id);
+    xsflib::StoreLe32(id, sound_id);
     ProgramBuilder program;
     program.AddMemory(kSoundIdAddress, id, sizeof(id));
 
@@ -355,14 +350,22 @@ std::vector<uint8_t> BuildArchiveLibrary(const std::string& archive_path, const 
     return WritePsf(kPsfVersion3sf, descriptor.Serialize(), program.Data(), tags);
 }
 
+namespace
+{
+
+// ntdlib's minis with 3SF's version byte. xsflib's streaming builder writes the same bytes as WritePsf.
+struct ArchiveMiniFormat
+{
+    using ProgramBuilder = xsflib::psf::StreamingProgramBuilder;
+
+    static constexpr uint8_t kPsfVersion = kPsfVersion3sf;
+};
+
+} // namespace
+
 std::vector<uint8_t> BuildArchiveMini(uint32_t sound_id, const std::string& lib_name, Tags tags)
 {
-    ProgramBuilder program;
-    program.AddSound(sound_id);
-
-    tags["_lib"] = lib_name;
-
-    return WritePsf(kPsfVersion3sf, {}, program.Data(), tags);
+    return ntdlib::rip::BuildMini<ArchiveMiniFormat>(sound_id & 0xFFFFFF, lib_name, std::move(tags));
 }
 
 bool IsDspFirmware(const std::vector<uint8_t>& data)
@@ -370,19 +373,19 @@ bool IsDspFirmware(const std::vector<uint8_t>& data)
     return data.size() >= kDspHeaderSize && std::memcmp(data.data() + kDspMagicOffset, "DSP1", 4) == 0;
 }
 
-std::vector<std::string> MissingData(const csar::SoundArchive& archive, uint32_t index)
+std::vector<std::string> MissingData(const ntdlib::sar::SoundArchive& archive, uint32_t index)
 {
     if (index >= archive.Sounds().size())
     {
         return {"the sound itself"};
     }
 
-    const auto name_of = [](const std::string& name, uint32_t i)
+    const auto name_of = [](const std::string& name, std::size_t i)
     {
         return name.empty() ? "#" + std::to_string(i) : name;
     };
 
-    const csar::SoundInfo& info = archive.Sounds()[index];
+    const ntdlib::sar::SoundInfo& info = archive.Sounds()[index];
     std::vector<std::string> missing;
     if (archive.FileData(info.file_id).empty())
     {
@@ -392,22 +395,23 @@ std::vector<std::string> MissingData(const csar::SoundArchive& archive, uint32_t
     std::vector<uint32_t> wave_archives;
     for (uint32_t bank_item : info.banks)
     {
-        const uint32_t b = bank_item & 0xFFFFFF;
-        if ((bank_item >> 24) != 0x03 || b >= archive.Banks().size())
+        const std::optional<std::size_t> b =
+            ntdlib::sar::ItemIndex(bank_item, ntdlib::sar::kBankItem, archive.Banks().size());
+        if (!b)
         {
             continue;
         }
 
-        const auto bytes = archive.FileData(archive.Banks()[b].file_id);
+        const auto bytes = archive.FileData(archive.Banks()[*b].file_id);
         if (bytes.empty())
         {
-            missing.push_back("bank " + name_of(archive.Banks()[b].name, b));
+            missing.push_back("bank " + name_of(archive.Banks()[*b].name, *b));
             continue;
         }
 
         try
         {
-            for (const csar::WaveId& w : csar::Bank::Parse(bytes).waves)
+            for (const ntdlib::sar::WaveId& w : ntdlib::sar::Bank::Parse(bytes, kSarOptions).waves)
             {
                 if (std::find(wave_archives.begin(), wave_archives.end(), w.wave_archive_item) == wave_archives.end())
                 {
@@ -417,21 +421,22 @@ std::vector<std::string> MissingData(const csar::SoundArchive& archive, uint32_t
         }
         catch (const std::exception&)
         {
-            missing.push_back("bank " + name_of(archive.Banks()[b].name, b) + " (unreadable)");
+            missing.push_back("bank " + name_of(archive.Banks()[*b].name, *b) + " (unreadable)");
         }
     }
 
     for (uint32_t item : wave_archives)
     {
-        const uint32_t w = item & 0xFFFFFF;
-        if ((item >> 24) != 0x05 || w >= archive.WaveArchives().size())
+        const std::optional<std::size_t> w =
+            ntdlib::sar::ItemIndex(item, ntdlib::sar::kWaveArchiveItem, archive.WaveArchives().size());
+        if (!w)
         {
             continue;
         }
 
-        if (archive.FileData(archive.WaveArchives()[w].file_id).empty())
+        if (archive.FileData(archive.WaveArchives()[*w].file_id).empty())
         {
-            missing.push_back("wave archive " + name_of(archive.WaveArchives()[w].name, w));
+            missing.push_back("wave archive " + name_of(archive.WaveArchives()[*w].name, *w));
         }
     }
 
@@ -441,22 +446,115 @@ std::vector<std::string> MissingData(const csar::SoundArchive& archive, uint32_t
 namespace
 {
 
-// A sequence that ends after `frames` frames: the tail follows, with no fade.
-Timing EndAt(uint64_t frames)
+// The length analysis's rules. 3SF counts a loop's point from the frame that runs it. A loop's sound and a steady
+// sequence's loop count from the next frame.
+xsflib::rip::LengthRules LengthRules()
 {
-    return {static_cast<long long>(static_cast<double>(frames) * kFrameMs + kTailMs + 0.5), 0};
+    xsflib::rip::LengthRules rules;
+    rules.frame_ms = kFrameMs;
+    rules.max_frames = kMaxFrames;
+    rules.silent_frames = kSilentFrames;
+    rules.max_ms = kMaxSeconds * 1000.0;
+    rules.loop_offset = 0;
+
+    return rules;
 }
 
-// A sequence that has looped kLoops times at the start of frame `frame`: the fade follows.
-Timing LoopAt(uint64_t frame)
+// The model of nw::snd and nn::snd on the DSP, for the length analysis. The DSP's sample sink sets `audible` when a
+// frame makes a sound.
+class LengthModel
 {
-    return {static_cast<long long>(static_cast<double>(frame) * kFrameMs + 0.5),
-            static_cast<long long>(kFadeSeconds * 1000)};
-}
+public:
+    LengthModel(nwsnd::ArchiveModel& model, nwsnd::SequenceSoundPlayer& player, bool& audible)
+        : model_(model), engine_(*model.engine), player_(player), audible_(audible)
+    {
+    }
 
-// Plays a sequence on the model until it loops kLoops times, ends, falls silent for good or reaches kMaxSeconds.
-// docs/3sf.md, "Lengths", gives the rules.
-std::optional<Timing> MeasureSequence(const csar::SoundArchive& archive, const std::vector<uint8_t>& cdc,
+    bool RunFrame()
+    {
+        audible_ = false;
+
+        return engine_.RunFrame();
+    }
+
+    bool Sounded() const
+    {
+        return audible_;
+    }
+
+    // The analysis doesn't wait for effects to ring out.
+    bool Ringing() const
+    {
+        return false;
+    }
+
+    std::size_t VoiceCount() const
+    {
+        return nnsnd::kNumSources;
+    }
+
+    xsflib::rip::VoicePlace Voice(std::size_t index) const
+    {
+        const nnsnd::SoundSystem::VoicePlace place = model_.snd.PlaceOf(static_cast<int>(index));
+        return {place.playing, place.loops, place.position};
+    }
+
+    bool Active() const
+    {
+        return player_.IsActive();
+    }
+
+    bool Settled() const
+    {
+        return player_.IsSettled(engine_);
+    }
+
+    bool Stuck() const
+    {
+        return player_.IsStuck(engine_);
+    }
+
+    bool Moving() const
+    {
+        return player_.IsMoving();
+    }
+
+    uint64_t ChangedAt() const
+    {
+        return player_.ChangedAt();
+    }
+
+    bool Busy() const
+    {
+        return engine_.IsBusy();
+    }
+
+    bool ChannelsChanging() const
+    {
+        return engine_.Channels().AnyChanging();
+    }
+
+    int ActiveChannels() const
+    {
+        return engine_.Channels().ActiveCount();
+    }
+
+    template <typename Function>
+    void OnLoop(Function function)
+    {
+        engine_.on_loop_ = std::move(function);
+    }
+
+private:
+    nwsnd::ArchiveModel& model_;
+    nwsnd::Engine& engine_;
+    nwsnd::SequenceSoundPlayer& player_;
+    bool& audible_;
+};
+
+// Plays a sequence on the model until it loops twice, ends, falls silent for good or reaches kMaxSeconds
+// (xsflib::rip::MeasureLength). docs/3sf.md, "Lengths", gives the rules.
+std::optional<Timing> MeasureSequence(const ntdlib::sar::SoundArchive& archive, const std::vector<uint8_t>& cdc,
                                       const Variables& variables, uint32_t sound_index)
 {
     // The model, and whether the frame being run has made a sound, from the DSP's output.
@@ -464,12 +562,7 @@ std::optional<Timing> MeasureSequence(const csar::SoundArchive& archive, const s
     bool audible = false;
     const auto listen = [&audible](std::array<int16_t, 2> sample)
     {
-        const auto loud = [](int16_t s)
-        {
-            return s > kSilenceLevel || s < -kSilenceLevel;
-        };
-
-        audible = audible || loud(sample[0]) || loud(sample[1]);
+        audible = audible || xsflib::rip::Audible(sample);
     };
     model.dsp.SetSampleSink(listen);
 
@@ -487,200 +580,25 @@ std::optional<Timing> MeasureSequence(const csar::SoundArchive& archive, const s
 
     for (const auto& [number, value] : variables)
     {
-        player->SetVariable(number, value);
+        player->SetVariable(engine, number, value);
     }
 
-    // Whether it ends or loops, a sequence that never sounds is silent and gets the tail alone. Such a sequence may
-    // still play notes that make no sound.
-    bool sounded = false;
-    const auto heard = [&sounded](Timing timing)
-    {
-        if (!sounded)
-        {
-            timing = EndAt(0);
-            timing.silent = true;
-        }
-
-        return timing;
-    };
-
-    // Loops that go round before the first sound don't count, such as those of a track that waits or sets values while
-    // a note fades in or another track starts. A loop of another track, or one that starts elsewhere, starts the count
-    // again: the loops counted so far don't repeat what plays now. That happens when track 0 makes a pass that changes
-    // the sound before a later track plays the music, or when a track moves on to the loop that it plays for good.
-    int loops_seen = 0;
-    std::pair<int, uint32_t> loop{-1, 0};
-    uint64_t first_loop_frame = 0;
-    uint64_t loop_frame = 0;
-    player->on_loop_ = [&](int track, uint32_t target)
-    {
-        if (!sounded)
-        {
-            return;
-        }
-
-        if (std::pair{track, target} != loop)
-        {
-            loops_seen = 0;
-            loop = {track, target};
-        }
-
-        loops_seen++;
-        if (loops_seen == 1)
-        {
-            first_loop_frame = engine.FrameCount();
-        }
-
-        if (loops_seen == kLoops)
-        {
-            loop_frame = engine.FrameCount();
-        }
-    };
-
-    // Some sequences reach a point where every open track waits. A track may wait for notes that never end (held notes
-    // on looping waves), or never read on again, or not before the game stops the sound. A track may also poll a
-    // variable once a tick and change nothing (SequenceTrack::IsStill). Such a sequence is steady once nothing else
-    // changes: no note's envelope is in its attack, hold, decay or release, and no volume, pan or pitch bend is moving.
-    // (A released note ends by itself, and that can let its track read on.) A steady sequence plays on unchanged but
-    // for the waves' positions. It loops when they do. Each DSP voice's passes back to its wave's loop start are
-    // followed throughout. A steady sequence has looped when every voice has passed kLoops times since the sound last
-    // changed. A track's change, a moving envelope or ramp, and a voice that starts or stops all change the sound. A
-    // track that polls may only show that it's still after a long pass, and the waves' passes during it count.
-    std::array<uint32_t, nnsnd::kNumSources> positions{};
-    std::array<bool, nnsnd::kNumSources> playing{};
-    std::array<bool, nnsnd::kNumSources> looping{};
-    std::array<std::array<uint64_t, kLoops>, nnsnd::kNumSources> passes{}; // each voice's latest passes, newest first
-    uint64_t changed = 0;                                                  // the frame of the sound's last change
-    uint64_t change_order = 0;                                             // the player's ChangedAt in that frame
-    const auto follow_sound = [&](uint64_t frame)
-    {
-        for (int v = 0; v < nnsnd::kNumSources; v++)
-        {
-            const nnsnd::SoundSystem::VoicePlace place = model.snd.PlaceOf(v);
-            if (place.playing != playing[v])
-            {
-                changed = frame;
-            }
-            else if (place.playing && place.position < positions[v])
-            {
-                std::copy_backward(passes[v].begin(), passes[v].end() - 1, passes[v].end());
-                passes[v][0] = frame;
-            }
-
-            playing[v] = place.playing;
-            looping[v] = place.loops;
-            positions[v] = place.position;
-        }
-
-        if (engine.Channels().AnyChanging() || player->IsMoving() || player->ChangedAt() != change_order)
-        {
-            changed = frame;
-        }
-
-        change_order = player->ChangedAt();
-    };
-
-    const auto waves_looped = [&]
-    {
-        bool any = false;
-        for (int v = 0; v < nnsnd::kNumSources; v++)
-        {
-            if (!playing[v])
-            {
-                continue;
-            }
-
-            if (!looping[v] || passes[v].back() <= changed)
-            {
-                return false;
-            }
-
-            any = true;
-        }
-
-        return any;
-    };
-
-    uint64_t idle = 0;
-    uint64_t last_sound = 0;
-    while (engine.FrameCount() < kMaxFrames)
-    {
-        const uint64_t frame = engine.FrameCount();
-        audible = false;
-        if (!engine.RunFrame())
-        {
-            return std::nullopt;
-        }
-
-        if (audible)
-        {
-            sounded = true;
-            last_sound = frame;
-        }
-
-        // A loop that went round without a sound, such as a wait that a track repeats once its notes have ended, isn't
-        // music: the sequence ended at its last sound.
-        if (loops_seen >= kLoops)
-        {
-            return heard(last_sound <= first_loop_frame ? EndAt(last_sound + 1) : LoopAt(loop_frame));
-        }
-
-        follow_sound(frame);
-        const bool steady = player->IsActive() && player->IsSettled() && changed < frame;
-        if (steady && waves_looped())
-        {
-            // A sequence that has made no sound since its sound last changed, such as a held note at a volume of 0,
-            // ended at its last sound.
-            return heard(last_sound < changed ? EndAt(last_sound + 1) : LoopAt(frame + 1));
-        }
-
-        // A sequence that stays busy without a sound for kSilentSeconds, such as one whose music has ended while a
-        // track that plays no notes runs on, ended where it fell silent.
-        const bool busy = engine.IsBusy();
-        if (busy && frame - last_sound >= kSilentFrames)
-        {
-            idle = frame - last_sound;
-            break;
-        }
-
-        // A sequence that will never change again, or not before the game stops it, has ended when its last note has.
-        // Its tracks may wait for ever or poll a variable that only the game sets.
-        const bool stuck = player->IsActive() && player->IsStuck() && engine.Channels().ActiveCount() == 0;
-        if (!busy || stuck)
-        {
-            if (++idle > 10)
-            {
-                break;
-            }
-        }
-        else
-        {
-            idle = 0;
-        }
-    }
-
-    if (engine.FrameCount() >= kMaxFrames)
-    {
-        return heard(Timing{static_cast<long long>(kMaxSeconds * 1000), static_cast<long long>(kFadeSeconds * 1000)});
-    }
-
-    // Ended: the length runs to the last sound and the tail, with no fade. Only silence follows, however long the
-    // sequence takes to end (a track may hold a note at a volume of 0 for minutes).
-    return heard(EndAt(std::min(engine.FrameCount() - idle, last_sound + 1)));
+    LengthModel length_model(model, *player, audible);
+    return xsflib::rip::MeasureLength(length_model, LengthRules());
 }
 
 } // namespace
 
 struct LengthAnalyzer::Impl
 {
-    csar::SoundArchive archive;
+    ntdlib::sar::SoundArchive archive;
     std::vector<uint8_t> cdc;
     Variables variables;
 };
 
 LengthAnalyzer::LengthAnalyzer(const std::vector<uint8_t>& archive_bytes, const std::vector<uint8_t>& dsp_component,
                                const Variables& variables)
-    : impl_(new Impl{csar::SoundArchive::Load(archive_bytes), dsp_component, variables})
+    : impl_(new Impl{ntdlib::sar::SoundArchive::Load(archive_bytes, kSarOptions), dsp_component, variables})
 {
 }
 
@@ -688,80 +606,8 @@ LengthAnalyzer::~LengthAnalyzer() = default;
 
 std::optional<Timing> LengthAnalyzer::Analyze(uint32_t sound_index) const
 {
-    // A sequence the model can't play, with a damaged bank for instance, gets no length. Running out of memory isn't
-    // the sequence's fault, so std::bad_alloc goes to the caller.
-    try
-    {
-        return MeasureSequence(impl_->archive, impl_->cdc, impl_->variables, sound_index);
-    }
-    catch (const std::bad_alloc&)
-    {
-        throw;
-    }
-    catch (const std::exception&)
-    {
-        return std::nullopt;
-    }
-}
-
-namespace
-{
-
-// ASCII letters, digits, '_', '-' and '.' are kept, and everything else, spaces included, becomes '_'. Unlike
-// std::isalnum, this doesn't depend on the C locale.
-std::string SafeName(const std::string& s)
-{
-    std::string out;
-    for (char c : s)
-    {
-        const bool keep = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' ||
-                          c == '-' || c == '.';
-        out += keep ? c : '_';
-    }
-
-    return out;
-}
-
-// Windows reserves these device names, whatever follows the first dot of a file name.
-bool ReservedOnWindows(const std::string& stem)
-{
-    const std::string name = AsciiLower(stem);
-    const bool numbered =
-        name.size() == 4 && (name.starts_with("com") || name.starts_with("lpt")) && name[3] >= '0' && name[3] <= '9';
-    return name == "con" || name == "prn" || name == "aux" || name == "nul" || numbered;
-}
-
-} // namespace
-
-std::string FileNames::Library(const std::string& base)
-{
-    std::string name = SafeName(base);
-    const std::size_t stem_length = std::min(name.find('.'), name.size());
-    if (ReservedOnWindows(name.substr(0, stem_length)))
-    {
-        name.insert(stem_length, "_");
-    }
-
-    return Unique(name, ".3sflib");
-}
-
-std::string FileNames::Mini(uint32_t index, const std::string& label)
-{
-    char prefix[16];
-    std::snprintf(prefix, sizeof(prefix), "%04u ", static_cast<unsigned>(index));
-
-    return Unique(prefix + SafeName(label), ".mini3sf");
-}
-
-std::string FileNames::Unique(const std::string& stem, const std::string& extension)
-{
-    std::string name = stem + extension;
-    for (int n = 2; !taken_.insert(AsciiLower(name)).second; n++)
-    {
-        name = stem + "_" + std::to_string(n) + extension;
-    }
-
-    return name;
+    return xsflib::rip::TryMeasure(
+        [this, sound_index] { return MeasureSequence(impl_->archive, impl_->cdc, impl_->variables, sound_index); });
 }
 
 namespace
@@ -926,7 +772,6 @@ bool IsNumberedWord(std::string_view word, std::string_view name)
     }
 
     const std::string_view rest = word.substr(name.size());
-
     return std::all_of(rest.begin(), rest.end(), [](char c) { return c >= '0' && c <= '9'; });
 }
 
@@ -989,14 +834,14 @@ bool LabelMarksMusic(std::string_view label)
     return false;
 }
 
-bool IsMusic(const csar::SoundArchive& archive, const csar::SoundInfo& sound)
+bool IsMusic(const ntdlib::sar::SoundArchive& archive, const ntdlib::sar::SoundInfo& sound)
 {
     if (LabelMarksMusic(sound.name))
     {
         return true;
     }
 
-    if (sound.type != csar::SoundType::kSequence)
+    if (sound.type != ntdlib::sar::SoundType::kSequence)
     {
         return false;
     }
@@ -1004,9 +849,9 @@ bool IsMusic(const csar::SoundArchive& archive, const csar::SoundInfo& sound)
     // A sequence that doesn't parse isn't music here; ripping it reports the problem.
     try
     {
-        const csar::Sequence sequence = csar::Sequence::Parse(archive.FileData(sound.file_id));
+        const ntdlib::sar::Sequence sequence =
+            ntdlib::sar::Sequence::Parse(archive.FileData(sound.file_id), kSarOptions);
         const SequenceShape shape = WalkSequence(sequence.data, sound.start_offset);
-
         return shape.tracks >= kMusicMinTracks && shape.notes >= kMusicMinNotes;
     }
     catch (const std::exception&)

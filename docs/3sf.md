@@ -202,12 +202,14 @@ the game's code:
   bank lookup and wave loading, envelopes, LFO, sweep, portamento, pitch-to-rate conversion,
   volume and pan curves, the track low-pass filter, the biquad filter presets (low-pass,
   high-pass, and band-pass at 512, 1,024 and 2,048 Hz, from the game's coefficient tables),
-  front bypass, and voice allocation with priorities. `nw::snd` has 23 voices, the number
-  Pokemon X gives it in place of the library's 24, and drops the lowest-priority one when a note
-  needs another; `nn::snd` drops DSP voices by its own priorities when a stereo voice needs more
-  of its 24 than are free. The random number generator (x = x × 0x19660D + 0x3C6EF35F, from
-  0x12345678) steps once a frame, after the channels' updates, and takes 17 steps before the
-  sound's first frame, matching its state when the sequence first runs in game mode.
+  front bypass, and voice allocation with priorities. `nw::snd` has 23 voices, the number that
+  Pokemon X gives it in place of the library's 24. `nw::snd` drops the lowest-priority voice when
+  a note needs another. `nn::snd` drops DSP voices by priority when a stereo voice needs more of
+  its 24 than are free. In each frame, `nn::snd` also walks the voices in priority order and
+  drops each one whose DSP cycles don't fit in what's left of the frame. The random number
+  generator (x = x × 0x19660D + 0x3C6EF35F, from 0x12345678) steps once a frame, after the
+  channels' updates. The generator takes 17 steps before the sound's first frame. It then has the
+  state that game mode has when the sequence first runs.
 
 3SF's implementation (`src/nwsnd`, `src/nnsnd`) was written from a study of Pokemon X's
 `code.bin` (NintendoWare for CTR as linked into that game). Other games may use other versions of the
@@ -218,8 +220,9 @@ Version 1 plays sequence sounds only. An archive stores files directly in its FI
 inside a group file (CGRP). A group's INFO block lists each embedded file's id, offset and size;
 some files exist only inside groups. External banks and wave archives aren't supported, so the
 ripper skips sequences that need them.
-The output starts with the first frame after the sound starts, and the sound has finished when
-the sequence has ended and no voice is sounding.
+The output starts with the samples that the DSP makes while its firmware starts. The frames from
+the sound's start follow. The sound has finished when the sequence has ended and no voice is
+sounding.
 
 ## Driver (game mode)
 

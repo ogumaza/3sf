@@ -4,9 +4,10 @@
 //
 // Arithmetic is done with host IEEE single/double operations, which are correctly rounded, so results match the VFP bit
 // for bit once the host rounding mode follows FPSCR.RMode. The multiply-accumulate forms aren't fused on VFPv2 and are
-// computed as two rounded steps. Flush-to-zero (FPSCR.FZ) and default NaN (FPSCR.DN) are applied in software.
-// Floating-point exceptions aren't modelled, and neither are short vectors: while FPSCR.LEN or STRIDE isn't 0, every
-// VFP data-processing instruction is undefined, even one that's always scalar.
+// computed as two rounded steps. Flush-to-zero (FPSCR.FZ) and default NaN (FPSCR.DN) are applied in software. NaN
+// results while FPSCR.DN is clear aren't modelled. The host computes them, and an x86 host computes some differently
+// from the VFP. Floating-point exceptions aren't modelled, and neither are short vectors: while FPSCR.LEN or STRIDE
+// isn't 0, every VFP data-processing instruction is undefined, even one that's always scalar.
 
 #include <bit>
 #include <cfenv>
@@ -587,6 +588,7 @@ bool Cpu::VfpTransfer(uint32_t op)
         {
             state_.vfp[n] = state_.r[rt];
         }
+
         return true;
     }
 

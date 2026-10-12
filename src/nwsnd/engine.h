@@ -9,6 +9,8 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <deque>
+#include <functional>
 #include <map>
 #include <memory>
 #include <optional>
@@ -16,13 +18,14 @@
 #include <utility>
 #include <vector>
 
-#include "csar/formats.h"
+#include "ntdlib/nwsnd/util.h"
+#include "ntdlib/sar/formats.h"
+
 #include "dsp/fcram.h"
 #include "dsp/teakra_dsp.h"
 #include "nnsnd/sound_system.h"
-#include "nwsnd/driver.h"
 #include "nwsnd/sequence.h"
-#include "nwsnd/util.h"
+#include "nwsnd/voice.h"
 
 namespace threesf::nwsnd
 {
@@ -39,33 +42,36 @@ public:
     struct LoadedWarc
     {
         std::span<const uint8_t> file;
-        PAddr base = 0; // the whole CWAR's address in FCRAM
-        csar::WaveArchive archive;
+        ntdlib::PAddr base = 0; // the whole CWAR's address in FCRAM
+        ntdlib::sar::WaveArchive archive;
     };
 
-    // The engine's state, for a snapshot of the model (see ArchiveModel::Snapshot): the voices and channels in use, the
-    // players' values and the caches. It keeps alive everything it points at.
+    // The engine's state, for a snapshot of the model (see ArchiveModel::Snapshot): a copy of the voices' pool, the
+    // channels, the players and the caches. It keeps alive everything it points at.
     struct Snapshot
     {
         VoiceManager::Snapshot voices;
-        ChannelManager::Snapshot channels;
-        Random random;
-        std::vector<SequenceSoundPlayer> players;
-        std::map<uint32_t, std::shared_ptr<const csar::Bank>> banks;
+        ChannelManager channels{kChannelCount};
+        ntdlib::nwsnd::Random random;
+        std::deque<SequenceSoundPlayer> players;
+        std::map<uint32_t, std::shared_ptr<const ntdlib::sar::Bank>> banks;
         std::map<uint32_t, std::shared_ptr<const LoadedWarc>> warcs;
         std::map<std::pair<uint32_t, uint32_t>, std::optional<WaveInfo>> waves;
-        uint64_t frame_count = 0;
         std::array<int16_t, 16> global_vars{};
     };
 
-    Engine(nnsnd::SoundSystem& snd, Fcram& fcram, const csar::SoundArchive& archive, EngineOptions options = {});
-    ~Engine();
+    // More channels than can ever be in use at once. Each channel holds one of the 23 voices. A new note takes a
+    // channel before a voice. While a voice is dropped to make room, there can be one channel more.
+    static constexpr int kChannelCount = 64;
+
+    Engine(nnsnd::SoundSystem& snd, Fcram& fcram, const ntdlib::sar::SoundArchive& archive, EngineOptions options = {});
 
     nnsnd::SoundSystem& Snd()
     {
         return snd_;
     }
 
+    // nw::snd's voices, by the places that channels hold.
     VoiceManager& Voices()
     {
         return voices_;
@@ -76,7 +82,12 @@ public:
         return channels_;
     }
 
-    Random& Rng()
+    const ChannelManager& Channels() const
+    {
+        return channels_;
+    }
+
+    ntdlib::nwsnd::Random& Rng()
     {
         return random_;
     }
@@ -90,19 +101,28 @@ public:
     // such sequence or its file isn't in the archive. Throws if the sequence's data is malformed.
     SequenceSoundPlayer* StartSequence(uint32_t index);
 
-    // Bank::NoteOn (code.bin 0x48f954): finds the velocity region, loads its wave and starts a channel for it.
-    Channel* NoteOn(const csar::Bank* bank, const NoteOnInfo& info);
+    // Bank::NoteOn (code.bin 0x48f954) for the bank in slot `bank_index` of a player's `bank_items`: finds the velocity
+    // region, loads its wave and starts a channel for it.
+    Channel* NoteOn(const std::vector<uint32_t>& bank_items, int bank_index, const NoteOnInfo& info);
+
+    // A channel's callback, for its owner: track `track` of player `player`.
+    void ChannelEvent(int player, int track, Channel& channel, Channel::CallbackStatus status);
+
+    bool FollowsLoops() const
+    {
+        return static_cast<bool>(on_loop_);
+    }
+
+    void OnLoop(const SequenceSoundPlayer&, int track, uint32_t target)
+    {
+        on_loop_(track, target);
+    }
 
     // One sound frame: nn::snd receive, FrameProcess, nn::snd send. Returns false if the DSP stopped answering.
     bool RunFrame();
 
     // True while any sequence player is active or any channel is sounding.
     bool IsBusy() const;
-
-    uint64_t FrameCount() const
-    {
-        return frame_count_;
-    }
 
     // The global sequence variables, which the game keeps in one table for every sequence player (initialized by
     // code.bin 0x13739c). Each engine has its own, so that engines on different threads don't share them.
@@ -118,30 +138,33 @@ public:
     // valid.
     void Restore(const Snapshot& snapshot);
 
+    // While set, the sequences' loops go here: the track and the command it jumps back to (for the ripper's length
+    // analysis, see SequenceSoundPlayer's comment on loops).
+    std::function<void(int track, uint32_t target)> on_loop_;
+
 private:
     void FrameProcess();
-    const csar::Bank* GetBank(uint32_t bank_item);
+    const ntdlib::sar::Bank* GetBank(uint32_t bank_item);
     std::optional<WaveInfo> GetWave(uint32_t wave_archive_item, uint32_t index);
     const LoadedWarc* GetWarc(uint32_t wave_archive_item);
 
     nnsnd::SoundSystem& snd_;
     Fcram& fcram_;
-    const csar::SoundArchive& archive_;
+    const ntdlib::sar::SoundArchive& archive_;
     EngineOptions options_;
     VoiceManager voices_;
-    ChannelManager channels_;
-    Random random_;
+    ChannelManager channels_{kChannelCount};
+    ntdlib::nwsnd::Random random_;
 
-    // Declared after channels_ so players are destroyed first, after the destructor detaches their tracks' channels.
-    std::vector<std::unique_ptr<SequenceSoundPlayer>> players_;
+    // The players by their ids. A deque keeps each player where it is while others start.
+    std::deque<SequenceSoundPlayer> players_;
 
-    // Caches of what the archive's files hold. Entries never change once made. The banks and wave archives are shared,
-    // so that snapshots can hold them, and players keep pointers to the banks.
-    std::map<uint32_t, std::shared_ptr<const csar::Bank>> banks_;
+    // Caches of what the archive's files hold. Entries never change once made. The banks and wave archives are shared.
+    // Snapshots can then hold them.
+    std::map<uint32_t, std::shared_ptr<const ntdlib::sar::Bank>> banks_;
     std::map<uint32_t, std::shared_ptr<const LoadedWarc>> warcs_;
     std::map<std::pair<uint32_t, uint32_t>, std::optional<WaveInfo>> waves_;
 
-    uint64_t frame_count_ = 0;
     std::array<int16_t, 16> global_vars_;
 };
 
@@ -152,8 +175,8 @@ inline constexpr std::size_t kArchiveModeFcram = 64 * 1024 * 1024;
 // the ripper's length analysis both build it this way. A sample sink goes on `dsp` before Start.
 struct ArchiveModel
 {
-    // Snapshot of FCRAM, the DSP, nn::snd and the engine. Keeps active voices and channels alive. It holds pointers to
-    // this model's objects, so it can only be restored to this model.
+    // Snapshot of FCRAM, the DSP, nn::snd and the engine. It holds pointers to this model's objects and can only be
+    // restored to this model.
     struct Snapshot
     {
         Fcram::Snapshot fcram;
@@ -164,10 +187,11 @@ struct ArchiveModel
 
     // Starts `firmware` on the DSP and then the engine on `archive`, which has to outlive the engine, with
     // `output_mode` (0 mono, 1 stereo, 2 surround). Returns false if the firmware didn't start.
-    bool Start(std::span<const uint8_t> firmware, const csar::SoundArchive& archive, uint8_t output_mode = 1);
+    bool Start(std::span<const uint8_t> firmware, const ntdlib::sar::SoundArchive& archive, uint8_t output_mode = 1);
 
     // Takes a snapshot between frames, sharing the memory pages that haven't changed since `previous`.
     Snapshot Save(const Snapshot* previous);
+
     void Restore(const Snapshot& snapshot);
 
     Fcram fcram{kArchiveModeFcram};

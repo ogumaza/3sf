@@ -114,7 +114,7 @@ std::uint64_t Teakra::JitInstructions() const {
 
 // A saved state starts with these two words. The version changes with the layout.
 static constexpr std::uint32_t StateMagic = 0x5453414B;
-static constexpr std::uint32_t StateVersion = 1;
+static constexpr std::uint32_t StateVersion = 2;
 
 std::vector<std::uint8_t> Teakra::SaveState() {
     std::vector<std::uint8_t> state;

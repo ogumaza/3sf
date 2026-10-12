@@ -1,24 +1,28 @@
 // SPDX-License-Identifier: MIT
 
-#include "nwsnd/driver.h"
+#include "nwsnd/voice.h"
 
 #include <algorithm>
-#include <bit>
 #include <cstdint>
-#include <memory>
 #include <stdexcept>
 #include <utility>
 #include <vector>
 
+#include "ntdlib/nwsnd/console.h"
+#include "ntdlib/nwsnd/util.h"
+
+#include "nnsnd/sound_system.h"
 #include "nwsnd/engine.h"
+#include "nwsnd/util.h"
 
 namespace threesf::nwsnd
 {
 namespace
 {
 
-// The game's 1/255 (code.bin 0x17b2ec), the float nearest to it.
-const float kOneOver255 = std::bit_cast<float>(0x3b808081u);
+using ntdlib::nwsnd::CalcPanRatio;
+using ntdlib::nwsnd::CalcSurroundPanRatio;
+using ntdlib::nwsnd::CtrPolicy;
 
 nnsnd::SampleFormat ToNnFormat(uint8_t nw_format)
 {
@@ -76,7 +80,7 @@ bool Voice::Alloc(int channel_count, int priority, Callback callback)
 
     if (count == 1)
     {
-        nnsnd::Voice* nn = snd.AllocVoice(dsp_priority, [this](nnsnd::Voice* d) { OnDspVoiceDropped(d, false); });
+        nnsnd::Voice* nn = snd.AllocVoice(dsp_priority, {place_, false});
         if (!nn)
         {
             return false;
@@ -92,7 +96,7 @@ bool Voice::Alloc(int channel_count, int priority, Callback callback)
         for (int i = 0; i < count; i++)
         {
             nnsnd::Voice* nn = nullptr;
-            while (!(nn = snd.AllocVoice(dsp_priority, [this](nnsnd::Voice* d) { OnDspVoiceDropped(d, true); })))
+            while (!(nn = snd.AllocVoice(dsp_priority, {place_, true})))
             {
                 if (engine_->Voices().DropLowestPriorityVoice(dsp_priority) == 0)
                 {
@@ -181,13 +185,13 @@ void Voice::OnDspVoiceDropped(nnsnd::Voice* dropped, bool stereo)
 
     started_ = false;
     channel_count_ = 0;
-    engine_->Voices().Release(this);
+    engine_->Voices().Release(place_);
     active_ = false;
 
     auto cb = callback_;
     if (cb)
     {
-        cb(this, Status::kDropDsp);
+        cb(place_, VoiceCallbackStatus::kDropDsp);
     }
 }
 
@@ -202,7 +206,7 @@ void Voice::Initialize(const WaveInfo& info)
         }
 
         v->SetChannelCount(1);
-        v->SetSampleFormat(ToNnFormat(info.sample_format));
+        v->SetSampleFormat(ToNnFormat(info.format));
         v->SetSampleRate(info.sample_rate);
         v->SetInterpolationType(nnsnd::InterpolationType::kPolyphase); // HardwareManager's default SRC type, 4-tap
     }
@@ -214,7 +218,7 @@ void Voice::Initialize(const WaveInfo& info)
 void Voice::SetPriority(int p)
 {
     priority_ = p;
-    engine_->Voices().ChangePriority(this);
+    engine_->Voices().ChangePriority(place_);
 
     if (p == 1)
     {
@@ -228,14 +232,31 @@ void Voice::SetPriority(int p)
     }
 }
 
-void Voice::SetInterpolationType(int type)
+void Voice::ApplyInterpolationType()
 {
+    const int type = interpolation_;
     for (int i = 0; i < channel_count_; i++)
     {
         if (nn_[i])
         {
             nn_[i]->SetInterpolationType(static_cast<nnsnd::InterpolationType>(type == 1 ? 1 : type == 2 ? 2 : 0));
         }
+    }
+}
+
+void Voice::Free(Engine& engine)
+{
+    engine.Voices().FreeVoice(place_);
+}
+
+void Voice::SetOutputs(const Outputs& outputs)
+{
+    SetPan(outputs.pan);
+    SetSurroundPan(outputs.span);
+    SetMainSend(outputs.main_send);
+    for (int i = 0; i < 2; i++)
+    {
+        SetFxSend(i, outputs.fx_send[i]);
     }
 }
 
@@ -376,7 +397,7 @@ void Voice::CheckFinish()
 
     if (callback_)
     {
-        callback_(this, Status::kFinishWave);
+        callback_(place_, VoiceCallbackStatus::kFinishWave);
     }
 
     playing_ = false;
@@ -389,45 +410,15 @@ void Voice::CalcMixParam(int channel, nnsnd::MixParam& out) const
     const float fx_a = Clamp01(fx_send_[0]);
     const float fx_b = Clamp01(fx_send_[1]);
 
-    PanInfo info;
-    switch (pan_curve_)
-    {
-    case 1:
-        info = {0, true, false};
-        break;
-    case 2:
-        info = {0, true, true};
-        break;
-    case 3:
-        info = {1, false, false};
-        break;
-    case 4:
-        info = {1, true, false};
-        break;
-    case 5:
-        info = {1, true, true};
-        break;
-    case 6:
-        info = {2, false, false};
-        break;
-    case 7:
-        info = {2, true, false};
-        break;
-    case 8:
-        info = {2, true, true};
-        break;
-    default:
-        info = {0, false, false};
-        break;
-    }
+    ntdlib::nwsnd::PanInfo info = ntdlib::nwsnd::PanInfoOf(pan_curve_);
     info.front_bypass = front_bypass_;
 
     const uint8_t mode = engine_->OutputMode();
-    const bool surround = mode == 2;
+    const auto output = static_cast<ntdlib::nwsnd::OutputMode>(mode);
     float hi = 0.0f, lo = 0.0f, front = 0.0f, rear = 0.0f;
     if (mode == 0)
     {
-        hi = lo = util::CalcPanRatio(0.0f, info, surround);
+        hi = lo = CalcPanRatio<CtrPolicy>(0.0f, info, output);
     }
     else
     {
@@ -446,30 +437,30 @@ void Voice::CalcMixParam(int channel, nnsnd::MixParam& out) const
                 }
             }
 
-            hi = util::CalcPanRatio(p, info, surround);
-            lo = util::CalcPanRatio(0.0f - p, info, surround);
+            hi = CalcPanRatio<CtrPolicy>(p, info, output);
+            lo = CalcPanRatio<CtrPolicy>(0.0f - p, info, output);
         }
         else if (channel == 0)
         {
-            hi = util::CalcPanRatio(pan_, info, surround);
+            hi = CalcPanRatio<CtrPolicy>(pan_, info, output);
             lo = 0.0f;
         }
         else
         {
             hi = 0.0f;
-            lo = util::CalcPanRatio(0.0f - pan_, info, surround);
+            lo = CalcPanRatio<CtrPolicy>(0.0f - pan_, info, output);
         }
     }
 
     if (mode == 2)
     {
-        front = util::CalcSurroundPanRatio(span_, info);
-        rear = util::CalcSurroundPanRatio(2.0f - span_, info);
+        front = CalcSurroundPanRatio<CtrPolicy>(span_, info);
+        rear = CalcSurroundPanRatio<CtrPolicy>(2.0f - span_, info);
     }
     else
     {
-        front = util::CalcSurroundPanRatio(0.0f, info);
-        rear = util::CalcSurroundPanRatio(2.0f, info);
+        front = CalcSurroundPanRatio<CtrPolicy>(0.0f, info);
+        rear = CalcSurroundPanRatio<CtrPolicy>(2.0f, info);
     }
 
     const float f_hi = front * hi, f_lo = front * lo, r_lo = rear * lo, r_hi = rear * hi;
@@ -631,32 +622,113 @@ void Voice::UpdateState()
     }
 }
 
+void Voice::AppendWave(Engine&, const WaveInfo& info)
+{
+    Initialize(info);
+
+    // 0x320914, for a wave that plays from its start (a note always does).
+    const uint32_t loop_start_bytes = SamplesToBytes(info.loop_start, info.format);
+    for (int ch = 0; ch < channel_count_; ch++)
+    {
+        const auto& c = info.channels[ch];
+        if (info.format == 3)
+        {
+            contexts_[ch] = c.context;
+            if (info.loop)
+            {
+                loop_contexts_[ch] = c.loop_context;
+            }
+
+            nn_[ch]->SetAdpcmParam(c.coefs.data());
+        }
+
+        nnsnd::WaveBuffer& wb0 = wave_buffers_[ch * 2];
+        wb0.Initialize();
+        wb0.buffer_address = c.data;
+        wb0.sample_length = info.loop_end;
+        wb0.loop = false;
+        if (info.format == 3)
+        {
+            wb0.adpcm_context = &contexts_[ch];
+        }
+        AppendWaveBuffer(ch, &wb0, !info.loop);
+
+        if (info.loop)
+        {
+            nnsnd::WaveBuffer& wb1 = wave_buffers_[ch * 2 + 1];
+            wb1.Initialize();
+            wb1.buffer_address = c.data + loop_start_bytes;
+            wb1.sample_length = info.loop_end - info.loop_start;
+            wb1.loop = true;
+            if (info.format == 3)
+            {
+                wb1.adpcm_context = &loop_contexts_[ch];
+            }
+            AppendWaveBuffer(ch, &wb1, true);
+        }
+    }
+
+    ApplyInterpolationType();
+}
+
 // --------------------------------------------------------------------------------------------- VoiceManager
-Voice* VoiceManager::AllocVoice(int channel_count, int priority, Voice::Callback callback)
+VoiceManager::VoiceManager(Engine& engine) : engine_(engine)
+{
+    // Before any place has been freed, the pool hands out its last place first.
+    for (VoiceId place = 0; place < kVoiceCount; place++)
+    {
+        free_.push_back(place);
+    }
+
+    const auto on_drop = [this](nnsnd::DropOwner owner, nnsnd::Voice* dropped)
+    {
+        At(owner.place).OnDspVoiceDropped(dropped, owner.stereo);
+    };
+    engine_.Snd().SetDropHandler(on_drop);
+}
+
+VoiceId VoiceManager::AllocVoice(Engine&, int channel_count, int priority, Voice::Callback callback)
 {
     // 0x187070. With every voice in use, the lowest-priority one makes room, unless it outranks the new one. If the
     // dropped voice held no DSP voices, the allocation fails anyway.
     if (static_cast<int>(list_.size()) >= kVoiceCount && DropLowestPriorityVoice(priority) == 0)
     {
-        return nullptr;
+        return kNoVoice;
     }
 
-    auto owned = std::make_shared<Voice>();
-    Voice* v = owned.get();
-    v->engine_ = &engine_;
-    if (!v->Alloc(channel_count, priority, std::move(callback)))
+    if (free_.empty())
     {
-        return nullptr;
+        throw std::logic_error("no free place for an nw::snd voice");
     }
 
-    v->priority_ = priority & 0xff; // 0x187130
-    pool_.push_back(std::move(owned));
+    const VoiceId place = free_.back();
+    free_.pop_back();
+    Voice& v = pool_[static_cast<std::size_t>(place)];
+    v = Voice{};
+    v.engine_ = &engine_;
+    v.place_ = place;
+    if (!v.Alloc(channel_count, priority, std::move(callback)))
+    {
+        free_.push_back(place);
+        return kNoVoice;
+    }
+
+    v.priority_ = priority & 0xff; // 0x187130
 
     // Insert after every voice with lower or equal priority.
-    auto it = std::find_if(list_.begin(), list_.end(), [&](Voice* o) { return o->priority_ > v->priority_; });
-    list_.insert(it, v);
+    auto it = std::find_if(list_.begin(), list_.end(), [&](VoiceId o) { return At(o).priority_ > v.priority_; });
+    list_.insert(it, place);
 
-    return v;
+    return place;
+}
+
+VoiceId VoiceManager::AllocVoice(Engine& engine, int channel_count, uint32_t priority, ntdlib::nwsnd::ChannelId owner)
+{
+    const auto on_event = [&engine, owner](VoiceId, VoiceCallbackStatus status)
+    {
+        engine.Channels().At(owner).OnVoiceEvent(engine, status);
+    };
+    return AllocVoice(engine, channel_count, static_cast<int>(priority), on_event);
 }
 
 int VoiceManager::DropLowestPriorityVoice(int priority)
@@ -667,464 +739,92 @@ int VoiceManager::DropLowestPriorityVoice(int priority)
         return 0;
     }
 
-    Voice* victim = list_.front();
-    if (victim->priority_ > priority)
+    const VoiceId victim = list_.front();
+    Voice& v = At(victim);
+    if (v.priority_ > priority)
     {
         return 0;
     }
 
-    const int channels = victim->channel_count_;
-    auto cb = victim->callback_;
-    victim->Stop();
+    const int channels = v.channel_count_;
+    auto cb = v.callback_;
+    v.Stop();
     FreeVoice(victim);
     if (cb)
     {
-        cb(victim, Voice::Status::kDropVoice);
+        cb(victim, VoiceCallbackStatus::kDropVoice);
     }
 
     return channels;
 }
 
-void VoiceManager::FreeVoice(Voice* v)
+void VoiceManager::FreeVoice(VoiceId place)
 {
     // 0x18b928
-    if (!v || !v->active_)
+    if (place == kNoVoice || !At(place).active_)
     {
         return;
     }
 
-    for (int i = 0; i < v->channel_count_; i++)
+    Voice& v = At(place);
+    for (int i = 0; i < v.channel_count_; i++)
     {
-        if (v->nn_[i])
+        if (v.nn_[i])
         {
-            engine_.Snd().FreeVoice(v->nn_[i]);
-            v->nn_[i] = nullptr;
+            engine_.Snd().FreeVoice(v.nn_[i]);
+            v.nn_[i] = nullptr;
         }
     }
 
-    v->channel_count_ = 0;
-    Release(v);
-    v->active_ = false;
+    v.channel_count_ = 0;
+    Release(place);
+    v.active_ = false;
 }
 
-void VoiceManager::Release(Voice* v)
+void VoiceManager::Release(VoiceId place)
 {
-    list_.remove(v);
-
-    for (auto it = pool_.begin(); it != pool_.end(); ++it)
-    {
-        if (it->get() == v)
-        {
-            // Callers may still hold the pointer, so the object stays alive in a graveyard until UpdateAllVoices clears
-            // it at the end of the frame's voice update.
-            graveyard_.push_back(std::move(*it));
-            pool_.erase(it);
-            break;
-        }
-    }
+    list_.remove(place);
+    free_.push_back(place);
 }
 
-void VoiceManager::ChangePriority(Voice* v)
+void VoiceManager::ChangePriority(VoiceId place)
 {
-    list_.remove(v);
-    auto it = std::find_if(list_.begin(), list_.end(), [&](Voice* o) { return o->priority_ > v->priority_; });
-    list_.insert(it, v);
+    list_.remove(place);
+    const int priority = At(place).priority_;
+    auto it = std::find_if(list_.begin(), list_.end(), [&](VoiceId o) { return At(o).priority_ > priority; });
+    list_.insert(it, place);
 }
 
 VoiceManager::Snapshot VoiceManager::Save() const
 {
-    if (!graveyard_.empty())
-    {
-        throw std::logic_error("nw::snd voices saved in the middle of a frame");
-    }
-
-    Snapshot snapshot{pool_, {}, list_};
-    for (const std::shared_ptr<Voice>& v : pool_)
-    {
-        snapshot.values.push_back(*v);
-    }
-
-    return snapshot;
+    return {pool_, free_, list_};
 }
 
 void VoiceManager::Restore(const Snapshot& snapshot)
 {
     pool_ = snapshot.pool;
+    free_ = snapshot.free;
     list_ = snapshot.list;
-    graveyard_.clear();
-    auto value = snapshot.values.begin();
-    for (const std::shared_ptr<Voice>& v : pool_)
-    {
-        *v = *value++;
-    }
 }
 
 void VoiceManager::UpdateAllVoices()
 {
     // 0x174540
-    std::vector<Voice*> snapshot(list_.begin(), list_.end());
-    for (Voice* v : snapshot)
+    std::vector<VoiceId> snapshot(list_.begin(), list_.end());
+    for (VoiceId v : snapshot)
     {
-        v->CheckFinish();
+        At(v).CheckFinish();
     }
 
     snapshot.assign(list_.begin(), list_.end());
-    for (Voice* v : snapshot)
+    for (VoiceId v : snapshot)
     {
-        v->SyncParams();
+        At(v).SyncParams();
     }
 
-    for (Voice* v : snapshot)
+    for (VoiceId v : snapshot)
     {
-        v->UpdateState();
-    }
-
-    graveyard_.clear();
-}
-
-// --------------------------------------------------------------------------------------------- Channel
-void Channel::InitParam(Callback cb)
-{
-    // 0x320e70
-    next_in_track_ = nullptr;
-    callback_ = std::move(cb);
-    auto_sweep_ = true;
-    release_priority_fix_ = false;
-    ignore_note_off_ = false;
-    length_ = 0;
-    key_ = 60;
-    original_key_ = 60;
-    init_volume_ = 1.0f;
-    init_pan_ = 0.0f;
-    init_span_ = 0.0f;
-    tune_ = 1.0f;
-    cached_pitch_ = 0.0f;
-    cached_ratio_ = 1.0f;
-    track_volume_ = 1.0f;
-    bend_ = 0.0f;
-    track_pan_ = 0.0f;
-    track_span_ = 0.0f;
-    lpf_ = 0.0f;
-    biquad_type_ = 0;
-    biquad_value_ = 0.0f;
-    main_send_ = 0.0f;
-    fx_send_ = {0.0f, 0.0f};
-    sweep_pitch_ = 0.0f;
-    sweep_length_ = 0;
-    sweep_counter_ = 0;
-    env_.Initialize();
-    lfo_.param_.Init();
-    lfo_type_ = 0;
-    pan_mode_ = 0;
-    pan_curve_ = 0;
-    key_group_ = 0;
-    interpolation_type_ = 0; // polyphase, from HardwareManager's default SRC type (4-tap)
-}
-
-void Channel::Start(const WaveInfo& info, int length)
-{
-    // 0x320bdc
-    length_ = length;
-    wave_loops_ = info.loop;
-    lfo_.Reset();
-    env_.Reset();
-    sweep_counter_ = 0;
-    voice_->Initialize(info);
-    AppendWaveBuffer(info);
-    voice_->pan_mode_ = pan_mode_;
-    voice_->pan_curve_ = pan_curve_;
-    voice_->SetInterpolationType(interpolation_type_);
-    voice_->Start();
-    active_ = true;
-}
-
-void Channel::AppendWaveBuffer(const WaveInfo& info)
-{
-    // 0x320914, for a wave that plays from its start (a note always does).
-    const uint32_t loop_start_bytes = SamplesToBytes(info.loop_start, info.sample_format);
-    for (int ch = 0; ch < voice_->channel_count_; ch++)
-    {
-        const auto& c = info.channels[ch];
-        if (info.sample_format == 3)
-        {
-            contexts_[ch] = c.context;
-            if (info.loop)
-            {
-                loop_contexts_[ch] = c.loop_context;
-            }
-
-            voice_->nn_[ch]->SetAdpcmParam(c.coefs.data());
-        }
-
-        nnsnd::WaveBuffer& wb0 = wave_buffers_[ch * 2];
-        wb0.Initialize();
-        wb0.buffer_address = c.data;
-        wb0.sample_length = info.loop_end;
-        wb0.loop = false;
-        if (info.sample_format == 3)
-        {
-            wb0.adpcm_context = &contexts_[ch];
-        }
-        voice_->AppendWaveBuffer(ch, &wb0, !info.loop);
-
-        if (info.loop)
-        {
-            nnsnd::WaveBuffer& wb1 = wave_buffers_[ch * 2 + 1];
-            wb1.Initialize();
-            wb1.buffer_address = c.data + loop_start_bytes;
-            wb1.sample_length = info.loop_end - info.loop_start;
-            wb1.loop = true;
-            if (info.sample_format == 3)
-            {
-                wb1.adpcm_context = &loop_contexts_[ch];
-            }
-            voice_->AppendWaveBuffer(ch, &wb1, true);
-        }
-    }
-}
-
-void Channel::Update()
-{
-    // 0x17afcc
-    if (!active_)
-    {
-        return;
-    }
-
-    // The game scales the volume by the channel's silence level, which stays at 255 unless the game silences the track,
-    // and 3SF never does.
-    const float vol_base = (255.0f * kOneOver255) * (init_volume_ * track_volume_);
-
-    if (env_.GetStatus() == EnvGenerator::Status::kRelease && env_.GetValue() < -90.4f)
-    {
-        Stop();
-        return;
-    }
-
-    float sweep = 0.0f;
-    if (sweep_pitch_ != 0.0f && sweep_counter_ < sweep_length_)
-    {
-        sweep = (static_cast<float>(sweep_length_ - sweep_counter_) * sweep_pitch_) / static_cast<float>(sweep_length_);
-    }
-
-    float pitch = sweep + static_cast<float>(static_cast<int>(key_) - static_cast<int>(original_key_)) + bend_;
-    if (lfo_type_ == 0)
-    {
-        pitch = lfo_.GetValue() + pitch;
-    }
-
-    float ratio;
-    if (cached_pitch_ == pitch)
-    {
-        ratio = cached_ratio_;
-    }
-    else
-    {
-        ratio = util::CalcPitchRatio(static_cast<int>(pitch * 256.0f));
-        cached_pitch_ = pitch;
-        cached_ratio_ = ratio;
-    }
-
-    float pan = init_pan_ + track_pan_;
-    if (lfo_type_ == 2)
-    {
-        pan = lfo_.GetValue() + pan;
-    }
-
-    const float span = init_span_ + track_span_;
-
-    if (auto_sweep_)
-    {
-        UpdateSweep(5);
-    }
-    lfo_.Update(5);
-    env_.Update(5);
-
-    const float lpf_freq = lpf_ + 1.0f;
-    float vol = util::CalcVolumeRatio(env_.GetValue()) * vol_base;
-    if (lfo_type_ == 1)
-    {
-        vol = util::CalcVolumeRatio(lfo_.GetValue() * 6.0f) * vol;
-    }
-
-    if (voice_)
-    {
-        voice_->SetVolume(vol);
-        voice_->SetPitch(tune_ * ratio);
-        voice_->SetPan(pan);
-        voice_->SetSurroundPan(span);
-        voice_->SetLpfFreq(lpf_freq);
-        voice_->SetBiquadFilter(biquad_type_, biquad_value_);
-        voice_->SetMainSend(main_send_);
-        for (int i = 0; i < 2; i++)
-        {
-            voice_->SetFxSend(i, fx_send_[i]);
-        }
-    }
-}
-
-void Channel::NoteOff()
-{
-    // 0x320c6c
-    if (ignore_note_off_)
-    {
-        return;
-    }
-
-    Release();
-}
-
-void Channel::Release()
-{
-    // 0x320cbc
-    if (env_.GetStatus() != EnvGenerator::Status::kRelease)
-    {
-        if (voice_ && !release_priority_fix_)
-        {
-            voice_->SetPriority(1);
-        }
-        env_.SetStatus(EnvGenerator::Status::kRelease);
-    }
-}
-
-void Channel::Stop()
-{
-    // 0x320b6c
-    if (!voice_)
-    {
-        return;
-    }
-
-    Voice* v = voice_;
-    voice_ = nullptr;
-    engine_->Voices().FreeVoice(v);
-    active_ = false;
-
-    auto cb = callback_;
-    if (cb)
-    {
-        cb(this, CallbackStatus::kStopped);
-    }
-
-    if (auto_free_)
-    {
-        auto_free_ = false;
-        engine_->Channels().Free(this);
-    }
-}
-
-void Channel::OnVoiceEvent(Voice::Status status)
-{
-    // 0x17fb84. A voice that finished is freed here; a dropped one was freed by the voice manager.
-    CallbackStatus cs = CallbackStatus::kDrop;
-    if (status == Voice::Status::kFinishWave)
-    {
-        cs = CallbackStatus::kFinish;
-        engine_->Voices().FreeVoice(voice_);
-    }
-
-    auto cb = callback_;
-    if (cb)
-    {
-        cb(this, cs);
-    }
-
-    voice_ = nullptr;
-    active_ = false;
-    auto_free_ = false;
-    engine_->Channels().Free(this);
-}
-
-// --------------------------------------------------------------------------------------------- ChannelManager
-Channel* ChannelManager::AllocChannel(int channel_count, int priority, Channel::Callback callback)
-{
-    // 0x320868
-    auto owned = std::make_shared<Channel>();
-    Channel* ch = owned.get();
-    ch->engine_ = &engine_;
-    ch->auto_free_ = true;
-    Voice* v =
-        engine_.Voices().AllocVoice(channel_count, priority, [ch](Voice*, Voice::Status s) { ch->OnVoiceEvent(s); });
-    if (!v)
-    {
-        return nullptr;
-    }
-
-    pool_.push_back(std::move(owned));
-    active_list_.push_back(ch);
-    ch->voice_ = v;
-    ch->InitParam(std::move(callback));
-
-    return ch;
-}
-
-void ChannelManager::Free(Channel* ch)
-{
-    active_list_.remove(ch);
-
-    for (auto it = pool_.begin(); it != pool_.end(); ++it)
-    {
-        if (it->get() == ch)
-        {
-            graveyard_.push_back(std::move(*it));
-            pool_.erase(it);
-            break;
-        }
-    }
-}
-
-void ChannelManager::UpdateAllChannel()
-{
-    // 0x1742a0
-    std::vector<Channel*> snapshot(active_list_.begin(), active_list_.end());
-    for (Channel* ch : snapshot)
-    {
-        if (std::find(active_list_.begin(), active_list_.end(), ch) != active_list_.end())
-        {
-            ch->Update();
-        }
-    }
-}
-
-int ChannelManager::ActiveCount() const
-{
-    return static_cast<int>(active_list_.size());
-}
-
-bool ChannelManager::AnyChanging() const
-{
-    const auto changing = [](const Channel* ch)
-    {
-        return ch->env_.GetStatus() != EnvGenerator::Status::kSustain;
-    };
-    return std::any_of(active_list_.begin(), active_list_.end(), changing);
-}
-
-ChannelManager::Snapshot ChannelManager::Save() const
-{
-    if (!graveyard_.empty())
-    {
-        throw std::logic_error("nw::snd channels saved in the middle of a frame");
-    }
-
-    Snapshot snapshot{pool_, {}, active_list_};
-    for (const std::shared_ptr<Channel>& ch : pool_)
-    {
-        snapshot.values.push_back(*ch);
-    }
-
-    return snapshot;
-}
-
-void ChannelManager::Restore(const Snapshot& snapshot)
-{
-    pool_ = snapshot.pool;
-    active_list_ = snapshot.active_list;
-    graveyard_.clear();
-    auto value = snapshot.values.begin();
-    for (const std::shared_ptr<Channel>& ch : pool_)
-    {
-        *ch = *value++;
+        At(v).UpdateState();
     }
 }
 

@@ -3,7 +3,6 @@
 #include "nwsnd/engine.h"
 
 #include <algorithm>
-#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -12,61 +11,51 @@
 #include <utility>
 #include <vector>
 
+#include "common/sar_options.h"
 #include "nwsnd/sequence.h"
-#include "nwsnd/util.h"
 
 namespace threesf::nwsnd
 {
-namespace
-{
 
-// nw::snd's random number generator advances once a sound frame from the moment the sound system starts. In game mode
-// the game boots and loads the sound first, and by the time the sound's sequence first runs, the generator has taken 17
-// steps from its seed: 13 before the driver reports the sound playing, and 4 in the frames after. The model's generator
-// starts there too, so that sounds with random commands draw the same numbers in both modes.
-constexpr int kRandomStepsBeforeStart = 17;
-
-} // namespace
-
-Engine::Engine(nnsnd::SoundSystem& snd, Fcram& fcram, const csar::SoundArchive& archive, EngineOptions options)
-    : snd_(snd), fcram_(fcram), archive_(archive), options_(options), voices_(*this), channels_(*this)
+Engine::Engine(nnsnd::SoundSystem& snd, Fcram& fcram, const ntdlib::sar::SoundArchive& archive, EngineOptions options)
+    : snd_(snd), fcram_(fcram), archive_(archive), options_(options), voices_(*this)
 {
     global_vars_.fill(-1);
-    for (int i = 0; i < kRandomStepsBeforeStart; i++)
+
+    // nw::snd's random number generator advances once a sound frame from the moment the sound system starts. In game
+    // mode the game boots and loads the sound first, and by the time the sound's sequence first runs, the generator has
+    // taken 17 steps from its seed: 13 before the driver reports the sound playing, and 4 in the frames after. The
+    // model's generator starts there too (the policy's kRandomStepsBeforeStart). Sounds with random commands then draw
+    // the same numbers in both modes.
+    for (int i = 0; i < Policy::kRandomStepsBeforeStart; i++)
     {
         random_.Next();
     }
 }
 
-Engine::~Engine()
-{
-    // The players go first (see players_), and channels they still hold mustn't call back into their tracks.
-    for (auto& p : players_)
-    {
-        p->DetachChannels();
-    }
-}
-
-const csar::Bank* Engine::GetBank(uint32_t bank_item)
+const ntdlib::sar::Bank* Engine::GetBank(uint32_t bank_item)
 {
     if (auto it = banks_.find(bank_item); it != banks_.end())
     {
         return it->second.get();
     }
 
-    const uint32_t index = bank_item & 0xffffff;
-    if ((bank_item >> 24) != 0x03 || index >= archive_.Banks().size())
+    const std::optional<std::size_t> index =
+        ntdlib::sar::ItemIndex(bank_item, ntdlib::sar::kBankItem, archive_.Banks().size());
+    if (!index)
     {
         return nullptr;
     }
 
-    const auto file = archive_.FileData(archive_.Banks()[index].file_id);
+    const auto file = archive_.FileData(archive_.Banks()[*index].file_id);
     if (file.empty())
     {
         return nullptr;
     }
 
-    return banks_.emplace(bank_item, std::make_shared<const csar::Bank>(csar::Bank::Parse(file))).first->second.get();
+    return banks_
+        .emplace(bank_item, std::make_shared<const ntdlib::sar::Bank>(ntdlib::sar::Bank::Parse(file, kSarOptions)))
+        .first->second.get();
 }
 
 const Engine::LoadedWarc* Engine::GetWarc(uint32_t wave_archive_item)
@@ -76,13 +65,14 @@ const Engine::LoadedWarc* Engine::GetWarc(uint32_t wave_archive_item)
         return it->second.get();
     }
 
-    const uint32_t index = wave_archive_item & 0xffffff;
-    if ((wave_archive_item >> 24) != 0x05 || index >= archive_.WaveArchives().size())
+    const std::optional<std::size_t> index =
+        ntdlib::sar::ItemIndex(wave_archive_item, ntdlib::sar::kWaveArchiveItem, archive_.WaveArchives().size());
+    if (!index)
     {
         return nullptr;
     }
 
-    const auto file = archive_.FileData(archive_.WaveArchives()[index].file_id);
+    const auto file = archive_.FileData(archive_.WaveArchives()[*index].file_id);
     if (file.empty())
     {
         return nullptr;
@@ -93,7 +83,7 @@ const Engine::LoadedWarc* Engine::GetWarc(uint32_t wave_archive_item)
     LoadedWarc w;
     w.file = file;
     w.base = fcram_.Store(file.data(), file.size());
-    w.archive = csar::WaveArchive::Parse(file);
+    w.archive = ntdlib::sar::WaveArchive::Parse(file, kSarOptions);
 
     return warcs_.emplace(wave_archive_item, std::make_shared<const LoadedWarc>(std::move(w))).first->second.get();
 }
@@ -110,19 +100,19 @@ std::optional<WaveInfo> Engine::GetWave(uint32_t wave_archive_item, uint32_t ind
     const LoadedWarc* w = GetWarc(wave_archive_item);
     if (w && index < w->archive.waves.size())
     {
-        const csar::Wave wave = csar::Wave::Parse(w->archive.waves[index]);
+        const ntdlib::sar::Wave wave = ntdlib::sar::Wave::Parse(w->archive.waves[index], kSarOptions);
         WaveInfo info;
         bool ok = true;
         switch (wave.encoding)
         {
-        case csar::WaveEncoding::kPcm8:
-            info.sample_format = 0;
+        case ntdlib::sar::WaveEncoding::kPcm8:
+            info.format = 0;
             break;
-        case csar::WaveEncoding::kPcm16:
-            info.sample_format = 1;
+        case ntdlib::sar::WaveEncoding::kPcm16:
+            info.format = 1;
             break;
-        case csar::WaveEncoding::kDspAdpcm:
-            info.sample_format = 3;
+        case ntdlib::sar::WaveEncoding::kDspAdpcm:
+            info.format = 3;
             break;
         default: // IMA-ADPCM, which the DSP can't play
             ok = false;
@@ -140,7 +130,7 @@ std::optional<WaveInfo> Engine::GetWave(uint32_t wave_archive_item, uint32_t ind
             {
                 const auto& src = wave.channels[c];
                 auto& dst = info.channels[c];
-                dst.data = w->base + static_cast<PAddr>(src.data.data() - w->file.data());
+                dst.data = w->base + static_cast<ntdlib::PAddr>(src.data.data() - w->file.data());
                 if (src.adpcm)
                 {
                     dst.coefs = src.adpcm->coefs;
@@ -158,21 +148,26 @@ std::optional<WaveInfo> Engine::GetWave(uint32_t wave_archive_item, uint32_t ind
     return result;
 }
 
-Channel* Engine::NoteOn(const csar::Bank* bank, const NoteOnInfo& info)
+Channel* Engine::NoteOn(const std::vector<uint32_t>& bank_items, int bank_index, const NoteOnInfo& info)
 {
-    // Bank::NoteOn (0x48f954) with BankFileReader::ReadVelocityRegionInfo (0x48e2f8).
+    // Bank::NoteOn (0x48f954) with BankFileReader::ReadVelocityRegionInfo (0x48e2f8). StartSequence has read the
+    // player's banks.
+    const ntdlib::sar::Bank* bank =
+        bank_index >= 0 && bank_index < 4 && static_cast<std::size_t>(bank_index) < bank_items.size()
+            ? GetBank(bank_items[static_cast<std::size_t>(bank_index)])
+            : nullptr;
     if (!bank || info.prg_no >= bank->instruments.size() || !bank->instruments[info.prg_no])
     {
         return nullptr;
     }
 
-    const csar::VelocityRegion* vr = bank->instruments[info.prg_no]->Find(info.key, info.velocity);
+    const ntdlib::sar::VelocityRegion* vr = bank->instruments[info.prg_no]->Find(info.key, info.velocity);
     if (!vr || vr->wave_id_index >= bank->waves.size())
     {
         return nullptr;
     }
 
-    const csar::WaveId& id = bank->waves[vr->wave_id_index];
+    const ntdlib::sar::WaveId& id = bank->waves[vr->wave_id_index];
     if (id.index == 0xffffffff)
     {
         return nullptr;
@@ -184,28 +179,39 @@ Channel* Engine::NoteOn(const csar::Bank* bank, const NoteOnInfo& info)
         return nullptr;
     }
 
-    Channel* ch = channels_.AllocChannel(std::min(wave->channel_count, 2), info.priority, info.callback);
+    Channel* ch = channels_.AllocChannel(*this, std::min(wave->channel_count, 2), static_cast<uint32_t>(info.priority),
+                                         info.owner_player, info.owner_track);
     if (!ch)
     {
         return nullptr;
     }
 
-    ch->key_ = static_cast<uint8_t>(info.key);
-    ch->original_key_ = vr->original_key;
-    ch->init_volume_ = static_cast<float>(info.velocity * info.velocity * vr->volume) * kOneOver127Cubed;
-    ch->tune_ = vr->pitch;
-    ch->env_.SetAttack(vr->adshr.attack);
-    ch->env_.SetHold(vr->adshr.hold);
-    ch->env_.SetDecay(vr->adshr.decay);
-    ch->env_.SetSustain(vr->adshr.sustain);
-    ch->env_.SetRelease(vr->adshr.release);
-    ch->init_pan_ = static_cast<float>(static_cast<int>(vr->pan) + info.init_pan - 64) * kOneOver63;
-    ch->key_group_ = vr->key_group;
-    ch->ignore_note_off_ = vr->ignore_note_off;
-    ch->interpolation_type_ = vr->interpolation_type;
-    ch->Start(*wave, info.length);
+    // The 3DS's channel holds the note's whole volume, from its velocity and its region, in velocity_volume (see
+    // CtrPolicy::ChannelVolume).
+    ch->key = static_cast<uint8_t>(info.key);
+    ch->original_key = vr->original_key;
+    ch->velocity_volume = static_cast<float>(info.velocity * info.velocity * vr->volume) * Policy::kOneOver127Cubed;
+    ch->tune = vr->pitch;
+    ch->envelope.SetAttack(vr->adshr.attack);
+    ch->envelope.SetHold(vr->adshr.hold);
+    ch->envelope.SetDecay(vr->adshr.decay);
+    ch->envelope.SetSustain(vr->adshr.sustain);
+    ch->envelope.SetRelease(vr->adshr.release);
+    ch->init_pan = static_cast<float>(static_cast<int>(vr->pan) + info.init_pan - 64) * Policy::kOneOver63;
+    ch->key_group = vr->key_group;
+    ch->ignore_note_off = vr->ignore_note_off;
+    ch->interpolation_type = vr->interpolation;
+    ch->Start(*this, *wave, info.length);
 
     return ch;
+}
+
+void Engine::ChannelEvent(int player, int track, Channel& channel, Channel::CallbackStatus)
+{
+    if (player >= 0 && static_cast<std::size_t>(player) < players_.size())
+    {
+        players_[static_cast<std::size_t>(player)].ChannelEvent(*this, track, channel);
+    }
 }
 
 SequenceSoundPlayer* Engine::StartSequence(uint32_t index)
@@ -215,8 +221,8 @@ SequenceSoundPlayer* Engine::StartSequence(uint32_t index)
         return nullptr;
     }
 
-    const csar::SoundInfo& info = archive_.Sounds()[index];
-    if (info.type != csar::SoundType::kSequence)
+    const ntdlib::sar::SoundInfo& info = archive_.Sounds()[index];
+    if (info.type != ntdlib::sar::SoundType::kSequence)
     {
         return nullptr;
     }
@@ -227,32 +233,31 @@ SequenceSoundPlayer* Engine::StartSequence(uint32_t index)
         return nullptr;
     }
 
-    std::array<const csar::Bank*, 4> bank_ptrs{};
+    // The banks load when the sequence starts. The sound's data loads then too.
     for (std::size_t i = 0; i < std::min<std::size_t>(4, info.banks.size()); i++)
     {
-        bank_ptrs[i] = GetBank(info.banks[i]);
+        GetBank(info.banks[i]);
     }
 
-    auto player = std::make_unique<SequenceSoundPlayer>(*this, info, csar::Sequence::Parse(file), bank_ptrs);
-    player->Start();
-    players_.push_back(std::move(player));
+    const ntdlib::sar::Sequence sequence = ntdlib::sar::Sequence::Parse(file, kSarOptions);
+    SequenceSoundPlayer& player = players_.emplace_back(static_cast<int>(players_.size()), info, sequence.data);
+    player.Start();
 
-    return players_.back().get();
+    return &player;
 }
 
 void Engine::FrameProcess()
 {
     // SoundThread::FrameProcess (0x1666d0, which falls through to the frame's work at 0x16674c): player updates,
     // channel updates, the per-frame random advance, then voice updates.
-    for (auto& p : players_)
+    for (SequenceSoundPlayer& player : players_)
     {
-        p->Update();
+        player.Update(*this);
     }
 
-    channels_.UpdateAllChannel();
+    channels_.UpdateAllChannel(*this);
     random_.Next();
     voices_.UpdateAllVoices();
-    channels_.CollectGarbage();
 }
 
 bool Engine::RunFrame()
@@ -264,16 +269,15 @@ bool Engine::RunFrame()
 
     FrameProcess();
     snd_.SendParameterToDsp();
-    frame_count_++;
 
     return true;
 }
 
 bool Engine::IsBusy() const
 {
-    for (const auto& p : players_)
+    for (const SequenceSoundPlayer& player : players_)
     {
-        if (!p->IsFinished())
+        if (!player.IsFinished())
         {
             return true;
         }
@@ -286,17 +290,12 @@ Engine::Snapshot Engine::Save() const
 {
     Snapshot snapshot;
     snapshot.voices = voices_.Save();
-    snapshot.channels = channels_.Save();
+    snapshot.channels = channels_;
     snapshot.random = random_;
-    for (const auto& p : players_)
-    {
-        snapshot.players.push_back(*p);
-    }
-
+    snapshot.players = players_;
     snapshot.banks = banks_;
     snapshot.warcs = warcs_;
     snapshot.waves = waves_;
-    snapshot.frame_count = frame_count_;
     snapshot.global_vars = global_vars_;
 
     return snapshot;
@@ -309,26 +308,22 @@ void Engine::Restore(const Snapshot& snapshot)
         throw std::invalid_argument("nw::snd snapshot with players the engine doesn't have");
     }
 
-    // Remove players started after the snapshot. Their channels are removed when channel state is restored below.
+    // The players that started after the snapshot go. The others keep their places. Callers hold pointers to them.
     while (players_.size() > snapshot.players.size())
     {
-        players_.back()->DetachChannels();
         players_.pop_back();
     }
-
-    // The players stay where they are: channels' callbacks point at their tracks.
     for (std::size_t i = 0; i < players_.size(); i++)
     {
-        *players_[i] = snapshot.players[i];
+        players_[i] = snapshot.players[i];
     }
 
     voices_.Restore(snapshot.voices);
-    channels_.Restore(snapshot.channels);
+    channels_ = snapshot.channels;
     random_ = snapshot.random;
     banks_ = snapshot.banks;
     warcs_ = snapshot.warcs;
     waves_ = snapshot.waves;
-    frame_count_ = snapshot.frame_count;
     global_vars_ = snapshot.global_vars;
 }
 
@@ -354,7 +349,8 @@ void ArchiveModel::Restore(const Snapshot& snapshot)
     }
 }
 
-bool ArchiveModel::Start(std::span<const uint8_t> firmware, const csar::SoundArchive& archive, uint8_t output_mode)
+bool ArchiveModel::Start(std::span<const uint8_t> firmware, const ntdlib::sar::SoundArchive& archive,
+                         uint8_t output_mode)
 {
     nnsnd::DspDefaults defaults;
     defaults.output_format = output_mode;

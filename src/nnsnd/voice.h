@@ -14,7 +14,7 @@
 #include <array>
 #include <cstdint>
 
-#include "common/common_types.h"
+#include "ntdlib/types.h"
 
 namespace threesf::nnsnd
 {
@@ -65,7 +65,7 @@ struct WaveBuffer
     }
 
     // Set by the user (nn::snd::WaveBuffer).
-    PAddr buffer_address = 0; // physical address (nn::snd adds 0x0C000000 to the linear vaddr)
+    ntdlib::PAddr buffer_address = 0; // physical address (nn::snd adds 0x0C000000 to the linear vaddr)
     uint32_t sample_length = 0;
     const AdpcmContext* adpcm_context = nullptr;
     bool loop = false;

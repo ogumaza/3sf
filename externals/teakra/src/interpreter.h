@@ -325,11 +325,11 @@ public:
         vinterrupt_context_switch = context_switch;
     }
 
-    // Saves or loads the interrupts signalled but not yet taken, and the idle state (see state.h).
+    // Saves or loads the interrupts signalled but not yet taken (see state.h).
     template <typename Archive>
     void Serialize(Archive& ar) {
         ar(interrupt_pending, vinterrupt_pending, any_interrupt_pending, vinterrupt_context_switch,
-           vinterrupt_address, idle);
+           vinterrupt_address);
     }
 
     using instruction_return_type = void;

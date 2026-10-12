@@ -9,7 +9,7 @@
 #include <utility>
 #include <vector>
 
-#include "common/bytes.h"
+#include "xsflib/bytes.h"
 
 namespace threesf::nnsnd
 {
@@ -81,7 +81,7 @@ bool DspLink::Initialize(std::span<const uint8_t> component)
     audio_irq_ = false;
 
     const auto count_bytes = dsp_->ReadPipe(dsp::Pipe::kAudio, 2);
-    const uint16_t count = static_cast<uint16_t>(count_bytes[0] | (count_bytes[1] << 8));
+    const uint16_t count = xsflib::LoadLe16(count_bytes.data());
     if (count != struct_addr_.size())
     {
         return false;
@@ -90,7 +90,7 @@ bool DspLink::Initialize(std::span<const uint8_t> component)
     auto addrs = dsp_->ReadPipe(dsp::Pipe::kAudio, count * 2);
     for (uint16_t i = 0; i < count; i++)
     {
-        struct_addr_[i] = static_cast<uint16_t>(addrs[i * 2] | (addrs[i * 2 + 1] << 8));
+        struct_addr_[i] = xsflib::LoadLe16(addrs.data() + i * 2);
     }
 
     // Every structure used here has to lie inside DSP RAM in both regions (region 1 is the higher one).
@@ -202,12 +202,12 @@ uint8_t* DspLink::Address(int structure, int region) const
 
 uint16_t DspLink::LoadWord(int structure, int region) const
 {
-    return LoadLe16(Address(structure, region));
+    return xsflib::LoadLe16(Address(structure, region));
 }
 
 void DspLink::StoreWord(int structure, int region, uint16_t value)
 {
-    StoreLe16(Address(structure, region), value);
+    xsflib::StoreLe16(Address(structure, region), value);
 }
 
 // The DSP reads the ARM11's parameters, and writes its own results, while it runs: the parameters go back to DSP RAM

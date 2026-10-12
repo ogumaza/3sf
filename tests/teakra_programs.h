@@ -5,10 +5,6 @@
 
 #pragma once
 
-#include <teakra/disassembler.h>
-#include <teakra/impl/register.h>
-#include <teakra/teakra.h>
-
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -17,6 +13,10 @@
 #include <random>
 #include <string>
 #include <vector>
+
+#include <teakra/disassembler.h>
+#include <teakra/impl/register.h>
+#include <teakra/teakra.h>
 
 namespace threesf::teakra_test
 {
@@ -34,8 +34,6 @@ enum class Kind : uint8_t
     kBlockRepeat,
     kThrows, // undefined, or the interpreter throws for it whatever the state (not something to test)
 };
-
-inline Kind KindOf(uint16_t opcode);
 
 // Marks the opcodes the interpreter throws for from a reset state, which programs leave out.
 inline void FindThrowing(Teakra::Teakra& dsp, std::vector<Kind>& kinds)

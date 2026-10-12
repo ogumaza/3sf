@@ -7,26 +7,27 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
-#include <cstdio>
 #include <cstring>
 #include <string>
 #include <vector>
 
-#include "check.h"
-#include "common/bytes.h"
+#include "xsflib/bytes.h"
+#include "xsflib/testing/check.h"
+
 #include "rip/game.h"
 
 using namespace threesf;
+using namespace xsflib::testing;
 
 // A well-formed DSP1 image of 0x310 bytes: the header, then one segment of 0x10 bytes.
 static std::vector<uint8_t> DspImage()
 {
     std::vector<uint8_t> image(0x310);
     std::memcpy(image.data() + 0x100, "DSP1", 4);
-    StoreLe32(image.data() + 0x104, 0x310); // the image's size
-    image[0x10e] = 1;                       // the number of segments
-    StoreLe32(image.data() + 0x120, 0x300); // the segment's offset in the image
-    StoreLe32(image.data() + 0x128, 0x10);  // and its size
+    xsflib::StoreLe32(image.data() + 0x104, 0x310); // the image's size
+    image[0x10e] = 1;                               // the number of segments
+    xsflib::StoreLe32(image.data() + 0x120, 0x300); // the segment's offset in the image
+    xsflib::StoreLe32(image.data() + 0x128, 0x10);  // and its size
 
     return image;
 }
@@ -44,21 +45,24 @@ static std::vector<uint8_t> WithImage(std::vector<uint8_t> code, const std::vect
 static void TestFirmwareCandidates()
 {
     rip::GameFiles game;
-    const std::string code("\0\0rom:/snd/game.cdc\0", 20);
-    game.code.assign(code.begin(), code.end());
+    const std::string kCode("\0\0rom:/snd/game.cdc\0", 20);
+    game.code.assign(kCode.begin(), kCode.end());
     game.romfs_files = {"a/first.cdc", "b/dspaudio.cdc", "snd/game.cdc", "snd/game.bcsar", "c/other.CDC"};
 
-    THREESF_CHECK((rip::FirmwareCandidates(game, nullptr) ==
-                   std::vector<std::string>{"snd/game.cdc", "b/dspaudio.cdc", "a/first.cdc", "c/other.CDC"}));
+    XSFLIB_CHECK((rip::FirmwareCandidates(game, nullptr) ==
+                  std::vector<std::string>{"snd/game.cdc", "b/dspaudio.cdc", "a/first.cdc", "c/other.CDC"}));
 
     game.code.clear();
-    THREESF_CHECK((rip::FirmwareCandidates(game, nullptr) ==
-                   std::vector<std::string>{"b/dspaudio.cdc", "a/first.cdc", "snd/game.cdc", "c/other.CDC"}));
+
+    XSFLIB_CHECK((rip::FirmwareCandidates(game, nullptr) ==
+                  std::vector<std::string>{"b/dspaudio.cdc", "a/first.cdc", "snd/game.cdc", "c/other.CDC"}));
 
     rip::GameProfile profile{};
     profile.dsp_component = "sound/x.cdc";
+
     const auto with_profile = rip::FirmwareCandidates(game, &profile);
-    THREESF_CHECK(with_profile.size() == 5 && with_profile.front() == "sound/x.cdc");
+
+    XSFLIB_CHECK(with_profile.size() == 5 && with_profile.front() == "sound/x.cdc");
 }
 
 // A DSP1 image linked into a game's code is found by its header, and a "DSP1" that doesn't start a well-formed image
@@ -71,11 +75,11 @@ static void TestFirmwareInCode()
     std::memcpy(code.data() + 0x180, "DSP1", 4);                           // its "size" is 0xeeeeeeee
     const std::vector<uint8_t> at_end(code.begin(), code.begin() + 0x900); // room for the image at 0x5f0, and no more
 
-    THREESF_CHECK(rip::FindFirmwareInCode(WithImage(code, image, 0x800)) == std::size_t{0x800});
-    THREESF_CHECK(rip::FindFirmwareInCode(WithImage(at_end, image, 0x5f0)) == std::size_t{0x5f0});
-    THREESF_CHECK(!rip::FindFirmwareInCode(code));
-    THREESF_CHECK(!rip::FindFirmwareInCode({}));
-    THREESF_CHECK(!rip::FindFirmwareInCode(std::vector<uint8_t>(image.begin(), image.begin() + 0x2ff)));
+    XSFLIB_CHECK(rip::FindFirmwareInCode(WithImage(code, image, 0x800)) == std::size_t{0x800});
+    XSFLIB_CHECK(rip::FindFirmwareInCode(WithImage(at_end, image, 0x5f0)) == std::size_t{0x5f0});
+    XSFLIB_CHECK(!rip::FindFirmwareInCode(code));
+    XSFLIB_CHECK(!rip::FindFirmwareInCode({}));
+    XSFLIB_CHECK(!rip::FindFirmwareInCode(std::vector<uint8_t>(image.begin(), image.begin() + 0x2ff)));
 
     // Each of these breaks the image: it's bigger than what's left of the code, it has no segments, a segment runs past
     // its end, or a segment starts inside the header.
@@ -88,27 +92,28 @@ static void TestFirmwareInCode()
         }
         else
         {
-            StoreLe32(bad.data() + field, value);
+            xsflib::StoreLe32(bad.data() + field, value);
         }
 
         return !rip::FindFirmwareInCode(WithImage(code, bad, 0x800));
     };
-    THREESF_CHECK(broken(0x104, 0x801));
-    THREESF_CHECK(broken(0x10e, 0));
-    THREESF_CHECK(broken(0x128, 0x11));
-    THREESF_CHECK(broken(0x120, 0x2ff));
+
+    XSFLIB_CHECK(broken(0x104, 0x801));
+    XSFLIB_CHECK(broken(0x10e, 0));
+    XSFLIB_CHECK(broken(0x128, 0x11));
+    XSFLIB_CHECK(broken(0x120, 0x2ff));
 
     // So does an eleventh segment, even when it and the other ten are well-formed.
     std::vector<uint8_t> eleven = image;
     eleven.resize(0x340);
-    StoreLe32(eleven.data() + 0x104, 0x340);
+    xsflib::StoreLe32(eleven.data() + 0x104, 0x340);
     eleven[0x10e] = 11;
     for (std::size_t i = 1; i <= 10; i++)
     {
         std::copy_n(image.begin() + 0x120, 0x30, eleven.begin() + static_cast<std::ptrdiff_t>(0x120 + i * 0x30));
     }
 
-    THREESF_CHECK(!rip::FindFirmwareInCode(WithImage(code, eleven, 0x800)));
+    XSFLIB_CHECK(!rip::FindFirmwareInCode(WithImage(code, eleven, 0x800)));
 }
 
 // A game's firmware is the first of its RomFS files that's a DSP1 image, and otherwise the image in its code.
@@ -133,10 +138,10 @@ static void TestGameFirmware()
     game.code.assign(0x1000, 0);
     const auto from_neither = rip::FindGameFirmware(game, nullptr);
 
-    THREESF_CHECK(from_romfs && from_romfs->romfs_path == "sound/dspaudio.cdc" && from_romfs->data == file);
-    THREESF_CHECK(from_code && from_code->romfs_path.empty() && from_code->code_offset == 0x400u &&
-                  from_code->data == image);
-    THREESF_CHECK(!from_neither);
+    XSFLIB_CHECK(from_romfs && from_romfs->romfs_path == "sound/dspaudio.cdc" && from_romfs->data == file);
+    XSFLIB_CHECK(from_code && from_code->romfs_path.empty() && from_code->code_offset == 0x400u &&
+                 from_code->data == image);
+    XSFLIB_CHECK(!from_neither);
 }
 
 // --bgm's labels: a word that starts with BGM, a jingle or a fanfare, with or without a number, or SEQ_M_ at the start,
@@ -159,7 +164,7 @@ static void TestMusicLabels()
 // as the parser does (prefixes, variable-length numbers), and reads on past a conditional jump.
 static void TestWalkSequence()
 {
-    const std::vector<uint8_t> data = {
+    const std::vector<uint8_t> kData = {
         0x88, 0x01, 0x00, 0x00, 0x10,             // 0x00: opentrack 1 at 0x10
         0x88, 0x02, 0x00, 0x00, 0x20,             // 0x05: opentrack 2 at 0x20
         0x3c, 0x64, 0x30,                         // 0x0a: a note, 48 ticks long
@@ -174,16 +179,16 @@ static void TestWalkSequence()
         0x41, 0x64, 0x81, 0x00,                   // 0x30: a note 128 ticks long (a two-byte length)
         0xff,                                     // 0x34: fin
     };
-    const std::vector<uint8_t> past_condition = {0xa2, 0x89, 0x00, 0x00, 0x08, 0x3c, 0x64, 0x30, 0xff};
-    const std::vector<uint8_t> cut_short = {0x88, 0x01};
+    const std::vector<uint8_t> kPastCondition = {0xa2, 0x89, 0x00, 0x00, 0x08, 0x3c, 0x64, 0x30, 0xff};
+    const std::vector<uint8_t> kCutShort = {0x88, 0x01};
 
-    const rip::SequenceShape shape = rip::WalkSequence(data, 0);
-    const rip::SequenceShape conditional = rip::WalkSequence(past_condition, 0);
-    const rip::SequenceShape truncated = rip::WalkSequence(cut_short, 0);
+    const rip::SequenceShape shape = rip::WalkSequence(kData, 0);
+    const rip::SequenceShape conditional = rip::WalkSequence(kPastCondition, 0);
+    const rip::SequenceShape truncated = rip::WalkSequence(kCutShort, 0);
 
-    THREESF_CHECK(shape.tracks == 3 && shape.notes == 4);
-    THREESF_CHECK(conditional.tracks == 1 && conditional.notes == 1);
-    THREESF_CHECK(truncated.tracks == 2 && truncated.notes == 0);
+    XSFLIB_CHECK(shape.tracks == 3 && shape.notes == 4);
+    XSFLIB_CHECK(conditional.tracks == 1 && conditional.notes == 1);
+    XSFLIB_CHECK(truncated.tracks == 2 && truncated.notes == 0);
 }
 
 int main()
@@ -194,13 +199,5 @@ int main()
     TestMusicLabels();
     TestWalkSequence();
 
-    if (failures)
-    {
-        std::fprintf(stderr, "%d check(s) failed\n", failures);
-        return 1;
-    }
-
-    std::printf("rip tests passed\n");
-
-    return 0;
+    return Summary("rip");
 }

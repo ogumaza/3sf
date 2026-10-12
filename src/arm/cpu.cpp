@@ -943,6 +943,7 @@ bool Cpu::ArmMultiply(uint32_t op)
             {
                 SetNZ(result);
             }
+
             return true;
         }
 
@@ -954,6 +955,7 @@ bool Cpu::ArmMultiply(uint32_t op)
             {
                 SetNZ(result);
             }
+
             return true;
         }
 
@@ -1415,6 +1417,7 @@ bool Cpu::Cp15(uint32_t op)
             {
                 state_.tpidrurw = state_.r[rt];
             }
+
             return true;
         }
     }

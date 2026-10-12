@@ -15,7 +15,8 @@
 #include <utility>
 #include <vector>
 
-#include "common/bytes.h"
+#include "xsflib/bytes.h"
+
 #include "dsp/fcram.h"
 
 namespace threesf::horizon
@@ -129,20 +130,20 @@ Kernel::Kernel(const KernelConfig& config) : cfg_(config), cpu_(mem_)
     uint8_t* config_mem = MapRegion(kConfigMemBase, 0x1000);
     config_mem[0x02] = 0x3a; // kernel version 2.58
     config_mem[0x03] = 0x02;
-    StoreLe32(config_mem + 0x08, 0x00008002);
-    StoreLe32(config_mem + 0x0c, 0x00040130);
-    StoreLe32(config_mem + 0x10, 2);
+    xsflib::StoreLe32(config_mem + 0x08, 0x00008002);
+    xsflib::StoreLe32(config_mem + 0x0c, 0x00040130);
+    xsflib::StoreLe32(config_mem + 0x10, 2);
     config_mem[0x14] = 1; // retail
     config_mem[0x16] = 1;
-    StoreLe32(config_mem + 0x18, 0x0000f450);
-    StoreLe32(config_mem + 0x30, 0); // memory mode 0 (64 MiB)
-    StoreLe32(config_mem + 0x40, cfg_.app_memory);
-    StoreLe32(config_mem + 0x44, 0x02c00000);
-    StoreLe32(config_mem + 0x48, 0x01400000);
+    xsflib::StoreLe32(config_mem + 0x18, 0x0000f450);
+    xsflib::StoreLe32(config_mem + 0x30, 0); // memory mode 0 (64 MiB)
+    xsflib::StoreLe32(config_mem + 0x40, cfg_.app_memory);
+    xsflib::StoreLe32(config_mem + 0x44, 0x02c00000);
+    xsflib::StoreLe32(config_mem + 0x48, 0x01400000);
     config_mem[0x62] = 0x3a;
     config_mem[0x63] = 0x02;
-    StoreLe32(config_mem + 0x64, 2);
-    StoreLe32(config_mem + 0x68, 0x0000f450);
+    xsflib::StoreLe32(config_mem + 0x64, 2);
+    xsflib::StoreLe32(config_mem + 0x68, 0x0000f450);
 
     // Shared page
     uint8_t* shared = MapRegion(kSharedPageBase, 0x1000);
@@ -403,7 +404,7 @@ std::shared_ptr<Kernel::Snapshot> Kernel::Save(const Snapshot* previous)
     snapshot->regions = regions_;
     for (std::size_t i = 0; i < regions_.size(); i++)
     {
-        const MemoryImage* before =
+        const xsflib::MemoryImage* before =
             previous && i < previous->region_images.size() && previous->regions[i] == regions_[i]
                 ? &previous->region_images[i]
                 : nullptr;
@@ -949,6 +950,7 @@ uint32_t Kernel::ArbitrateAddress(Thread& thread, Handle handle, uint32_t addres
         {
             block(false);
         }
+
         return kResultSuccess;
 
     case 2: // decrement and wait if less than
@@ -959,6 +961,7 @@ uint32_t Kernel::ArbitrateAddress(Thread& thread, Handle handle, uint32_t addres
                 mem_.Write32(address, static_cast<uint32_t>(v) - 1);
                 block(false);
             }
+
             return kResultSuccess;
         }
 
@@ -967,6 +970,7 @@ uint32_t Kernel::ArbitrateAddress(Thread& thread, Handle handle, uint32_t addres
         {
             block(true);
         }
+
         return kResultTimeout;
 
     case 4: // decrement and wait if less than, with timeout
@@ -977,6 +981,7 @@ uint32_t Kernel::ArbitrateAddress(Thread& thread, Handle handle, uint32_t addres
                 mem_.Write32(address, static_cast<uint32_t>(v) - 1);
                 block(true);
             }
+
             return kResultTimeout;
         }
 
@@ -1088,6 +1093,7 @@ void Kernel::HandleSvc(Thread& thread, uint32_t number)
                 m->holder_ = &thread;
                 m->lock_count_ = 1;
             }
+
             r[0] = kResultSuccess;
             r[1] = AddHandle(m);
             break;

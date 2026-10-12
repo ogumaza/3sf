@@ -4,20 +4,17 @@
 // changes wrap DMA addresses and channel numbers and limit transfer sizes. Tests use the MMIO registers just as
 // firmware would. No game data needed.
 
-#include <teakra/teakra.h>
-
 #include <cstdint>
-#include <cstdio>
 #include <stdexcept>
 
-#include "check.h"
-#include "common/bytes.h"
+#include "xsflib/bytes.h"
+#include "xsflib/testing/check.h"
+#include <teakra/teakra.h>
+
+using namespace xsflib::testing;
 
 namespace
 {
-
-using threesf::LoadLe16;
-using threesf::StoreLe16;
 
 // DMA registers, as offsets into the MMIO region.
 constexpr uint16_t kDmaChannel = 0x1BE;
@@ -45,7 +42,7 @@ constexpr uint32_t kDataMemoryWord = 0x20000;
 // Returns word `word` of DSP memory.
 uint16_t ReadWord(const Teakra::Teakra& teakra, uint32_t word)
 {
-    return LoadLe16(teakra.GetDspMemory() + word * 2);
+    return xsflib::LoadLe16(teakra.GetDspMemory() + word * 2);
 }
 
 // Starts a transfer within the data space with DMA channel 0.
@@ -77,11 +74,11 @@ void TestDwordTransferEnds()
     Teakra::Teakra teakra(Teakra::UserConfig{});
     constexpr uint32_t kSource = 0x100;
     constexpr uint32_t kDestination = 0x8000;
-    StoreLe16(teakra.GetDspMemory() + (kDataMemoryWord + kSource) * 2, 0x1234);
+    xsflib::StoreLe16(teakra.GetDspMemory() + (kDataMemoryWord + kSource) * 2, 0x1234);
 
     Transfer(teakra, kSource, kDestination, 0xFFFF, 1, 1, kDmaDwordMode);
 
-    THREESF_CHECK(ReadWord(teakra, kDataMemoryWord + kDestination) == 0x1234);
+    XSFLIB_CHECK(ReadWord(teakra, kDataMemoryWord + kDestination) == 0x1234);
 }
 
 // A transfer longer than the DSP could make is refused with an error, instead of running for years.
@@ -99,7 +96,7 @@ void TestLongTransferRefused()
         refused = true;
     }
 
-    THREESF_CHECK(refused);
+    XSFLIB_CHECK(refused);
 }
 
 // A destination far past the end of DSP memory wraps around to a word inside it.
@@ -108,11 +105,11 @@ void TestDmaDestinationWraps()
     Teakra::Teakra teakra(Teakra::UserConfig{});
     constexpr uint32_t kSource = 0x100;
     constexpr uint32_t kDestination = 0x123456;
-    StoreLe16(teakra.GetDspMemory() + (kDataMemoryWord + kSource) * 2, 0xBEEF);
+    xsflib::StoreLe16(teakra.GetDspMemory() + (kDataMemoryWord + kSource) * 2, 0xBEEF);
 
     CopyWord(teakra, kSource, kDestination);
 
-    THREESF_CHECK(ReadWord(teakra, (kDataMemoryWord + kDestination) % kMemoryWords) == 0xBEEF);
+    XSFLIB_CHECK(ReadWord(teakra, (kDataMemoryWord + kDestination) % kMemoryWords) == 0xBEEF);
 }
 
 // A source far past the end of DSP memory wraps around too.
@@ -121,11 +118,11 @@ void TestDmaSourceWraps()
     Teakra::Teakra teakra(Teakra::UserConfig{});
     constexpr uint32_t kSource = 0x7654321;
     constexpr uint32_t kDestination = 0x200;
-    StoreLe16(teakra.GetDspMemory() + ((kDataMemoryWord + kSource) % kMemoryWords) * 2, 0xCAFE);
+    xsflib::StoreLe16(teakra.GetDspMemory() + ((kDataMemoryWord + kSource) % kMemoryWords) * 2, 0xCAFE);
 
     CopyWord(teakra, kSource, kDestination);
 
-    THREESF_CHECK(ReadWord(teakra, kDataMemoryWord + kDestination) == 0xCAFE);
+    XSFLIB_CHECK(ReadWord(teakra, kDataMemoryWord + kDestination) == 0xCAFE);
 }
 
 // The DMA channel number wraps around to one of the eight channels.
@@ -135,7 +132,7 @@ void TestDmaChannelWraps()
 
     teakra.MMIOWrite(kDmaChannel, 9);
 
-    THREESF_CHECK(teakra.MMIORead(kDmaChannel) == 1);
+    XSFLIB_CHECK(teakra.MMIORead(kDmaChannel) == 1);
 }
 
 } // namespace
@@ -148,13 +145,5 @@ int main()
     TestDwordTransferEnds();
     TestLongTransferRefused();
 
-    if (failures)
-    {
-        std::fprintf(stderr, "%d check(s) failed\n", failures);
-        return 1;
-    }
-
-    std::printf("teakra bounds tests passed\n");
-
-    return 0;
+    return Summary("teakra bounds");
 }

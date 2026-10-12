@@ -216,13 +216,6 @@ enum class Refusal { None, Kind, Mode };
     X(tstb_r6) X(vtrclr) X(vtrclr0) X(vtrclr1) X(vtrmov) X(vtrmov0) X(vtrmov1) X(vtrshr)
 // clang-format on
 
-// A value in a host register, or a constant.
-struct Operand40 {
-    bool constant;
-    Reg reg;
-    u64 value;
-};
-
 // Translates instructions into x86-64 code for one block. The decoder calls one of its methods
 // for each instruction, with the instruction's operands, as it calls the interpreter's; each
 // either emits code with the same effect as the interpreter's method and returns true, or refuses
@@ -799,6 +792,12 @@ public:
 
     bool push(Register a) {
         if (!CanReadBus16(a.GetName(), true)) {
+            // At the end of a block repeat's body, the interpreter steps the loop before the
+            // instruction runs. The step counts lc down, or ends the loop on the last pass. A
+            // handler run from a block would push lc from before the step.
+            if (a.GetName() == RegName::lc && next == loop_end) {
+                return Refuse();
+            }
             return ViaHandler(false, {-1});
         }
         RegToBus16(Reg::rsi, a.GetName(), true);
@@ -2602,8 +2601,7 @@ private:
         }
     }
 
-    // AlmGeneric with the operand in `a` (a 64-bit value). Clobbers rax to r10 but r11... see
-    // below.
+    // AlmGeneric with the operand in `a` (a 64-bit value). Clobbers rax to r10.
     void AlmGeneric(AlmOp op, Reg a, RegName b) {
         switch (op) {
         case AlmOp::Or:
@@ -3338,7 +3336,7 @@ private:
     }
 
     // Stops the block before this instruction if the data address in `address` (16 bits,
-    // zero-extended) is an MMIO register, or one the memory interface would refuse.
+    // zero-extended) is an MMIO register.
     void CheckData(Reg address) {
         const u16 base = MiuMode(miu.mmio_base);
         const u32 end = std::min<u32>(u32{base} + MemoryInterfaceUnit::MMIOSize, 0x10000);

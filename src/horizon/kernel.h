@@ -21,8 +21,9 @@
 #include <utility>
 #include <vector>
 
+#include "xsflib/memory_image.h"
+
 #include "arm/cpu.h"
-#include "common/memory_image.h"
 
 namespace threesf::horizon
 {
@@ -324,7 +325,7 @@ public:
         Handle next_handle = 0;
 
         std::vector<std::shared_ptr<Region>> regions; // kept alive so the mapping's pointers remain valid
-        std::vector<MemoryImage> region_images;
+        std::vector<xsflib::MemoryImage> region_images;
         std::vector<bool> fcram_used;
         uint32_t heap_size = 0;
         uint32_t linear_size = 0;
@@ -423,6 +424,7 @@ public:
 
     // Takes a snapshot between runs, sharing the memory pages that haven't changed since `previous`.
     std::shared_ptr<Snapshot> Save(const Snapshot* previous);
+
     void Restore(const Snapshot& snapshot);
 
     // Called whenever emulated time advances, with the new time. The System runs the DSP up to it.

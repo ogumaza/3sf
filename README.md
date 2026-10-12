@@ -33,9 +33,8 @@ command before it writes any files. For example,
 
 ### Downloads
 
-The Releases page has `3sfrip` and `3sfplay` for 64-bit and 32-bit Windows, and the foobar2000
-component for 64-bit and 32-bit foobar2000 on Windows. On other systems, build 3SF from source
-(see "Building").
+The Releases page has `3sfrip` and `3sfplay` for 64-bit Windows, and the foobar2000 component
+for 64-bit and 32-bit foobar2000 on Windows. On macOS, build 3SF from source (see "Building").
 
 ### Drag and drop
 
@@ -51,26 +50,23 @@ characters; on Windows that needs Windows 10 version 1903 or later.
 
 ## Building
 
-You need Git, CMake 3.20 or later and a C++20 compiler. zlib and libFLAC are downloaded and
-built along with 3SF when they aren't installed. Python 3 is only needed for the scripts in
-`driver/`.
+You need Git, CMake 3.20 or later and a C++20 compiler. 3SF builds on two libraries: xsflib, for
+players and rippers of the PSF family, and ntdlib, for the hardware and formats of Nintendo's
+consoles. The repository holds them as submodules in `externals/xsflib` and `externals/ntdlib`:
+clone with `git clone --recursive`, or run `git submodule update --init --recursive` in a clone.
+The source code archives on the Releases page don't include the submodules. Clone the repository
+instead. zlib and libFLAC are downloaded and built along with 3SF when they aren't installed.
+Python 3 is only needed for the scripts in `driver/`.
 
 - **Windows:** Visual Studio 2022 or later with the "Desktop development with C++" workload,
   which includes CMake, and its "C++ Clang tools for Windows" component, which adds clang-cl.
-  Configure with `cmake -S . -B build -T ClangCL` in place of the configure command below.
-  clang-cl builds play faster than MSVC builds, with the same output.
-  Without `-T ClangCL`, MSVC builds it, and versions of Visual Studio 2022 before 17.7 build a
-  slower Teakra that way. Run the commands in a Developer PowerShell or Developer Command Prompt.
-- **macOS:** the Xcode command line tools (`xcode-select --install`) and CMake
-  (`brew install cmake`). `brew install flac pkg-config` saves building libFLAC, except in a
-  universal build (two architectures in `CMAKE_OSX_ARCHITECTURES`), which builds its own.
-- **Linux:** GCC or Clang, CMake and Git from your distribution. The zlib and libFLAC
-  development packages and pkg-config (on Debian and Ubuntu, `zlib1g-dev libflac-dev
-  pkg-config`) save building those two.
+  Configure with `cmake -S . -B build -A x64 -T ClangCL` in place of the configure command
+  below. Run the commands in a Developer PowerShell or Developer Command Prompt.
+- **macOS on Apple Silicon:** the Xcode command line tools (`xcode-select --install`) and CMake
+  (`brew install cmake`). `brew install flac pkg-config` saves building libFLAC.
 
-MinGW, GCC and GNU-style Clang aren't supported on Windows. GCC and Clang also aren't supported
-for 32-bit x86: their floating-point arithmetic produces different samples from the other
-builds. CMake rejects these configurations. Use clang-cl or MSVC for 32-bit foobar2000.
+Linux, Intel Macs, MSVC and 32-bit Windows aren't supported. The one exception is the 32-bit
+foobar2000 component. Build it with clang-cl, configured with `-A Win32 -T ClangCL`.
 
 ```sh
 cmake -S . -B build
@@ -80,12 +76,12 @@ ctest --test-dir build -C Release
 
 `CMakePresets.json` has `release` and `debug` presets for the same steps, such as
 `cmake --preset release`, `cmake --build --preset release` and `ctest --preset release`. The
-presets need CMake 3.21 or later, and on Windows they build with MSVC.
+presets need CMake 3.23 or later. They don't select clang-cl. On Windows, use the commands
+above.
 
 CI (`.github/workflows/ci.yml`) builds 3SF and runs `ctest` on every push to `main` that changes
-more than documentation: on Windows with clang-cl (x64, and x86 for 32-bit foobar2000) and
-MSVC (x64), on macOS with Apple Clang (Apple Silicon and Intel), and on Linux with GCC and Clang
-(x64).
+more than documentation: on Windows with clang-cl (x64, and x86 for 32-bit foobar2000) and on
+macOS with Apple Clang (Apple Silicon).
 
 `externals/teakra` is [Teakra](https://github.com/wwylele/teakra) at upstream commit 3d697a1 with
 3SF's changes, excluding upstream's hardware tests, Git LFS setup and CI. Compare against that
@@ -107,23 +103,23 @@ both the JIT and interpreter and compares the results (`tests/teakra_jit_test.cp
 
 During playback, the foobar2000 component renders ahead on a separate thread, as fast as the
 CPU allows, and buffers up to 10 minutes and 10 seconds of audio
-(`src/threesf/render_ahead.cpp`). Seeking within the buffer is instant. Seeking further
+(`externals/xsflib/src/player/render_ahead.cpp`). Seeking within the buffer is instant. Seeking further
 ahead waits for rendering to reach the requested position. Longer tracks also use save
 states. Every 2 seconds, the player takes a snapshot of the whole emulation
-(`src/threesf/playback.cpp`): the DSP's registers, components and memory, FCRAM, and either
+(`externals/xsflib/include/xsflib/player/playback.h`): the DSP's registers, components and memory, FCRAM, and either
 the ARM11 with the kernel's objects, services and memory (game mode) or the model of the
 sound player (archive mode). Unchanged 4 KiB memory pages are shared between snapshots.
 Seeking back before the buffered audio restores the latest snapshot before the target and
 renders from there. With rendering ahead turned off, every track uses snapshots.
 
 The save-state test runs random programs on the DSP, saves part-way through, and checks that
-restoring the state reproduces the same results (`tests/teakra_state_test.cpp`). The rendering-ahead
-test checks reads and seeks with a test substitute for the player (`tests/render_ahead_test.cpp`).
+restoring the state reproduces the same results (`tests/teakra_state_test.cpp`).
 
 ## Layout
 
 ```
 docs/3sf.md          the format
+externals/           the libraries xsflib and ntdlib, and Teakra
 driver/              the guest driver (ARM code, prebuilt into src/rip/driver_blob.h)
 src/arm/             ARM11 interpreter (ARMv6K, Thumb, VFPv2)
 src/horizon/         Horizon kernel HLE, services, RomFS, the emulated system
@@ -131,17 +127,16 @@ src/dsp/             the DSP: Teakra running the game's firmware, and FCRAM
 src/threesf/         3SF format and player core, both modes (no platform audio or UI)
 src/rip/             game loading (images, RomFS, BLZ), profiles, rip building
 src/cli/             3sfrip, 3sfplay
-src/csar, nnsnd, nwsnd/   CSAR parsing and the nw::snd/nn::snd model (archive mode)
-src/common/          small helpers shared by the rest (byte order, ASCII, quiet stdout)
+src/nnsnd, nwsnd/    the nw::snd/nn::snd model (archive mode)
+src/common/          small helpers shared by the rest (quiet stdout, how 3SF reads sound archives)
 plugins/foobar2000/  foobar2000 component
-platform/            the Windows manifest and the macOS droplet apps of 3sfrip and 3sfplay
 tests/               ctest suites
 ```
 
 ## Licence
 
-3SF is under the MIT licence (`LICENSE`). Teakra is MIT too; `THIRD-PARTY-NOTICES.md` lists
-everything 3SF uses and what a binary distribution must include.
+3SF is under the MIT licence (`LICENSE`). xsflib, ntdlib and Teakra are MIT too.
+`THIRD-PARTY-NOTICES.md` lists everything 3SF uses and what a binary distribution must include.
 
 Game data is not covered by this licence. A `.3sflib` contains a game's code, sound archive and
 DSP firmware. Rips are for personal use.

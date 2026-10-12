@@ -6,10 +6,7 @@
 // are random (see teakra_programs.h), or idle in a loop while randomly configured timers, audio ports, command
 // registers and DMA raise interrupts.
 //
-// usage: teakra_state_test [trials [first seed]]
-
-#include <teakra/impl/register.h>
-#include <teakra/teakra.h>
+// usage: threesf_teakra_state_test [trials [first seed]]
 
 #include <array>
 #include <cstddef>
@@ -24,6 +21,9 @@
 #include <string>
 #include <vector>
 
+#include <teakra/impl/register.h>
+#include <teakra/teakra.h>
+
 #include "common/quiet_stdout.h"
 #include "teakra_programs.h"
 
@@ -36,7 +36,7 @@ using namespace threesf::teakra_test;
 using Sample = std::array<int16_t, 2>;
 
 // Instructions for the idle programs.
-constexpr uint16_t kBranch = 0x4180; // br <expansion word> always
+constexpr uint16_t kBranch = 0x57F0; // brr -1 always, a branch to itself, where Teakra idles
 constexpr uint16_t kNop = 0x0000;
 constexpr uint16_t kReturnFromInterrupt = 0x45c0; // reti
 
@@ -52,7 +52,7 @@ struct Outcome
     std::vector<Sample> samples;
 };
 
-// Runs `dsp` for `cycles` cycles, collecting its audio output in `samples`.
+// Runs `dsp` for `cycles` cycles.
 std::string Run(Teakra::Teakra& dsp, uint32_t cycles)
 {
     try
@@ -192,7 +192,6 @@ std::vector<uint8_t> IdleMemory(std::mt19937_64& rng)
 {
     std::vector<uint8_t> memory(kMemoryBytes);
     Store(memory, 0, kBranch);
-    Store(memory, 1, 0);
     for (uint32_t vector : {0x0006u, 0x000Eu, 0x0016u, uint32_t{kVectorAddress}})
     {
         const uint32_t nops = static_cast<uint32_t>(rng() % 4);
@@ -367,21 +366,24 @@ bool Trial(uint64_t seed, bool idle)
     // A new DSP, without the JIT.
     std::unique_ptr<Teakra::Teakra> second = MakeDsp(false);
     second->SetAudioCallback(collect);
+
     second->LoadState(state);
     std::memcpy(second->GetDspMemory(), saved_memory.data(), kMemoryBytes);
+
     if (second->SaveState() != state)
     {
         std::fprintf(stderr, "seed %llu: a new DSP saves a different state from the one it loaded\n",
                      static_cast<unsigned long long>(seed));
         same = false;
     }
+
     same = Compare(seed, "a new DSP", expected, Finish(*second, after, samples)) && same;
 
     // Restore the original DSP.
     first->LoadState(state);
     std::memcpy(first->GetDspMemory(), saved_memory.data(), kMemoryBytes);
-    same = Compare(seed, "the first DSP again", expected, Finish(*first, after, samples)) && same;
 
+    same = Compare(seed, "the first DSP again", expected, Finish(*first, after, samples)) && same;
     same = CompareRegisters(seed, "a new DSP", *first, *second) && same;
 
     return same;
@@ -394,6 +396,7 @@ bool BadStates()
     const std::vector<uint8_t> state = dsp->SaveState();
 
     bool ok = true;
+
     const auto refused = [&](std::vector<uint8_t> bytes, const char* what)
     {
         try
@@ -411,10 +414,13 @@ bool BadStates()
 
     std::vector<uint8_t> bad = state;
     bad[0] ^= 1;
+
     refused(bad, "a state with the wrong first word");
     refused(std::vector<uint8_t>(state.begin(), state.end() - 1), "a state cut short");
+
     bad = state;
     bad.push_back(0);
+
     refused(bad, "a state with a byte too many");
     refused({}, "no bytes at all");
 

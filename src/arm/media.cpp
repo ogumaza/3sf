@@ -151,6 +151,7 @@ bool Cpu::Media(uint32_t op)
         {
             state_.ge = ge;
         }
+
         return true;
     }
 
@@ -175,6 +176,7 @@ bool Cpu::Media(uint32_t op)
                         static_cast<uint32_t>(static_cast<int32_t>(r[rm]) >> (imm == 0 ? 31 : imm));
                     out[rd] = (r[rn] & 0xffff0000) | (shifted & 0xffff);
                 }
+
                 return true;
             }
 
@@ -238,6 +240,7 @@ bool Cpu::Media(uint32_t op)
                     {
                         state_.q = true;
                     }
+
                     return true;
                 }
 
@@ -262,6 +265,7 @@ bool Cpu::Media(uint32_t op)
                     {
                         state_.q = true;
                     }
+
                     return true;
                 }
 
@@ -286,7 +290,7 @@ bool Cpu::Media(uint32_t op)
                 const uint32_t sub = ((op1 & 1) << 3) | op2;
                 if (!is_unsigned && sub == 0x9) // REV
                 {
-                    out[rd] = ByteSwap32(r[rm]);
+                    out[rd] = xsflib::ByteSwap32(r[rm]);
                     return true;
                 }
 
@@ -357,6 +361,7 @@ bool Cpu::Media(uint32_t op)
                 {
                     state_.q = true;
                 }
+
                 return true;
             }
 

@@ -5,14 +5,15 @@
 
 #pragma once
 
-#include <cstddef>
 #include <cstdint>
-#include <functional>
-#include <map>
 #include <optional>
 #include <string>
-#include <string_view>
 #include <vector>
+
+#include "xsflib/psf/descriptor.h"
+#include "xsflib/psf/program.h"
+#include "xsflib/psf/psf.h"
+#include "xsflib/psf/set.h"
 
 namespace threesf
 {
@@ -25,70 +26,20 @@ constexpr uint8_t kPsfVersion3sf = 0x26;
 constexpr int kPlayerSampleRate = 32728;
 
 // Descriptor flags. Version 1 requires bit 0 (DSP required) and rejects all other bits.
-constexpr uint32_t kFlagDspRequired = 1;
+constexpr uint32_t kFlagDspRequired = xsflib::psf::kDescriptorFlagDspRequired;
 
 // Output modes: 0 mono, 1 stereo, 2 surround. Version 1 plays stereo only.
-constexpr uint32_t kOutputStereo = 1;
+constexpr uint32_t kOutputStereo = xsflib::psf::kDescriptorOutputStereo;
 
-// Tags from a PSF file's [TAG] section. Names are lower-cased; multi-line values are joined with '\n'.
-using Tags = std::map<std::string, std::string>;
-
-// One parsed PSF file.
-struct PsfFile
-{
-    uint8_t version = 0;
-    std::vector<uint8_t> reserved;
-    std::vector<uint8_t> program; // decompressed
-    Tags tags;
-};
-
-// Parses a PSF file. Returns an error message on failure. Without `with_program` the program isn't decompressed or
-// checked, which is enough to read the version, reserved area and tags.
-std::optional<std::string> ParsePsf(const std::vector<uint8_t>& data, PsfFile& out, bool with_program = true);
-
-// Offset of the tag area (the end of the program) of a PSF file, or nullopt if the header is invalid.
-std::optional<std::size_t> TagAreaOffset(const std::vector<uint8_t>& data);
-
-// The tag area for `tags`: "[TAG]" and name=value lines (a multi-line value becomes one line per line, all with the
-// same name). Empty when there are no tags.
-std::string FormatTagArea(const Tags& tags);
-
-// Writes a PSF file, with the program compressed by zlib at its highest level. Throws std::runtime_error if zlib fails,
-// which only running out of memory can make it do.
-std::vector<uint8_t> WritePsf(uint8_t version, const std::vector<uint8_t>& reserved,
-                              const std::vector<uint8_t>& program, const Tags& tags);
-
-// A number read from the start of a tag's value, and the number of characters it took.
-struct DecimalNumber
-{
-    double value;
-    std::size_t length;
-};
-
-// Reads a decimal number from the start of `text` the same way in every locale: an optional sign, digits with an
-// optional '.' or ',' before decimals, and an optional exponent ("1.5e3"). Returns nullopt if `text` doesn't start
-// with one. Unlike std::strtod, it reads no white space, hex, infinity or NaN.
-std::optional<DecimalNumber> ReadDecimal(std::string_view text);
-
-// Parses a PSF length or fade tag ("seconds", "m:s" or "h:m:s", with '.' or ',' before decimals) into milliseconds.
-// Returns -1 if the tag is empty or malformed.
-long long ParseTime(const std::string& text);
-
-// Formats milliseconds as a PSF time ("m:ss.fff").
-std::string FormatTime(long long ms);
-
-// The sequence variables that a 3sf_var tag sets before a sequence starts, by number: 0 to 15 are the sound's player
-// variables, and 16 to 31 the global ones (docs/3sf.md, "Tags").
-using Variables = std::map<int, int16_t>;
-
-// Parses a 3sf_var tag: one or more assignments "N=V", separated by commas or white space, line breaks included. N is
-// 0 to 31 and V -32768 to 32767, each in decimal or in hex with a 0x prefix, and either may have a minus sign. A later
-// assignment to the same variable wins. Returns nullopt if any part is malformed or out of range, or if there's no
-// assignment.
-std::optional<Variables> ParseVariables(std::string_view text);
-
-// The 3sf_var tag for `variables`: the assignments in increasing order of N, in decimal, separated by ", ".
-std::string FormatVariables(const Variables& variables);
+// The PSF container that the players share (xsflib::psf): tags, reading and writing PSF files, and the 3sf_var tag's
+// variables.
+using xsflib::psf::FileReader;
+using xsflib::psf::FormatVariables;
+using xsflib::psf::ParseVariables;
+using xsflib::psf::ReadWholeFile;
+using xsflib::psf::Tags;
+using xsflib::psf::Variables;
+using xsflib::psf::WritePsf;
 
 // The process descriptor: the reserved area of a game-mode set (docs/3sf.md, "Process descriptor").
 struct ProcessDescriptor
@@ -120,7 +71,6 @@ struct ProcessDescriptor
 struct ArchiveDescriptor
 {
     static constexpr uint32_t kMagic = 0x41465333; // "3SFA"
-    static constexpr uint32_t kVersion = 1;
 
     static std::optional<ArchiveDescriptor> Parse(const std::vector<uint8_t>& data);
 
@@ -136,19 +86,8 @@ struct ArchiveDescriptor
     std::string firmware_path; // FILE chunk holding the DSP firmware (a DSP1 image)
 };
 
-// A MEM chunk: data to load at `address` in the emulated memory.
-struct MemChunk
-{
-    uint32_t address;
-    std::vector<uint8_t> data;
-};
-
-// A FILE chunk: a file the set carries, such as the sound archive or the DSP firmware.
-struct FileChunk
-{
-    std::string path;
-    std::vector<uint8_t> data;
-};
+// The program builder (xsflib::psf).
+using xsflib::psf::ProgramBuilder;
 
 // The parameter block of 3SF's game-mode driver, which a game-mode set loads at kAddress (docs/3sf.md, "Driver").
 struct DriverBlock
@@ -160,69 +99,31 @@ struct DriverBlock
     static constexpr uint32_t kOutputModeOffset = 0x10;
 };
 
-// Builds a program (docs/3sf.md, "Program: chunks"): the chunks in the order they're added, each padded to a multiple
-// of four bytes.
-class ProgramBuilder
+// What xsflib::psf's set loader requires of 3SF: its descriptors, version byte and driver block.
+struct SetFormat
 {
-public:
-    void AddMemory(uint32_t address, const void* data, std::size_t size);
+    using ProcessDescriptor = threesf::ProcessDescriptor;
+    using ArchiveDescriptor = threesf::ArchiveDescriptor;
 
-    void AddMemory(uint32_t address, const std::vector<uint8_t>& data)
-    {
-        AddMemory(address, data.data(), data.size());
-    }
-
-    void AddFile(const std::string& path, const std::vector<uint8_t>& data);
-
-    // Selects the sound to play in archive mode (`SND ` chunk): its nw::snd item id.
-    void AddSound(uint32_t sound_id);
-
-    const std::vector<uint8_t>& Data() const
-    {
-        return program_;
-    }
-
-private:
-    void Chunk(const char type[4], const std::vector<uint8_t>& payload);
-
-    std::vector<uint8_t> program_;
+    static constexpr uint8_t kPsfVersion = kPsfVersion3sf;
+    static constexpr const char* kName = "3SF";
+    static constexpr xsflib::psf::DriverBlockLayout kDriverBlock{.address = DriverBlock::kAddress,
+                                                                 .magic = DriverBlock::kMagic,
+                                                                 .version = DriverBlock::kVersion,
+                                                                 .version_offset = DriverBlock::kVersionOffset,
+                                                                 .big_endian = false,
+                                                                 .output_mode_offset = DriverBlock::kOutputModeOffset,
+                                                                 .output_mode = kOutputStereo};
 };
-
-// A decompressed program split into chunks.
-struct ProgramChunks
-{
-    std::vector<MemChunk> memory;
-    std::vector<FileChunk> files;
-    std::optional<uint32_t> sound; // the last `SND ` chunk
-};
-
-// Splits a decompressed program into chunks (unknown types are skipped).
-std::optional<std::string> ParseProgram(const std::vector<uint8_t>& program, ProgramChunks& out);
 
 // A complete set: the chunks of a file and its libraries in loading order, the effective descriptor (exactly one of
 // `descriptor` and `archive`) and the tags of the top-level file.
-struct LoadedSet
-{
-    std::vector<MemChunk> memory;
-    std::vector<FileChunk> files;
-    std::optional<ProcessDescriptor> descriptor; // game mode
-    std::optional<ArchiveDescriptor> archive;    // archive mode
-    std::optional<uint32_t> sound;               // archive mode: the sound to play
-    Tags tags;
-    std::vector<std::string> sources; // files loaded, in order (for diagnostics)
-};
-
-// Reads a file by path, and returns false if it can't be read.
-using FileReader = std::function<bool(const std::string& path, std::vector<uint8_t>& data)>;
+using LoadedSet = xsflib::psf::LoadedSet<SetFormat>;
 
 // Loads a 3SF/mini3SF file with its _lib/_libN chain. Paths in _lib tags are relative to the directory of the file that
 // names them: its path up to the last of `separators`. Returns an error for a set a version 1 player can't play: a
 // descriptor that fails its Check(), or a game-mode set whose driver block has another version or an output mode other
 // than stereo.
-std::optional<std::string> LoadSet(const std::string& path, const FileReader& reader, LoadedSet& out,
-                                   std::string_view separators = "/\\");
-
-// Reads a whole file from disk.
-bool ReadWholeFile(const std::string& path, std::vector<uint8_t>& data);
+using xsflib::psf::LoadSet;
 
 } // namespace threesf

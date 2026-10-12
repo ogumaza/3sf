@@ -4,11 +4,7 @@
 // from random states on two DSPs, one with the JIT (where the host has one) and one with TEAKRA_JIT=0, and their
 // registers and memory must end up the same.
 //
-// usage: teakra_jit_test [trials [first seed [cycles]]]
-
-#include <teakra/disassembler.h>
-#include <teakra/impl/register.h>
-#include <teakra/teakra.h>
+// usage: threesf_teakra_jit_test [trials [first seed [cycles]]]
 
 #include <cstddef>
 #include <cstdint>
@@ -21,6 +17,10 @@
 #include <string>
 #include <utility>
 #include <vector>
+
+#include <teakra/disassembler.h>
+#include <teakra/impl/register.h>
+#include <teakra/teakra.h>
 
 #include "common/quiet_stdout.h"
 #include "teakra_programs.h"
@@ -60,40 +60,26 @@ constexpr bool kHostHasJit = true;
 constexpr bool kHostHasJit = false;
 #endif
 
-// One program from one state on both DSPs. Returns false, after a report, if they differ.
-bool Trial(uint64_t seed, std::unique_ptr<Teakra::Teakra>* keep_jit = nullptr,
-           std::unique_ptr<Teakra::Teakra>* keep_reference = nullptr)
+// Runs two DSPs from the same state, one with the JIT and one without, and compares what they end up with. Returns
+// false, after a report under `label`, if they differ.
+bool RunBoth(const std::string& label, Teakra::Teakra& jit, Teakra::Teakra& reference)
 {
-    std::unique_ptr<Teakra::Teakra> jit_dsp = MakeDsp(true);
-    std::unique_ptr<Teakra::Teakra> reference_dsp = MakeDsp(false);
-    Teakra::Teakra& jit = *jit_dsp;
-    Teakra::Teakra& reference = *reference_dsp;
-    std::mt19937_64 rng(seed);
-
-    const std::vector<uint8_t> memory = RandomMemory(rng);
-
-    std::memcpy(jit.GetDspMemory(), memory.data(), kMemoryBytes);
-    std::memcpy(reference.GetDspMemory(), memory.data(), kMemoryBytes);
-    Randomize(jit.GetRegisterState(), rng);
-    // Byte for byte, padding included, so that the states can be compared the same way.
-    std::memcpy(static_cast<void*>(&reference.GetRegisterState()), &jit.GetRegisterState(), sizeof(RegisterState));
-
     const std::string jit_result = Run(jit);
     const std::string reference_result = Run(reference);
     translated += jit.JitInstructions();
     translated_without += reference.JitInstructions();
     if (std::getenv("JIT_TEST_VERBOSE"))
     {
-        std::fprintf(stderr, "seed %llu: %s / %s; lp %u bcn %u / lp %u bcn %u\n", static_cast<unsigned long long>(seed),
-                     jit_result.c_str(), reference_result.c_str(), jit.GetRegisterState().lp,
-                     jit.GetRegisterState().bcn, reference.GetRegisterState().lp, reference.GetRegisterState().bcn);
+        std::fprintf(stderr, "%s: %s / %s; lp %u bcn %u / lp %u bcn %u\n", label.c_str(), jit_result.c_str(),
+                     reference_result.c_str(), jit.GetRegisterState().lp, jit.GetRegisterState().bcn,
+                     reference.GetRegisterState().lp, reference.GetRegisterState().bcn);
     }
 
     bool same = true;
     if (jit_result != reference_result)
     {
-        std::fprintf(stderr, "seed %llu: with the JIT \"%s\", without \"%s\"\n", static_cast<unsigned long long>(seed),
-                     jit_result.c_str(), reference_result.c_str());
+        std::fprintf(stderr, "%s: with the JIT \"%s\", without \"%s\"\n", label.c_str(), jit_result.c_str(),
+                     reference_result.c_str());
         same = false;
     }
 
@@ -114,8 +100,8 @@ bool Trial(uint64_t seed, std::unique_ptr<Teakra::Teakra>* keep_jit = nullptr,
         {
             if (reported++ < 8)
             {
-                std::fprintf(stderr, "seed %llu: registers differ at %s: %02x with the JIT, %02x without\n",
-                             static_cast<unsigned long long>(seed), FieldAt(i).c_str(), a[i], b[i]);
+                std::fprintf(stderr, "%s: registers differ at %s: %02x with the JIT, %02x without\n", label.c_str(),
+                             FieldAt(i).c_str(), a[i], b[i]);
             }
             same = false;
         }
@@ -130,9 +116,8 @@ bool Trial(uint64_t seed, std::unique_ptr<Teakra::Teakra>* keep_jit = nullptr,
         {
             if (reported++ < 8)
             {
-                std::fprintf(stderr, "seed %llu: memory word %05zx differs: %04x with the JIT, %04x without\n",
-                             static_cast<unsigned long long>(seed), i / 2, ma[i] | (ma[i + 1] << 8),
-                             mb[i] | (mb[i + 1] << 8));
+                std::fprintf(stderr, "%s: memory word %05zx differs: %04x with the JIT, %04x without\n", label.c_str(),
+                             i / 2, ma[i] | (ma[i + 1] << 8), mb[i] | (mb[i + 1] << 8));
             }
             same = false;
         }
@@ -148,12 +133,40 @@ bool Trial(uint64_t seed, std::unique_ptr<Teakra::Teakra>* keep_jit = nullptr,
         {
             if (reported++ < 8)
             {
-                std::fprintf(stderr, "seed %llu: MMIO register %03x differs: %04x with the JIT, %04x without\n",
-                             static_cast<unsigned long long>(seed), address, x, y);
+                std::fprintf(stderr, "%s: MMIO register %03x differs: %04x with the JIT, %04x without\n", label.c_str(),
+                             address, x, y);
             }
             same = false;
         }
     }
+
+    return same;
+}
+
+// Copies the memory and registers of `from` to `to`, byte for byte, padding included. RunBoth compares the registers
+// byte for byte as well.
+void CopyState(const Teakra::Teakra& from, Teakra::Teakra& to)
+{
+    std::memcpy(to.GetDspMemory(), from.GetDspMemory(), kMemoryBytes);
+    std::memcpy(static_cast<void*>(&to.GetRegisterState()), &from.GetRegisterState(), sizeof(RegisterState));
+}
+
+// One program from one state on both DSPs. Returns false, after a report, if they differ.
+bool Trial(uint64_t seed, std::unique_ptr<Teakra::Teakra>* keep_jit = nullptr,
+           std::unique_ptr<Teakra::Teakra>* keep_reference = nullptr)
+{
+    std::unique_ptr<Teakra::Teakra> jit_dsp = MakeDsp(true);
+    std::unique_ptr<Teakra::Teakra> reference_dsp = MakeDsp(false);
+    Teakra::Teakra& jit = *jit_dsp;
+    Teakra::Teakra& reference = *reference_dsp;
+    std::mt19937_64 rng(seed);
+
+    const std::vector<uint8_t> memory = RandomMemory(rng);
+    std::memcpy(jit.GetDspMemory(), memory.data(), kMemoryBytes);
+    Randomize(jit.GetRegisterState(), rng);
+    CopyState(jit, reference);
+
+    const bool same = RunBoth("seed " + std::to_string(seed), jit, reference);
 
     if (keep_jit)
     {
@@ -162,6 +175,36 @@ bool Trial(uint64_t seed, std::unique_ptr<Teakra::Teakra>* keep_jit = nullptr,
     }
 
     return same;
+}
+
+// A block repeat whose body ends in push lc. The interpreter steps the loop before that instruction runs. The push then
+// stores the next pass's count, or, on the inner loop's last pass, the outer loop's count. An inner loop of three
+// passes ends at the push. The inner loop runs inside an outer loop of two passes. Returns false, after a report, if
+// the DSPs differ.
+bool LoopEndTrial()
+{
+    constexpr uint16_t kPushLc = 0x5E5E;
+    constexpr uint32_t kStart = 0x100;
+    constexpr uint32_t kInnerEnd = 0x103;
+    constexpr uint32_t kOuterEnd = 0x110;
+    std::unique_ptr<Teakra::Teakra> jit = MakeDsp(true);
+    std::unique_ptr<Teakra::Teakra> reference = MakeDsp(false);
+
+    uint8_t* memory = jit->GetDspMemory();
+    std::memset(memory, 0, kMemoryBytes); // nops
+    memory[kInnerEnd * 2] = static_cast<uint8_t>(kPushLc);
+    memory[kInnerEnd * 2 + 1] = static_cast<uint8_t>(kPushLc >> 8);
+
+    RegisterState& r = jit->GetRegisterState();
+    r.pc = kStart;
+    r.sp = 0x1000;
+    r.bkrep_stack[0] = {kStart, kOuterEnd, 1};
+    r.bkrep_stack[1] = {kStart, kInnerEnd, 2};
+    r.bcn = 2;
+    r.lp = 1;
+    CopyState(*jit, *reference);
+
+    return RunBoth("push lc at a loop end", *jit, *reference);
 }
 
 // For a program that runs differently: the fewest cycles after which it does, and the instructions around the
@@ -196,10 +239,12 @@ void Bisect(uint64_t seed)
     for (uint32_t address = pc >= 8 ? pc - 8 : 0; address < pc + 8; ++address)
     {
         const uint8_t* memory = reference.GetDspMemory();
+
         const auto word = [&](uint32_t a)
         {
             return static_cast<uint16_t>(memory[a * 2] | (memory[a * 2 + 1] << 8));
         };
+
         std::fprintf(stderr, "  %c %05x  %04x  %s\n", address == pc ? '>' : ' ', address, word(address),
                      Teakra::Disassembler::Do(word(address), word(address + 1)).c_str());
     }
@@ -238,6 +283,11 @@ int main(int argc, char** argv)
 
     std::fprintf(stderr, "%d of %d random programs ran differently with the JIT (%d ended in an exception)\n", failed,
                  trials, threw);
+
+    if (!LoopEndTrial())
+    {
+        failed++;
+    }
 
     // Without translated code on the first DSP, or with some on the second, the test compared a DSP with itself. A
     // program can throw before a block runs, so only a run of 100 programs or more must have run translated code.

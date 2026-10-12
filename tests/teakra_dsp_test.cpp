@@ -12,28 +12,26 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <cstdio>
 #include <cstring>
 #include <functional>
 #include <iterator>
 #include <span>
-#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
 
-#include "check.h"
-#include "common/bytes.h"
+#include "xsflib/bytes.h"
+#include "xsflib/testing/check.h"
+
 #include "dsp/dsp.h"
 #include "dsp/fcram.h"
+
+using namespace xsflib::testing;
 
 namespace
 {
 
 using threesf::Fcram;
-using threesf::LoadLe16;
-using threesf::StoreLe16;
-using threesf::StoreLe32;
 using threesf::dsp::DataOffset;
 using threesf::dsp::Interrupt;
 using threesf::dsp::Pipe;
@@ -188,32 +186,17 @@ std::vector<uint8_t> MakeImage(std::span<const uint16_t> program, uint8_t flags 
     // The segment record: the code's offset in the image, its word address, its size in bytes and its memory type (0,
     // program memory).
     uint8_t* record = image.data() + 0x120;
-    StoreLe32(record, static_cast<uint32_t>(kHeaderSize));
-    StoreLe32(record + 4, address);
-    StoreLe32(record + 8, static_cast<uint32_t>(program.size() * 2));
+    xsflib::StoreLe32(record, static_cast<uint32_t>(kHeaderSize));
+    xsflib::StoreLe32(record + 4, address);
+    xsflib::StoreLe32(record + 8, static_cast<uint32_t>(program.size() * 2));
     record[15] = 0;
 
     for (std::size_t i = 0; i < program.size(); i++)
     {
-        StoreLe16(image.data() + kHeaderSize + i * 2, program[i]);
+        xsflib::StoreLe16(image.data() + kHeaderSize + i * 2, program[i]);
     }
 
     return image;
-}
-
-// Returns the message of the std::runtime_error that `f` throws, or an empty string if it throws none.
-std::string ErrorOf(const std::function<void()>& f)
-{
-    try
-    {
-        f();
-    }
-    catch (const std::runtime_error& e)
-    {
-        return e.what();
-    }
-
-    return "";
 }
 
 // Returns true if `f` throws a std::runtime_error with one of the glue's messages, which start with "DSP: ".
@@ -225,13 +208,13 @@ bool ThrowsDspError(const std::function<void()>& f)
 // Returns word `word` of data memory.
 uint16_t Word(TeakraDsp& dsp, uint32_t word)
 {
-    return LoadLe16(dsp.Ram() + DataOffset(word));
+    return xsflib::LoadLe16(dsp.Ram() + DataOffset(word));
 }
 
 // Sets word `word` of data memory.
 void SetWord(TeakraDsp& dsp, uint32_t word, uint16_t value)
 {
-    StoreLe16(dsp.Ram() + DataOffset(word), value);
+    xsflib::StoreLe16(dsp.Ram() + DataOffset(word), value);
 }
 
 // Returns the bytes of entry `number` of kNotifyFirmware's pipe table.
@@ -244,22 +227,22 @@ uint8_t* Entry(TeakraDsp& dsp, unsigned number)
 void SetEntry(TeakraDsp& dsp, unsigned number, uint16_t ring, uint16_t size, uint16_t read, uint16_t write)
 {
     uint8_t* entry = Entry(dsp, number);
-    StoreLe16(entry, ring);
-    StoreLe16(entry + 2, size);
-    StoreLe16(entry + 4, read);
-    StoreLe16(entry + 6, write);
+    xsflib::StoreLe16(entry, ring);
+    xsflib::StoreLe16(entry + 2, size);
+    xsflib::StoreLe16(entry + 4, read);
+    xsflib::StoreLe16(entry + 6, write);
 }
 
 // Returns the read position of an entry.
 uint16_t ReadPosition(TeakraDsp& dsp, unsigned number)
 {
-    return LoadLe16(Entry(dsp, number) + 4);
+    return xsflib::LoadLe16(Entry(dsp, number) + 4);
 }
 
 // Returns the write position of an entry.
 uint16_t WritePosition(TeakraDsp& dsp, unsigned number)
 {
-    return LoadLe16(Entry(dsp, number) + 6);
+    return xsflib::LoadLe16(Entry(dsp, number) + 6);
 }
 
 // Starts kNotifyFirmware and numbers the entries of its pipe table, as a real firmware would. The table is all zeros
@@ -286,7 +269,7 @@ void Fire(TeakraDsp& dsp, int reg, uint16_t value, uint16_t semaphore)
         dsp.Run(256);
     }
 
-    THREESF_CHECK(Word(dsp, kTriggerWord) == 0);
+    XSFLIB_CHECK(Word(dsp, kTriggerWord) == 0);
 }
 
 // Broken DSP1 images are refused before the DSP is touched, and records of an unknown memory type are skipped.
@@ -301,47 +284,58 @@ void TestImages()
 
     // An image too short for its header, and one with the wrong magic.
     std::vector<uint8_t> image(good.data(), good.data() + kHeaderSize - 1);
-    THREESF_CHECK(ThrowsDspError([&] { dsp.LoadComponent(image); }));
+
+    XSFLIB_CHECK(ThrowsDspError([&] { dsp.LoadComponent(image); }));
+
     image = good;
     image[0x103] = 'X';
-    THREESF_CHECK(ThrowsDspError([&] { dsp.LoadComponent(image); }));
+
+    XSFLIB_CHECK(ThrowsDspError([&] { dsp.LoadComponent(image); }));
 
     // More than 10 segments.
     image = good;
     image[0x10E] = 11;
-    THREESF_CHECK(ThrowsDspError([&] { dsp.LoadComponent(image); }));
+
+    XSFLIB_CHECK(ThrowsDspError([&] { dsp.LoadComponent(image); }));
 
     // A segment that runs past the end of the image, and one whose offset and size add up to more than 32 bits hold.
     image = good;
-    StoreLe32(image.data() + 0x128, static_cast<uint32_t>(image.size()));
-    THREESF_CHECK(ThrowsDspError([&] { dsp.LoadComponent(image); }));
+    xsflib::StoreLe32(image.data() + 0x128, static_cast<uint32_t>(image.size()));
+
+    XSFLIB_CHECK(ThrowsDspError([&] { dsp.LoadComponent(image); }));
+
     image = good;
-    StoreLe32(image.data() + 0x120, 0xFFFFFFFF);
-    THREESF_CHECK(ThrowsDspError([&] { dsp.LoadComponent(image); }));
+    xsflib::StoreLe32(image.data() + 0x120, 0xFFFFFFFF);
+
+    XSFLIB_CHECK(ThrowsDspError([&] { dsp.LoadComponent(image); }));
 
     // A program segment that doesn't fit in program memory, and a data segment that doesn't fit in data memory.
     image = good;
-    StoreLe32(image.data() + 0x124, 0x1FFFF);
-    THREESF_CHECK(ThrowsDspError([&] { dsp.LoadComponent(image); }));
+    xsflib::StoreLe32(image.data() + 0x124, 0x1FFFF);
+
+    XSFLIB_CHECK(ThrowsDspError([&] { dsp.LoadComponent(image); }));
+
     image = good;
     image[0x12F] = 2;
-    StoreLe32(image.data() + 0x124, 0xFFFFFFF0);
-    THREESF_CHECK(ThrowsDspError([&] { dsp.LoadComponent(image); }));
+    xsflib::StoreLe32(image.data() + 0x124, 0xFFFFFFF0);
 
-    THREESF_CHECK(dsp.Ram()[0x100] == 0xAB);
-    THREESF_CHECK(dsp.Cycles() == 0);
+    XSFLIB_CHECK(ThrowsDspError([&] { dsp.LoadComponent(image); }));
+
+    XSFLIB_CHECK(dsp.Ram()[0x100] == 0xAB);
+    XSFLIB_CHECK(dsp.Cycles() == 0);
 
     // Records 1 and 2 are empty program segments, which are fine, and record 3 has an unknown memory type and nonsense
     // in every field, so it's skipped. The firmware then starts within one wait slice.
     image = good;
     image[0x10E] = 4;
     uint8_t* record = image.data() + 0x120 + 3 * 0x30;
-    StoreLe32(record, 0xFFFFFFF0);
-    StoreLe32(record + 4, 0xFFFFFFF0);
-    StoreLe32(record + 8, 0xFFFFFFF0);
+    xsflib::StoreLe32(record, 0xFFFFFFF0);
+    xsflib::StoreLe32(record + 4, 0xFFFFFFF0);
+    xsflib::StoreLe32(record + 8, 0xFFFFFFF0);
     record[15] = 3;
-    THREESF_CHECK(ErrorOf([&] { dsp.LoadComponent(image); }).empty());
-    THREESF_CHECK(dsp.Cycles() == kWaitSlice);
+
+    XSFLIB_CHECK(ErrorOf([&] { dsp.LoadComponent(image); }).empty());
+    XSFLIB_CHECK(dsp.Cycles() == kWaitSlice);
 }
 
 // A segment that ends exactly at the end of program memory is loaded there.
@@ -350,8 +344,8 @@ void TestSegmentFillsProgramMemory()
     Fcram fcram(1 << 20);
     TeakraDsp dsp(fcram);
 
-    THREESF_CHECK(ErrorOf([&] { dsp.LoadComponent(MakeImage(kEndFirmware, 0, kEndFirmwareAddress)); }).empty());
-    THREESF_CHECK(LoadLe16(dsp.Ram() + 0x3FFFE) == kEndFirmware[std::size(kEndFirmware) - 1]);
+    XSFLIB_CHECK(ErrorOf([&] { dsp.LoadComponent(MakeImage(kEndFirmware, 0, kEndFirmwareAddress)); }).empty());
+    XSFLIB_CHECK(xsflib::LoadLe16(dsp.Ram() + 0x3FFFE) == kEndFirmware[std::size(kEndFirmware) - 1]);
 }
 
 // Reply register numbers are checked, and the pipes need a firmware that has started. Nothing here runs the DSP.
@@ -360,26 +354,27 @@ void TestWithoutFirmware()
     Fcram fcram(1 << 20);
     TeakraDsp dsp(fcram);
 
-    THREESF_CHECK(ThrowsDspError([&] { dsp.ReadReply(3); }));
-    THREESF_CHECK(ThrowsDspError([&] { dsp.ReplyReady(3); }));
-    THREESF_CHECK(ThrowsDspError([&] { dsp.ReadReply(0xFFFFFFFF); }));
-    THREESF_CHECK(!dsp.ReplyReady(0));
-    THREESF_CHECK(dsp.Cycles() == 0);
+    XSFLIB_CHECK(ThrowsDspError([&] { dsp.ReadReply(3); }));
+    XSFLIB_CHECK(ThrowsDspError([&] { dsp.ReplyReady(3); }));
+    XSFLIB_CHECK(ThrowsDspError([&] { dsp.ReadReply(0xFFFFFFFF); }));
+    XSFLIB_CHECK(!dsp.ReplyReady(0));
+    XSFLIB_CHECK(dsp.Cycles() == 0);
 
     const uint8_t kByte[1] = {1};
-    THREESF_CHECK(ThrowsDspError([&] { dsp.PipeReadable(Pipe::kAudio); }));
-    THREESF_CHECK(ThrowsDspError([&] { dsp.ReadPipe(Pipe::kAudio, 1); }));
-    THREESF_CHECK(ThrowsDspError([&] { dsp.WritePipe(Pipe::kAudio, kByte); }));
+
+    XSFLIB_CHECK(ThrowsDspError([&] { dsp.PipeReadable(Pipe::kAudio); }));
+    XSFLIB_CHECK(ThrowsDspError([&] { dsp.ReadPipe(Pipe::kAudio, 1); }));
+    XSFLIB_CHECK(ThrowsDspError([&] { dsp.WritePipe(Pipe::kAudio, kByte); }));
 
     // Reading or writing nothing does nothing, so it needs no firmware.
-    THREESF_CHECK(ErrorOf([&] { THREESF_CHECK(dsp.ReadPipe(Pipe::kAudio, 0).empty()); }).empty());
-    THREESF_CHECK(ErrorOf([&] { dsp.WritePipe(Pipe::kAudio, {}); }).empty());
+    XSFLIB_CHECK(ErrorOf([&] { XSFLIB_CHECK(dsp.ReadPipe(Pipe::kAudio, 0).empty()); }).empty());
+    XSFLIB_CHECK(ErrorOf([&] { dsp.WritePipe(Pipe::kAudio, {}); }).empty());
 
     // With no firmware, UnloadComponent does nothing, and Run only counts the cycles.
     dsp.UnloadComponent();
-    THREESF_CHECK(dsp.Cycles() == 0);
+    XSFLIB_CHECK(dsp.Cycles() == 0);
     dsp.Run(5000);
-    THREESF_CHECK(dsp.Cycles() == 5000);
+    XSFLIB_CHECK(dsp.Cycles() == 5000);
 }
 
 // Reads and writes on the two rings of pipe 2, as the dsp::DSP service makes them.
@@ -398,53 +393,59 @@ void TestPipeRings()
         from_dsp[i] = static_cast<uint8_t>(0x10 + i);
     }
 
-    THREESF_CHECK(dsp.PipeReadable(Pipe::kAudio) == 4);
-    THREESF_CHECK((dsp.ReadPipe(Pipe::kAudio, 3) == std::vector<uint8_t>{0x16, 0x17, 0x10}));
-    THREESF_CHECK(ReadPosition(dsp, 4) == 0x8001);
-    THREESF_CHECK(dsp.PipeReadable(Pipe::kAudio) == 1);
+    XSFLIB_CHECK(dsp.PipeReadable(Pipe::kAudio) == 4);
+    XSFLIB_CHECK((dsp.ReadPipe(Pipe::kAudio, 3) == std::vector<uint8_t>{0x16, 0x17, 0x10}));
+    XSFLIB_CHECK(ReadPosition(dsp, 4) == 0x8001);
+    XSFLIB_CHECK(dsp.PipeReadable(Pipe::kAudio) == 1);
 
     // Reading more than is waiting fails and leaves the read position alone. Only the low 16 bits of a size count.
-    THREESF_CHECK(ThrowsDspError([&] { dsp.ReadPipe(Pipe::kAudio, 2); }));
-    THREESF_CHECK(ReadPosition(dsp, 4) == 0x8001);
-    THREESF_CHECK(dsp.ReadPipe(Pipe::kAudio, 0x10000).empty());
-    THREESF_CHECK(ReadPosition(dsp, 4) == 0x8001);
-    THREESF_CHECK((dsp.ReadPipe(Pipe::kAudio, 0x10001) == std::vector<uint8_t>{0x11}));
-    THREESF_CHECK(dsp.PipeReadable(Pipe::kAudio) == 0);
-    THREESF_CHECK(ReadPosition(dsp, 4) == 0x8002);
+    XSFLIB_CHECK(ThrowsDspError([&] { dsp.ReadPipe(Pipe::kAudio, 2); }));
+    XSFLIB_CHECK(ReadPosition(dsp, 4) == 0x8001);
+    XSFLIB_CHECK(dsp.ReadPipe(Pipe::kAudio, 0x10000).empty());
+    XSFLIB_CHECK(ReadPosition(dsp, 4) == 0x8001);
+    XSFLIB_CHECK((dsp.ReadPipe(Pipe::kAudio, 0x10001) == std::vector<uint8_t>{0x11}));
+    XSFLIB_CHECK(dsp.PipeReadable(Pipe::kAudio) == 0);
+    XSFLIB_CHECK(ReadPosition(dsp, 4) == 0x8002);
 
     // A full ring holds as many bytes as its size.
     SetEntry(dsp, 4, 0x2000, 8, 0x0005, 0x8005);
-    THREESF_CHECK(dsp.PipeReadable(Pipe::kAudio) == 8);
+
+    XSFLIB_CHECK(dsp.PipeReadable(Pipe::kAudio) == 8);
 
     // The ARM11-to-DSP ring (entry 5): 8 bytes at data word 0x2100, with the read position at 3 and the write position
     // at 1 on the next lap, so there's room for 2 bytes.
     SetEntry(dsp, 5, 0x2100, 8, 3, 0x8001);
     uint8_t* to_dsp = dsp.Ram() + DataOffset(0x2100);
     const uint8_t kTwo[2] = {0xA0, 0xA1};
+
     dsp.WritePipe(Pipe::kAudio, kTwo);
-    THREESF_CHECK(to_dsp[1] == 0xA0 && to_dsp[2] == 0xA1);
-    THREESF_CHECK(WritePosition(dsp, 5) == 0x8003);
+
+    XSFLIB_CHECK(to_dsp[1] == 0xA0 && to_dsp[2] == 0xA1);
+    XSFLIB_CHECK(WritePosition(dsp, 5) == 0x8003);
 
     // Writing to the full ring fails and leaves the write position alone.
     const uint8_t kOne[1] = {0xB0};
-    THREESF_CHECK(ThrowsDspError([&] { dsp.WritePipe(Pipe::kAudio, kOne); }));
-    THREESF_CHECK(WritePosition(dsp, 5) == 0x8003);
+
+    XSFLIB_CHECK(ThrowsDspError([&] { dsp.WritePipe(Pipe::kAudio, kOne); }));
+    XSFLIB_CHECK(WritePosition(dsp, 5) == 0x8003);
 
     // A write goes back to the start of the ring at its end, and the lap bit flips.
     SetEntry(dsp, 5, 0x2100, 8, 0x8006, 0x8006);
     const uint8_t kFour[4] = {1, 2, 3, 4};
+
     dsp.WritePipe(Pipe::kAudio, kFour);
-    THREESF_CHECK(to_dsp[6] == 1 && to_dsp[7] == 2 && to_dsp[0] == 3 && to_dsp[1] == 4);
-    THREESF_CHECK(WritePosition(dsp, 5) == 0x0002);
+
+    XSFLIB_CHECK(to_dsp[6] == 1 && to_dsp[7] == 2 && to_dsp[0] == 3 && to_dsp[1] == 4);
+    XSFLIB_CHECK(WritePosition(dsp, 5) == 0x0002);
 
     // A read from the other ring, so that the firmware reads what that write sent.
-    THREESF_CHECK(dsp.ReadPipe(Pipe::kAudio, 1).size() == 1);
+    XSFLIB_CHECK(dsp.ReadPipe(Pipe::kAudio, 1).size() == 1);
 
     // Each read and write that moved a position sent the entry's number on command register 2. The DSP doesn't run in
     // between, so each send after the first found the last one unread and waited one slice for the firmware to read it.
     // The firmware has read the last write's 5 by now.
-    THREESF_CHECK(dsp.Cycles() == 5 * kWaitSlice);
-    THREESF_CHECK(Word(dsp, kCommandWord) == 5);
+    XSFLIB_CHECK(dsp.Cycles() == 5 * kWaitSlice);
+    XSFLIB_CHECK(Word(dsp, kCommandWord) == 5);
 }
 
 // A pipe table entry with the wrong number, or with a position beyond the end of its ring, is an error. A position at
@@ -457,17 +458,24 @@ void TestBrokenPipeTable()
 
     SetEntry(dsp, 4, 0x2000, 8, 0, 0);
     Entry(dsp, 4)[8] = 99;
-    THREESF_CHECK(ThrowsDspError([&] { dsp.PipeReadable(Pipe::kAudio); }));
+
+    XSFLIB_CHECK(ThrowsDspError([&] { dsp.PipeReadable(Pipe::kAudio); }));
+
     Entry(dsp, 4)[8] = 4;
     SetEntry(dsp, 4, 0x2000, 8, 9, 0);
-    THREESF_CHECK(ThrowsDspError([&] { dsp.PipeReadable(Pipe::kAudio); }));
-    SetEntry(dsp, 4, 0x2000, 8, 0, 9);
-    THREESF_CHECK(ThrowsDspError([&] { dsp.PipeReadable(Pipe::kAudio); }));
-    SetEntry(dsp, 4, 0x2000, 8, 0x8008, 0x8008);
-    THREESF_CHECK(ErrorOf([&] { dsp.PipeReadable(Pipe::kAudio); }).empty());
 
-    THREESF_CHECK(ThrowsDspError([&] { dsp.PipeReadable(static_cast<Pipe>(16)); }));
-    THREESF_CHECK(dsp.PipeReadable(static_cast<Pipe>(15)) == 0);
+    XSFLIB_CHECK(ThrowsDspError([&] { dsp.PipeReadable(Pipe::kAudio); }));
+
+    SetEntry(dsp, 4, 0x2000, 8, 0, 9);
+
+    XSFLIB_CHECK(ThrowsDspError([&] { dsp.PipeReadable(Pipe::kAudio); }));
+
+    SetEntry(dsp, 4, 0x2000, 8, 0x8008, 0x8008);
+
+    XSFLIB_CHECK(ErrorOf([&] { dsp.PipeReadable(Pipe::kAudio); }).empty());
+
+    XSFLIB_CHECK(ThrowsDspError([&] { dsp.PipeReadable(static_cast<Pipe>(16)); }));
+    XSFLIB_CHECK(dsp.PipeReadable(static_cast<Pipe>(15)) == 0);
 }
 
 // The firmware's pipe notifications (data in reply register 2 plus the pipe bit of its semaphore, in either order) and
@@ -478,13 +486,14 @@ void TestNotifications()
     TeakraDsp dsp(fcram);
     Interrupts interrupts;
     uint64_t reply0_wait = 1; // the cycles the DSP ran while the handler read reply register 0
+
     const auto on_interrupt = [&](Interrupt interrupt, Pipe pipe)
     {
         interrupts.push_back({interrupt, pipe});
         if (interrupt == Interrupt::kReply0)
         {
             const uint64_t before = dsp.Cycles();
-            THREESF_CHECK(dsp.ReadReply(0) == 0x1234);
+            XSFLIB_CHECK(dsp.ReadReply(0) == 0x1234);
             reply0_wait = dsp.Cycles() - before;
         }
     };
@@ -493,84 +502,101 @@ void TestNotifications()
     // The start takes one slice, and the firmware's reply with the pipe table's address raises nothing. A second
     // LoadComponent while the firmware runs does nothing.
     StartNotifyFirmware(dsp);
-    THREESF_CHECK(dsp.Cycles() == kWaitSlice);
+    XSFLIB_CHECK(dsp.Cycles() == kWaitSlice);
     dsp.LoadComponent(MakeImage(kNotifyFirmware));
-    THREESF_CHECK(dsp.Cycles() == kWaitSlice);
-    THREESF_CHECK(interrupts.empty());
+    XSFLIB_CHECK(dsp.Cycles() == kWaitSlice);
+    XSFLIB_CHECK(interrupts.empty());
 
     // Data in reply register 2 alone raises nothing, and neither does a change of the semaphore without the pipe bit
     // (bit 15).
     Fire(dsp, 2, 4, 0);
     Fire(dsp, -1, 0, 0x0001);
-    THREESF_CHECK(interrupts.empty());
+
+    XSFLIB_CHECK(interrupts.empty());
 
     // The reply half stays pending while more data arrives, and the pipe bit completes the notification with the latest
     // data: entry 6, pipe 3 from the DSP.
     Fire(dsp, 2, 6, 0);
-    THREESF_CHECK(interrupts.empty());
+    XSFLIB_CHECK(interrupts.empty());
     Fire(dsp, -1, 0, 0x8000);
-    THREESF_CHECK((interrupts == Interrupts{{Interrupt::kPipe, Pipe::kBinary}}));
-    THREESF_CHECK(!dsp.ReplyReady(2));
+    XSFLIB_CHECK((interrupts == Interrupts{{Interrupt::kPipe, Pipe::kBinary}}));
+    XSFLIB_CHECK(!dsp.ReplyReady(2));
 
     // An entry of an ARM11-to-DSP ring (an odd number) raises nothing. Only the ARM11 side clears the DSP's semaphore,
     // so the pipe bit stays set from now on, and any change of the semaphore completes a notification.
     interrupts.clear();
+
     Fire(dsp, 2, 5, 0x0001);
-    THREESF_CHECK(interrupts.empty());
-    THREESF_CHECK(!dsp.ReplyReady(2));
+
+    XSFLIB_CHECK(interrupts.empty());
+    XSFLIB_CHECK(!dsp.ReplyReady(2));
 
     // The debug pipe (entry 0) is drained and its bytes dropped, with no interrupt. The drain tells the firmware, so
     // command register 2 goes from the 5 of a write to pipe 2 to the debug entry's 0.
     SetEntry(dsp, 0, 0x2200, 16, 2, 5);
     SetEntry(dsp, 5, 0x2300, 16, 0, 0);
     const uint8_t kByte[1] = {0xC0};
+
     dsp.WritePipe(Pipe::kAudio, kByte);
     dsp.Run(1024);
-    THREESF_CHECK(Word(dsp, kCommandWord) == 5);
+
+    XSFLIB_CHECK(Word(dsp, kCommandWord) == 5);
+
     Fire(dsp, 2, 0, 0x0001);
     dsp.Run(1024);
-    THREESF_CHECK(interrupts.empty());
-    THREESF_CHECK(ReadPosition(dsp, 0) == 5);
-    THREESF_CHECK(dsp.PipeReadable(Pipe::kDebug) == 0);
-    THREESF_CHECK(Word(dsp, kCommandWord) == 0);
+
+    XSFLIB_CHECK(interrupts.empty());
+    XSFLIB_CHECK(ReadPosition(dsp, 0) == 5);
+    XSFLIB_CHECK(dsp.PipeReadable(Pipe::kDebug) == 0);
+    XSFLIB_CHECK(Word(dsp, kCommandWord) == 0);
 
     // With nothing waiting in the debug pipe, the drain doesn't write the table or tell the firmware.
     dsp.WritePipe(Pipe::kAudio, kByte);
     dsp.Run(1024);
+
     Fire(dsp, 2, 0, 0x0001);
     dsp.Run(1024);
-    THREESF_CHECK(interrupts.empty());
-    THREESF_CHECK(ReadPosition(dsp, 0) == 5);
-    THREESF_CHECK(Word(dsp, kCommandWord) == 5);
+
+    XSFLIB_CHECK(interrupts.empty());
+    XSFLIB_CHECK(ReadPosition(dsp, 0) == 5);
+    XSFLIB_CHECK(Word(dsp, kCommandWord) == 5);
 
     // Data in reply register 0 raises kReply0 with the debug pipe, and the handler reads it without the DSP running.
     // Reply register 1 raises kReply1, and its data waits to be read.
     interrupts.clear();
+
     Fire(dsp, 0, 0x1234, 0);
-    THREESF_CHECK((interrupts == Interrupts{{Interrupt::kReply0, Pipe::kDebug}}));
-    THREESF_CHECK(reply0_wait == 0);
+
+    XSFLIB_CHECK((interrupts == Interrupts{{Interrupt::kReply0, Pipe::kDebug}}));
+    XSFLIB_CHECK(reply0_wait == 0);
+
     interrupts.clear();
+
     Fire(dsp, 1, 0x55, 0);
-    THREESF_CHECK((interrupts == Interrupts{{Interrupt::kReply1, Pipe::kDebug}}));
-    THREESF_CHECK(dsp.ReplyReady(1));
-    THREESF_CHECK(dsp.ReadReply(1) == 0x55);
+
+    XSFLIB_CHECK((interrupts == Interrupts{{Interrupt::kReply1, Pipe::kDebug}}));
+    XSFLIB_CHECK(dsp.ReplyReady(1));
+    XSFLIB_CHECK(dsp.ReadReply(1) == 0x55);
 
     // The handler can replace itself while it runs. The glue calls a copy of it, so the captures of the old handler
     // (here a long string, which std::function keeps on the heap) last until it returns.
     std::string seen;
-    const std::string text(1000, 'x');
-    const auto replace_itself = [&dsp, &seen, text](Interrupt, Pipe)
+    const std::string kText(1000, 'x');
+
+    const auto replace_itself = [&dsp, &seen, kText](Interrupt, Pipe)
     {
         dsp.SetInterruptHandler([&seen](Interrupt, Pipe) { seen += "second;"; });
-        seen += text.substr(0, 5) + ";";
+        seen += kText.substr(0, 5) + ";";
     };
     dsp.SetInterruptHandler(replace_itself);
+
     Fire(dsp, 2, 4, 0x0001);
     Fire(dsp, 2, 4, 0x0001);
-    THREESF_CHECK(seen == "xxxxx;second;");
+
+    XSFLIB_CHECK(seen == "xxxxx;second;");
 
     // A notification for a pipe above 15 is an error.
-    THREESF_CHECK(ThrowsDspError([&] { Fire(dsp, 2, 40, 0x0001); }));
+    XSFLIB_CHECK(ThrowsDspError([&] { Fire(dsp, 2, 40, 0x0001); }));
 }
 
 // The debug pipe is drained from inside Teakra, where the glue can't run the DSP to wait for command register 2 to
@@ -597,16 +623,19 @@ void TestDebugPipeWhileCommandWaits()
     SetEntry(dsp, 5, 0x2300, 16, 0, 0);
     const uint8_t kByte[1] = {0xC0};
     dsp.WritePipe(Pipe::kAudio, kByte);
-    THREESF_CHECK(ErrorOf([&] { dsp.Run(100000); }).empty());
-    THREESF_CHECK(ReadPosition(dsp, 0) == 5);
+
+    XSFLIB_CHECK(ErrorOf([&] { dsp.Run(100000); }).empty());
+    XSFLIB_CHECK(ReadPosition(dsp, 0) == 5);
 
     // Once triggered, the firmware reads the 5, then the debug entry's 0, then the 5 of the next write.
     SetWord(dsp, kTriggerWord, 1);
     dsp.WritePipe(Pipe::kAudio, kByte);
+
     dsp.Run(100000);
-    THREESF_CHECK(Word(dsp, kFirstCommandWord) == 5);
-    THREESF_CHECK(Word(dsp, kFirstCommandWord + 1) == 0);
-    THREESF_CHECK(Word(dsp, kFirstCommandWord + 2) == 5);
+
+    XSFLIB_CHECK(Word(dsp, kFirstCommandWord) == 5);
+    XSFLIB_CHECK(Word(dsp, kFirstCommandWord + 1) == 0);
+    XSFLIB_CHECK(Word(dsp, kFirstCommandWord + 2) == 5);
 }
 
 // UnloadComponent sends the stop request and reads the firmware's answer, and a pending half of a notification survives
@@ -621,32 +650,39 @@ void TestUnload()
 
     // The answer comes within one slice, and it's read and dropped without an interrupt.
     uint64_t before = dsp.Cycles();
-    THREESF_CHECK(ErrorOf([&] { dsp.UnloadComponent(); }).empty());
-    THREESF_CHECK(dsp.Cycles() - before == kWaitSlice);
-    THREESF_CHECK(Word(dsp, kCommandWord) == 0x8000);
-    THREESF_CHECK(!dsp.ReplyReady(2));
-    THREESF_CHECK(interrupts.empty());
+
+    XSFLIB_CHECK(ErrorOf([&] { dsp.UnloadComponent(); }).empty());
+    XSFLIB_CHECK(dsp.Cycles() - before == kWaitSlice);
+    XSFLIB_CHECK(Word(dsp, kCommandWord) == 0x8000);
+    XSFLIB_CHECK(!dsp.ReplyReady(2));
+    XSFLIB_CHECK(interrupts.empty());
 
     // Unloading again does nothing, and Run only counts the cycles while no firmware runs.
     before = dsp.Cycles();
+
     dsp.UnloadComponent();
-    THREESF_CHECK(dsp.Cycles() == before);
+
+    XSFLIB_CHECK(dsp.Cycles() == before);
+
     dsp.Run(100000);
-    THREESF_CHECK(dsp.Cycles() == before + 100000);
+    XSFLIB_CHECK(dsp.Cycles() == before + 100000);
 
     // Leave the reply half of a notification pending. The next unload takes that unread data in reply register 2 as the
     // firmware's answer, so it runs nothing.
     StartNotifyFirmware(dsp);
     Fire(dsp, 2, 4, 0);
-    THREESF_CHECK(interrupts.empty());
+    XSFLIB_CHECK(interrupts.empty());
     before = dsp.Cycles();
+
     dsp.UnloadComponent();
-    THREESF_CHECK(dsp.Cycles() == before);
+
+    XSFLIB_CHECK(dsp.Cycles() == before);
 
     // After another start, the semaphore half alone completes the pending notification. Reply register 2 still holds
     // 0x1000 from the start, which names pipe 0x800, so that's an error.
     StartNotifyFirmware(dsp);
-    THREESF_CHECK(ThrowsDspError([&] { Fire(dsp, -1, 0, 0x8000); }));
+
+    XSFLIB_CHECK(ThrowsDspError([&] { Fire(dsp, -1, 0, 0x8000); }));
 }
 
 // A firmware that never finishes starting makes LoadComponent give up after exactly one wait's time limit, whether it
@@ -669,12 +705,12 @@ void TestStartTimeouts()
         Fcram fcram(1 << 20);
         TeakraDsp dsp(fcram);
 
-        THREESF_CHECK(ThrowsDspError([&] { dsp.LoadComponent(MakeImage(c.program, c.flags)); }));
-        THREESF_CHECK(dsp.Cycles() == kWaitLimitCycles);
+        XSFLIB_CHECK(ThrowsDspError([&] { dsp.LoadComponent(MakeImage(c.program, c.flags)); }));
+        XSFLIB_CHECK(dsp.Cycles() == kWaitLimitCycles);
 
         // The firmware never counted as running, so Run only counts the cycles.
         dsp.Run(1000);
-        THREESF_CHECK(dsp.Cycles() == kWaitLimitCycles + 1000);
+        XSFLIB_CHECK(dsp.Cycles() == kWaitLimitCycles + 1000);
     }
 }
 
@@ -692,13 +728,5 @@ int main()
     TestUnload();
     TestStartTimeouts();
 
-    if (failures)
-    {
-        std::fprintf(stderr, "%d check(s) failed\n", failures);
-        return 1;
-    }
-
-    std::printf("teakra glue tests passed\n");
-
-    return 0;
+    return Summary("teakra glue");
 }

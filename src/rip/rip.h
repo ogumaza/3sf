@@ -9,13 +9,15 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
-#include <set>
 #include <span>
 #include <string>
 #include <string_view>
 #include <vector>
 
-#include "csar/formats.h"
+#include "ntdlib/sar/formats.h"
+#include "xsflib/rip/file_names.h"
+#include "xsflib/rip/length.h"
+
 #include "rip/game.h"
 #include "threesf/format.h"
 
@@ -88,32 +90,15 @@ bool IsDspFirmware(const std::vector<uint8_t>& data);
 
 // Lists the files sequence `index` needs that the archive doesn't hold: the sequence's data, banks or wave archives
 // kept in other files, or cut off by truncation. Empty when nothing is missing.
-std::vector<std::string> MissingData(const csar::SoundArchive& archive, uint32_t index);
+std::vector<std::string> MissingData(const ntdlib::sar::SoundArchive& archive, uint32_t index);
 
-// Filenames for one rip, valid on Windows, macOS and Linux and unique even on case-insensitive filesystems.
-class FileNames
-{
-public:
-    // "<base>.3sflib".
-    std::string Library(const std::string& base);
-
-    // "<index, four digits> <label>.mini3sf".
-    std::string Mini(uint32_t index, const std::string& label);
-
-private:
-    std::string Unique(const std::string& stem, const std::string& extension);
-
-    std::set<std::string> taken_; // the names given out so far, in lowercase
-};
+// Filenames for one rip, valid on Windows, macOS and Linux and unique even on case-insensitive filesystems
+// (xsflib::rip). 3SF names them "<base>.3sflib" and "<index, four digits> <label>.mini3sf".
+using FileNames = xsflib::rip::FileNames;
 
 // A sequence's length and fade in milliseconds, and whether the sequence never makes a sound. A silent sequence gets
 // the tail alone.
-struct Timing
-{
-    long long length_ms;
-    long long fade_ms;
-    bool silent = false;
-};
+using Timing = xsflib::rip::Timing;
 
 // Works out how long sequences play by running them on the nw::snd model and the DSP firmware. Analyze can be called
 // from several threads at once.
@@ -124,6 +109,7 @@ public:
     // the 3sf_var tag in docs/3sf.md).
     LengthAnalyzer(const std::vector<uint8_t>& archive_bytes, const std::vector<uint8_t>& dsp_component,
                    const Variables& variables = {});
+
     ~LengthAnalyzer();
 
     // A looping sequence gets two loops and a 10 s fade, and any other sequence runs to its last sound and a tail of
@@ -153,8 +139,8 @@ SequenceShape WalkSequence(std::span<const uint8_t> data, uint32_t start);
 bool LabelMarksMusic(std::string_view label);
 
 // Whether a sound is music, as 3sfrip's --bgm picks: its label marks it as music, or it's a sequence that opens at
-// least two tracks besides the one it starts on and has at least 50 notes. The second rule finds the music that a
-// label doesn't mark, and the music in archives without labels.
-bool IsMusic(const csar::SoundArchive& archive, const csar::SoundInfo& sound);
+// least two tracks besides the one it starts on and has at least 50 notes. The second rule finds the music that a label
+// doesn't mark, and the music in archives without labels.
+bool IsMusic(const ntdlib::sar::SoundArchive& archive, const ntdlib::sar::SoundInfo& sound);
 
 } // namespace threesf::rip

@@ -3,28 +3,28 @@
 // Unit tests for the Horizon kernel HLE (src/horizon): runs small ARM programs in an emulated system and checks what
 // the SVCs give them.
 
+#include <cstddef>
 #include <cstdint>
-#include <cstdio>
 #include <initializer_list>
 #include <vector>
 
-#include "check.h"
-#include "common/bytes.h"
+#include "xsflib/bytes.h"
+#include "xsflib/testing/check.h"
+
 #include "horizon/system.h"
 
-using namespace threesf;
+using namespace xsflib::testing;
 using namespace threesf::horizon;
 
 // Words of an ARM program, stored little-endian.
 static std::vector<uint8_t> Words(std::initializer_list<uint32_t> words)
 {
-    std::vector<uint8_t> out;
+    std::vector<uint8_t> out(words.size() * 4);
+    std::size_t at = 0;
     for (uint32_t w : words)
     {
-        for (int i = 0; i < 4; i++)
-        {
-            out.push_back(static_cast<uint8_t>(w >> (8 * i)));
-        }
+        xsflib::StoreLe32(out.data() + at, w);
+        at += 4;
     }
 
     return out;
@@ -50,7 +50,7 @@ static uint64_t CommittedMemory(uint32_t size, const ProcessImage::Segment& extr
         0xffff8001,
     });
     program.resize(size, 0);
-    StoreLe32(program.data() + (kNames - 0x100000), 1);
+    xsflib::StoreLe32(program.data() + (kNames - 0x100000), 1);
 
     ProcessImage image;
     image.memory.push_back({0x100000, program});
@@ -59,7 +59,7 @@ static uint64_t CommittedMemory(uint32_t size, const ProcessImage::Segment& extr
 
     System system(image, KernelConfig{});
     Kernel& k = system.GetKernel();
-    THREESF_CHECK(k.RunUntil(1'000'000) == Kernel::RunResult::kExited);
+    XSFLIB_CHECK(k.RunUntil(1'000'000) == Kernel::RunResult::kExited);
 
     return k.Memory().Read32(kValues) | uint64_t{k.Memory().Read32(kValues + 4)} << 32;
 }
@@ -69,13 +69,15 @@ static uint64_t CommittedMemory(uint32_t size, const ProcessImage::Segment& extr
 static void TestCommittedMemory()
 {
     const ProcessImage::Segment kDriver = {0x0e000000, std::vector<uint8_t>(0x10, 0)};
-    THREESF_CHECK(CommittedMemory(0x2345, kDriver) == 0x103000);
-    THREESF_CHECK(CommittedMemory(0x3000, kDriver) == 0x103000);
-    THREESF_CHECK(CommittedMemory(0x3001, kDriver) == 0x104000);
+
+    XSFLIB_CHECK(CommittedMemory(0x2345, kDriver) == 0x103000);
+    XSFLIB_CHECK(CommittedMemory(0x3000, kDriver) == 0x103000);
+    XSFLIB_CHECK(CommittedMemory(0x3001, kDriver) == 0x104000);
 
     // A segment that continues the program's region is part of it.
     const ProcessImage::Segment kBss = {0x104000, std::vector<uint8_t>(0x1800, 0)};
-    THREESF_CHECK(CommittedMemory(0x3001, kBss) == 0x106000);
+
+    XSFLIB_CHECK(CommittedMemory(0x3001, kBss) == 0x106000);
 }
 
 // Runs a program whose main thread starts a second thread at its own priority, then yields until the second one has set
@@ -84,13 +86,13 @@ static void TestCommittedMemory()
 static bool YieldLetsTheOtherThreadRun(bool hint)
 {
     constexpr uint32_t kFlag = 0x101000;
-    constexpr uint32_t kStackTop = 0x102000;
+    constexpr uint32_t kSecondStackTop = 0x102000;
 
     std::vector<uint8_t> program = Words({
         0xe59f003c,                     // ldr r0, =0x30 (the main thread's priority)
         0xe59f103c,                     // ldr r1, =second
         0xe3a02000,                     // mov r2, #0
-        0xe59f3038,                     // ldr r3, =kStackTop
+        0xe59f3038,                     // ldr r3, =kSecondStackTop
         0xef000008,                     // svc 0x08: CreateThread(r0 priority, r1 entry, r2 arg, r3 stack top)
         hint ? 0xe320f001 : 0xe3a00000, // wait: yield, or mov r0, #0
         hint ? 0xe1a00000 : 0xe3a01000, // nop, or mov r1, #0
@@ -106,10 +108,10 @@ static bool YieldLetsTheOtherThreadRun(bool hint)
         0xef000009,                     // svc 0x09: ExitThread
         0x30,
         0x100034,
-        kStackTop,
+        kSecondStackTop,
         kFlag,
     });
-    program.resize(kStackTop - 0x100000, 0);
+    program.resize(kSecondStackTop - 0x100000, 0);
 
     ProcessImage image;
     image.memory.push_back({0x100000, program});
@@ -123,8 +125,8 @@ static bool YieldLetsTheOtherThreadRun(bool hint)
 // Horizon does not time-slice threads of equal priority. A yielding thread moves to the back of their queue.
 static void TestYield()
 {
-    THREESF_CHECK(YieldLetsTheOtherThreadRun(false));
-    THREESF_CHECK(YieldLetsTheOtherThreadRun(true));
+    XSFLIB_CHECK(YieldLetsTheOtherThreadRun(false));
+    XSFLIB_CHECK(YieldLetsTheOtherThreadRun(true));
 }
 
 int main()
@@ -132,13 +134,5 @@ int main()
     TestCommittedMemory();
     TestYield();
 
-    if (failures)
-    {
-        std::fprintf(stderr, "%d check(s) failed\n", failures);
-        return 1;
-    }
-
-    std::printf("kernel tests passed\n");
-
-    return 0;
+    return Summary("kernel");
 }

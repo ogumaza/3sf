@@ -18,7 +18,7 @@ covers the player core. Both clang-cl and MSVC builds play in foobar2000 on Wind
 
 - Tags are shown as metadata, as in kode54's PSF-family components: `game` as album, `year` as
   date, and `replaygain_*` as ReplayGain. Tags can be edited: the tag area is rewritten, and
-  `_lib`, `length`, `fade` and `volume` are kept.
+  `_lib`, `length`, `fade`, `volume`, `utf8` and `3sf_var` are kept.
 - Length and fade come from the `length` and `fade` tags. Files without a length tag play
   for the default length and fade and stop early when the sound ends by itself.
 - Advanced preferences › Decoding › 3SF decoder: default length and fade, endless playback, and
@@ -41,14 +41,16 @@ covers the player core. Both clang-cl and MSVC builds play in foobar2000 on Wind
 (`.github/workflows/foobar2000.yml`) builds the 32-bit and 64-bit DLLs and the Mac bundle, and
 uploads one `.fb2k-component` with all three. Start it from the repository's Actions tab (Run
 workflow). GitHub lists a manual workflow only once it's on the default branch (`main`). It needs
-GitHub Actions enabled for the repository. The workflow downloads the SDK version specified in
-`.github/actions/foobar2000-sdk/action.yml` from foobar2000.org. CI uses the same version.
+GitHub Actions enabled for the repository. The workflow passes an SDK version to
+`externals/xsflib/ci/foobar2000-sdk`. That action downloads the SDK from foobar2000.org. CI uses
+the same version.
 
 **On Windows:** you need Visual Studio 2022 or later with the C++ workload and the "C++ Clang
 tools for Windows" component, plus CMake 3.20 or later. Download and unpack the foobar2000 SDK
 from <https://www.foobar2000.org/SDK>. Use the folder containing `pfc` and `foobar2000` as the
-SDK path below. CI builds with the version that `.github/actions/foobar2000-sdk/action.yml` names,
-and a newer one may need changes to `plugins/foobar2000/CMakeLists.txt`.
+SDK path below. CI builds with the version that the workflows pass to
+`externals/xsflib/ci/foobar2000-sdk`. A newer one may need changes to xsflib's
+`cmake/XsflibApps.cmake`.
 
 ```
 cmake -S . -B build-fb2k -A x64 -T ClangCL -DFOOBAR2000_SDK_DIR=C:/path/to/SDK
@@ -84,14 +86,7 @@ not with a Developer ID, and it isn't notarized.
 The build compiles the SDK's `pfc`, `foobar2000/SDK` and
 `foobar2000/foobar2000_component_client` sources directly. On Windows it links
 `foobar2000/shared/shared-<arch>.lib` (or `shared.lib`), and on macOS it compiles the parts of
-`foobar2000/shared` and the Objective-C++ files that the SDK's Xcode projects build. If the SDK
-layout has changed, adjust
-`plugins/foobar2000/CMakeLists.txt`. Another option is to copy the SDK's `foo_sample` project,
-replace its sources with `foo_input_3sf.cpp`, and add the 3SF core (`src/threesf`,
-`src/horizon`, `src/arm`, `src/dsp`, `src/nwsnd`, `src/nnsnd`, `src/csar`, Teakra in
-`externals/teakra`, and zlib) as a static library, with `src` on the include path for the
-headers in `src/common`, and `THREESF_VERSION` defined as the version in quotes, such as
-`"0.9.0"` (the one in `CMakeLists.txt`'s `project()`).
+`foobar2000/shared` and the Objective-C++ files that the SDK's Xcode projects build.
 
 On Windows everything is built with the static C runtime (`/MT`), so the component needs no
 runtime DLLs. On macOS it uses only the system's libraries.
@@ -106,6 +101,6 @@ stutter. Use 64-bit foobar2000 and the 64-bit component if your other components
 
 ## Licence
 
-The component is MIT-licensed, like the rest of 3SF, and uses Teakra (MIT) and zlib. Ship
+The component is MIT-licensed, like the rest of 3SF, and uses xsflib (MIT), ntdlib (MIT), Teakra (MIT) and zlib. Ship
 `LICENSE` and `THIRD-PARTY-NOTICES.md` (or their text) with a build. Nothing in it is GPL, so it
 can be distributed as a foobar2000 component.

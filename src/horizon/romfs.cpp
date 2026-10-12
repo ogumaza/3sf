@@ -5,13 +5,16 @@
 #include "horizon/romfs.h"
 
 #include <algorithm>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
-#include "common/bytes.h"
+#include "xsflib/bytes.h"
+#include "xsflib/utf8.h"
 
 namespace threesf::horizon
 {
@@ -24,59 +27,11 @@ constexpr uint32_t kEmpty = 0xffffffff;
 // moves past its first byte only.
 uint32_t DecodeUtf8(const std::string& s, std::size_t& i)
 {
-    constexpr uint32_t kReplacement = 0xfffd;
-
-    const uint8_t lead = static_cast<uint8_t>(s[i]);
-    if (lead < 0x80)
+    const auto [c, length] = xsflib::Utf8Character(std::string_view(s).substr(i));
+    if (length == 0)
     {
         i++;
-        return lead;
-    }
-
-    std::size_t length;
-    uint32_t c;
-    uint32_t min;
-    if (lead >= 0xc0 && lead < 0xe0)
-    {
-        length = 2;
-        c = lead & 0x1f;
-        min = 0x80;
-    }
-    else if (lead >= 0xe0 && lead < 0xf0)
-    {
-        length = 3;
-        c = lead & 0x0f;
-        min = 0x800;
-    }
-    else if (lead >= 0xf0 && lead < 0xf8)
-    {
-        length = 4;
-        c = lead & 0x07;
-        min = 0x10000;
-    }
-    else
-    {
-        i++;
-        return kReplacement;
-    }
-
-    for (std::size_t k = 1; k < length; k++)
-    {
-        const uint8_t next = i + k < s.size() ? static_cast<uint8_t>(s[i + k]) : 0;
-        if ((next & 0xc0) != 0x80)
-        {
-            i++;
-            return kReplacement;
-        }
-
-        c = (c << 6) | (next & 0x3f);
-    }
-
-    // Overlong forms, surrogates and values past U+10FFFF aren't valid UTF-8.
-    if (c < min || c > 0x10ffff || (c >= 0xd800 && c < 0xe000))
-    {
-        i++;
-        return kReplacement;
+        return 0xfffd;
     }
 
     i += length;
@@ -164,19 +119,19 @@ struct FileEntry
 
 void Put32(std::vector<uint8_t>& v, std::size_t off, uint32_t x)
 {
-    StoreLe32(v.data() + off, x);
+    xsflib::StoreLe32(v.data() + off, x);
 }
 
 void Put64(std::vector<uint8_t>& v, std::size_t off, uint64_t x)
 {
-    StoreLe64(v.data() + off, x);
+    xsflib::StoreLe64(v.data() + off, x);
 }
 
 void PutUtf16(std::vector<uint8_t>& v, std::size_t off, const std::u16string& s)
 {
     for (std::size_t i = 0; i < s.size(); i++)
     {
-        StoreLe16(v.data() + off + 2 * i, s[i]);
+        xsflib::StoreLe16(v.data() + off + 2 * i, s[i]);
     }
 }
 

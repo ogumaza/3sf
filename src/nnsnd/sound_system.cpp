@@ -5,7 +5,6 @@
 #include <algorithm>
 #include <cstdint>
 #include <span>
-#include <utility>
 #include <vector>
 
 namespace threesf::nnsnd
@@ -108,7 +107,7 @@ void SoundSystem::WriteDspDefaults(const DspDefaults& defaults)
     voice_cycles_ = kFrameCycles - OutputCycles(defaults.output_format, defaults.clipping_mode);
 }
 
-Voice* SoundSystem::AllocVoice(int priority, DropCallback on_drop)
+Voice* SoundSystem::AllocVoice(int priority, DropOwner owner)
 {
     // 0x18eb6c
     if (priority >= 0x8000)
@@ -136,7 +135,7 @@ Voice* SoundSystem::AllocVoice(int priority, DropCallback on_drop)
         }
 
         allocated_[i] = true;
-        drop_callbacks_[i] = std::move(on_drop);
+        drop_owners_[i] = owner;
         Voice& v = voices_[i];
         v.Reset();
         v.SetPriority(priority);
@@ -174,18 +173,18 @@ void SoundSystem::FreeVoice(Voice* voice)
     }
 
     allocated_[i] = false;
-    drop_callbacks_[i] = nullptr;
+    drop_owners_[i] = {};
     priority_list_.remove(voice);
 }
 
 void SoundSystem::DropVoice(Voice* voice)
 {
-    // The owner's callback runs once the voice is free.
-    DropCallback dropped = std::move(drop_callbacks_[voice->Id()]);
+    // The drop handler runs once the voice is free.
+    const DropOwner owner = drop_owners_[voice->Id()];
     FreeVoice(voice);
-    if (dropped)
+    if (owner.place >= 0 && drop_handler_)
     {
-        dropped(voice);
+        drop_handler_(owner, voice);
     }
 }
 
@@ -224,10 +223,10 @@ void SoundSystem::SendParameterToDsp()
         v.UpdateWaveBuffers(link_);
     }
 
-    // 0x18d39c: in priority order, playing voices with wave buffers get their sync count and enable written while
-    // their DSP cycles fit what the frame has left. A voice that doesn't fit is dropped unless its priority is the
-    // highest. The walk goes over a copy of the order: a dropped voice's owner can free others, and the game's walk
-    // passes over them as stopped. The arithmetic is the ARM's, in 32 bits with signed comparisons.
+    // 0x18d39c: in priority order, playing voices with wave buffers get their sync count and enable written while their
+    // DSP cycles fit what the frame has left. A voice that doesn't fit is dropped unless its priority is the highest.
+    // The walk goes over a copy of the order: a dropped voice's owner can free others, and the game's walk passes over
+    // them as stopped. The arithmetic matches the ARM code: 32-bit values and signed comparisons.
     int32_t cycles = voice_cycles_;
     const std::vector<Voice*> order(priority_list_.begin(), priority_list_.end());
     for (Voice* v : order)

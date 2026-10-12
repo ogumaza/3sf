@@ -47,8 +47,9 @@ struct Cell {
     std::function<void(u16)> set;
     std::function<u16(void)> get;
     u16 index = 0;
-    // The value a register keeps itself, which the DSP's state includes, or nullptr for one that
-    // only reflects a component's state.
+    // Cell() and BitFieldCell make storage for a register's value. The DSP's state includes it.
+    // Other cells have nullptr. MMIORegion's constructor gives some default cells new callbacks
+    // that don't use the storage. The state still includes their storage.
     std::shared_ptr<u16> storage;
 
     Cell(std::function<void(u16)> set, std::function<u16(void)> get)

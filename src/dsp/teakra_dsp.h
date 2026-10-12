@@ -21,7 +21,8 @@
 #include <span>
 #include <vector>
 
-#include "common/memory_image.h"
+#include "xsflib/memory_image.h"
+
 #include "dsp/dsp.h"
 #include "dsp/fcram.h"
 
@@ -46,7 +47,7 @@ public:
     struct Snapshot
     {
         std::vector<uint8_t> teakra;
-        MemoryImage ram;
+        xsflib::MemoryImage ram;
         uint64_t cycles = 0;
         bool running = false;
         std::optional<uint16_t> pipe_table;

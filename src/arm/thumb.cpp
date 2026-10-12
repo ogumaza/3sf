@@ -49,6 +49,7 @@ bool Cpu::StepThumb(uint32_t op)
             {
                 r[rd] = AddWithCarry(r[rn], b, false, true);
             }
+
             return true;
         }
 
@@ -174,6 +175,7 @@ bool Cpu::StepThumb(uint32_t op)
                     {
                         r[rd] = result;
                     }
+
                     return true;
                 }
 
@@ -192,6 +194,7 @@ bool Cpu::StepThumb(uint32_t op)
                     {
                         r[rd] = value;
                     }
+
                     return true;
                 }
 
@@ -343,6 +346,7 @@ bool Cpu::StepThumb(uint32_t op)
                         addr += 4;
                     }
                 }
+
                 return true;
             }
 
@@ -364,7 +368,7 @@ bool Cpu::StepThumb(uint32_t op)
                 switch ((op >> 6) & 3)
                 {
                 case 0:
-                    r[rd] = ByteSwap32(value);
+                    r[rd] = xsflib::ByteSwap32(value);
                     return true;
 
                 case 1:

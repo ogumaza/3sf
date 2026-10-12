@@ -4,8 +4,6 @@
 
 #include "dsp/teakra_dsp.h"
 
-#include <teakra/teakra.h>
-
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
@@ -19,7 +17,9 @@
 #include <utility>
 #include <vector>
 
-#include "common/bytes.h"
+#include "xsflib/bytes.h"
+#include <teakra/teakra.h>
+
 #include "dsp/dsp.h"
 #include "dsp/fcram.h"
 
@@ -117,9 +117,9 @@ std::vector<Segment> ReadSegments(std::span<const uint8_t> image)
             continue;
         }
 
-        const uint64_t offset = LoadLe32(record);
-        const uint64_t address = LoadLe32(record + 4);
-        const uint64_t size = LoadLe32(record + 8);
+        const uint64_t offset = xsflib::LoadLe32(record);
+        const uint64_t address = xsflib::LoadLe32(record + 4);
+        const uint64_t size = xsflib::LoadLe32(record + 8);
         if (offset + size > image.size())
         {
             throw std::runtime_error("DSP: firmware segment " + std::to_string(i) + " lies outside the image");
@@ -173,10 +173,10 @@ PipeEntry LoadPipeEntry(const uint8_t* ram, uint16_t table, Pipe pipe, unsigned 
     entry.number = static_cast<uint8_t>(2 * index + direction);
     entry.offset = DataOffset(table) + entry.number * kPipeEntrySize;
     const uint8_t* fields = ram + entry.offset;
-    entry.ring = DataOffset(LoadLe16(fields + kEntryRing));
-    entry.size = LoadLe16(fields + kEntrySize);
-    entry.read = LoadLe16(fields + kEntryRead);
-    entry.write = LoadLe16(fields + kEntryWrite);
+    entry.ring = DataOffset(xsflib::LoadLe16(fields + kEntryRing));
+    entry.size = xsflib::LoadLe16(fields + kEntrySize);
+    entry.read = xsflib::LoadLe16(fields + kEntryRead);
+    entry.write = xsflib::LoadLe16(fields + kEntryWrite);
     if (fields[kEntryNumber] != entry.number)
     {
         throw std::runtime_error("DSP: the pipe table is broken: entry " + std::to_string(entry.number) +
@@ -234,7 +234,7 @@ std::vector<uint8_t> TakeFromRing(uint8_t* ram, const PipeEntry& entry, Pipe pip
         read = Advance(read, entry.size);
     }
 
-    StoreLe16(ram + entry.offset + kEntryRead, read);
+    xsflib::StoreLe16(ram + entry.offset + kEntryRead, read);
 
     return data;
 }
@@ -260,25 +260,25 @@ TeakraDsp::TeakraDsp(Fcram& fcram) : teakra_(std::make_unique<Teakra::Teakra>(Te
     bus.read16 = [&fcram](uint32_t address) -> uint16_t
     {
         const uint8_t* p = fcram.At(address, 2);
-        return p ? LoadLe16(p) : 0;
+        return p ? xsflib::LoadLe16(p) : 0;
     };
     bus.write16 = [&fcram](uint32_t address, uint16_t value)
     {
         if (uint8_t* p = fcram.At(address, 2))
         {
-            StoreLe16(p, value);
+            xsflib::StoreLe16(p, value);
         }
     };
     bus.read32 = [&fcram](uint32_t address) -> uint32_t
     {
         const uint8_t* p = fcram.At(address, 4);
-        return p ? LoadLe32(p) : 0;
+        return p ? xsflib::LoadLe32(p) : 0;
     };
     bus.write32 = [&fcram](uint32_t address, uint32_t value)
     {
         if (uint8_t* p = fcram.At(address, 4))
         {
-            StoreLe32(p, value);
+            xsflib::StoreLe32(p, value);
         }
     };
     teakra_->SetAHBMCallback(bus);
@@ -357,7 +357,7 @@ void TeakraDsp::WritePipe(Pipe pipe, std::span<const uint8_t> data)
         write = Advance(write, entry.size);
     }
 
-    StoreLe16(ram + entry.offset + kEntryWrite, write);
+    xsflib::StoreLe16(ram + entry.offset + kEntryWrite, write);
     SendCommand(entry.number);
 }
 
@@ -463,7 +463,7 @@ TeakraDsp::Snapshot TeakraDsp::Save(const Snapshot* previous)
 {
     Snapshot snapshot;
     snapshot.teakra = teakra_->SaveState();
-    snapshot.ram = MemoryImage(teakra_->GetDspMemory(), kRamSize, previous ? &previous->ram : nullptr);
+    snapshot.ram = xsflib::MemoryImage(teakra_->GetDspMemory(), kRamSize, previous ? &previous->ram : nullptr);
     snapshot.cycles = cycles_;
     snapshot.running = running_;
     snapshot.pipe_table = pipe_table_;

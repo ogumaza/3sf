@@ -19,7 +19,8 @@
 #include <utility>
 #include <vector>
 
-#include "common/bytes.h"
+#include "xsflib/bytes.h"
+
 #include "horizon/ipc.h"
 
 namespace threesf::horizon
@@ -179,8 +180,8 @@ void SrvService::HandleRequest(Kernel& kernel, uint32_t cmdbuf)
     case 0x0005: // GetServiceHandle(name[8], length, flags)
         {
             uint8_t name[8];
-            StoreLe32(name, ctx.Word(1));
-            StoreLe32(name + 4, ctx.Word(2));
+            xsflib::StoreLe32(name, ctx.Word(1));
+            xsflib::StoreLe32(name + 4, ctx.Word(2));
             const uint32_t len = std::min<uint32_t>(ctx.Word(3), 8);
             const std::string service_name(reinterpret_cast<const char*>(name), len);
             auto service = kernel.FindService(service_name);
@@ -638,6 +639,7 @@ void CfgService::HandleRequest(Kernel& kernel, uint32_t cmdbuf)
             const uint32_t desc = ctx.Word(3);
             const uint32_t addr = ctx.Word(4);
             std::vector<uint8_t> data(size, 0);
+
             // A block of size 0 gets nothing. Its empty vector may have no storage, and memcpy mustn't be given a null
             // pointer.
             const auto put = [&](const uint8_t* src, std::size_t n)
@@ -679,7 +681,7 @@ void CfgService::HandleRequest(Kernel& kernel, uint32_t cmdbuf)
                     uint8_t bytes[sizeof(kStereoCamera)];
                     for (std::size_t i = 0; i < std::size(kStereoCamera); i++)
                     {
-                        StoreLe32(bytes + 4 * i, std::bit_cast<uint32_t>(kStereoCamera[i]));
+                        xsflib::StoreLe32(bytes + 4 * i, std::bit_cast<uint32_t>(kStereoCamera[i]));
                     }
                     put(bytes, sizeof(bytes));
                     break;
@@ -698,7 +700,7 @@ void CfgService::HandleRequest(Kernel& kernel, uint32_t cmdbuf)
                     uint8_t bytes[sizeof(kUserName)];
                     for (std::size_t i = 0; i < std::size(kUserName); i++)
                     {
-                        StoreLe16(bytes + 2 * i, kUserName[i]);
+                        xsflib::StoreLe16(bytes + 2 * i, kUserName[i]);
                     }
                     put(bytes, sizeof(bytes));
                     break;

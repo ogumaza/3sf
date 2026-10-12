@@ -49,14 +49,16 @@ const float kInvDspRate = std::bit_cast<float>(0x3800280du);
 // Polyphase sub-mode threshold (code.bin 0x1863b8).
 constexpr float kPolyphaseDownsampleThreshold = 4.0f / 3.0f;
 
-// The DSP cycles a voice takes a frame (UpdateParameters, 0x1862ac), from the tables at 0x56d860. Each has a column
-// for one channel and one for two. The sample format's cycles scale with the rate and add to 1,400 (0x1863c4).
+// The DSP cycles a voice takes a frame (UpdateParameters, 0x1862ac), from the tables at 0x56d860. Each has a column for
+// one channel and one for two. The sample format's cycles scale with the rate and add to 1,400 (0x1863c4).
 constexpr float kBaseCycles = 1400.0f;
 constexpr std::array<std::array<int32_t, 2>, 3> kFormatCycles = {{{1200, 1750}, {1100, 1800}, {3000, 0}}};
 constexpr std::array<std::array<uint32_t, 2>, 3> kInterpolationCycles = {{{800, 1300}, {1800, 3100}, {1800, 2900}}};
+
 // By the filter flags: none, the one-pole filter, the biquad, or both.
 constexpr std::array<std::array<uint32_t, 2>, 4> kFilterCycles = {
     {{300, 150}, {850, 1200}, {2400, 4000}, {3250, 5200}}};
+
 // For each bus the voice mixes into: the main bus, and aux A or B when any of its gains isn't zero (0x18638c: 275 * 8).
 constexpr uint32_t kBusCycles = 2200;
 
@@ -303,8 +305,8 @@ void Voice::UpdateParameters(DspLink& link)
         adpcm_coefs_dirty_ = false;
     }
 
-    // A change of the gains, the rate or the interpolation recomputes the voice's DSP cost. As in the game, a change
-    // of the filters alone doesn't.
+    // A change of the gains, the rate or the interpolation recomputes the voice's DSP cost. As in the game, a change of
+    // the filters alone doesn't.
     bool cost_changes = false;
     if (dirty_ & kDirtyGains)
     {

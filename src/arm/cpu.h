@@ -18,15 +18,10 @@
 #include <string>
 #include <vector>
 
-#include "common/bytes.h"
+#include "xsflib/bytes.h"
 
 namespace threesf::arm
 {
-
-constexpr uint32_t ByteSwap32(uint32_t v)
-{
-    return (v >> 24) | ((v >> 8) & 0xff00) | ((v << 8) & 0xff0000) | (v << 24);
-}
 
 // Flat 32-bit address space backed by host memory in 4 KiB pages.
 class Memory
@@ -88,7 +83,7 @@ public:
         uint8_t* p = pages_[a >> kPageBits];
         if (p && (a & kPageMask) <= kPageSize - 2)
         {
-            return LoadLe16(p + (a & kPageMask));
+            return xsflib::LoadLe16(p + (a & kPageMask));
         }
 
         return static_cast<uint16_t>(Read8(a) | (Read8(a + 1) << 8));
@@ -99,7 +94,7 @@ public:
         uint8_t* p = pages_[a >> kPageBits];
         if (p && (a & kPageMask) <= kPageSize - 4)
         {
-            return LoadLe32(p + (a & kPageMask));
+            return xsflib::LoadLe32(p + (a & kPageMask));
         }
 
         return Read16(a) | (static_cast<uint32_t>(Read16(a + 2)) << 16);
@@ -122,7 +117,7 @@ public:
         uint8_t* p = write_pages_[a >> kPageBits];
         if (p && (a & kPageMask) <= kPageSize - 2)
         {
-            StoreLe16(p + (a & kPageMask), v);
+            xsflib::StoreLe16(p + (a & kPageMask), v);
             return;
         }
 
@@ -135,7 +130,7 @@ public:
         uint8_t* p = write_pages_[a >> kPageBits];
         if (p && (a & kPageMask) <= kPageSize - 4)
         {
-            StoreLe32(p + (a & kPageMask), v);
+            xsflib::StoreLe32(p + (a & kPageMask), v);
             return;
         }
 
@@ -158,6 +153,7 @@ public:
 
     // Takes a snapshot, reusing `previous`'s runs if nothing has been mapped or unmapped since.
     Snapshot Save(const Snapshot* previous) const;
+
     void Restore(const Snapshot& snapshot);
 
     // Set by the first access to unmapped memory. Cpu::Run stops with StopReason::kFault, and the caller clears the

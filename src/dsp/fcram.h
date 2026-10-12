@@ -12,14 +12,14 @@
 #include <stdexcept>
 #include <vector>
 
-#include "common/common_types.h"
-#include "common/memory_image.h"
+#include "ntdlib/types.h"
+#include "xsflib/memory_image.h"
 
 namespace threesf
 {
 
 // Physical address of the start of FCRAM.
-constexpr PAddr kFcramBase = 0x20000000;
+constexpr ntdlib::PAddr kFcramBase = 0x20000000;
 
 class Fcram
 {
@@ -27,7 +27,7 @@ public:
     // A copy of FCRAM's contents and of how much Store has used.
     struct Snapshot
     {
-        MemoryImage bytes;
+        xsflib::MemoryImage bytes;
         std::size_t used = 0;
     };
 
@@ -41,7 +41,7 @@ public:
     }
 
     // The `size` bytes at physical address `address`, or nullptr if any of them is outside FCRAM.
-    uint8_t* At(PAddr address, std::size_t size = 1)
+    uint8_t* At(ntdlib::PAddr address, std::size_t size = 1)
     {
         const uint64_t offset = uint64_t{address} - kFcramBase;
         return address >= kFcramBase && offset + size <= bytes_.size() ? bytes_.data() + offset : nullptr;
@@ -49,7 +49,7 @@ public:
 
     // Copies `size` bytes into the next free 32-byte aligned space (bump allocation, for the wave archives the nw::snd
     // model loads) and returns their physical address. Throws when FCRAM is full.
-    PAddr Store(const void* data, std::size_t size)
+    ntdlib::PAddr Store(const void* data, std::size_t size)
     {
         const std::size_t offset = (used_ + 31) / 32 * 32;
         if (offset + size > bytes_.size())
@@ -60,13 +60,13 @@ public:
         std::memcpy(bytes_.data() + offset, data, size);
         used_ = offset + size;
 
-        return kFcramBase + static_cast<PAddr>(offset);
+        return kFcramBase + static_cast<ntdlib::PAddr>(offset);
     }
 
     // Takes a snapshot, sharing the pages that haven't changed since `previous`.
     Snapshot Save(const Snapshot* previous) const
     {
-        return {MemoryImage(bytes_.data(), bytes_.size(), previous ? &previous->bytes : nullptr), used_};
+        return {xsflib::MemoryImage(bytes_.data(), bytes_.size(), previous ? &previous->bytes : nullptr), used_};
     }
 
     // Restores FCRAM from a snapshot. Throws if the snapshot has a different size.

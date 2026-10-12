@@ -32,35 +32,31 @@
 // one after another, and one that fails doesn't stop the rest. Dropping files on the program gives it the files as
 // inputs.
 
-#include <zlib.h>
-
 #include <algorithm>
 #include <array>
-#include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
-#include <cstdlib>
 #include <exception>
 #include <filesystem>
-#include <fstream>
 #include <functional>
-#include <ios>
-#include <map>
-#include <new>
 #include <optional>
 #include <regex>
-#include <set>
-#include <stdexcept>
 #include <string>
 #include <system_error>
-#include <thread>
 #include <utility>
 #include <vector>
 
-#include "cli/console.h"
-#include "common/ascii.h"
+#include "ntdlib/sar/formats.h"
+#include "xsflib/ascii.h"
+#include "xsflib/cli/rip.h"
+#include "xsflib/files.h"
+#include "xsflib/rip/tool.h"
+#include "xsflib/text.h"
+#include <zlib.h>
+
 #include "common/quiet_stdout.h"
-#include "csar/formats.h"
+#include "common/sar_options.h"
 #include "rip/rip.h"
 
 using namespace threesf;
@@ -69,14 +65,10 @@ namespace fs = std::filesystem;
 namespace
 {
 
-bool WriteFile(const fs::path& path, const std::vector<uint8_t>& data)
-{
-    std::ofstream f(path, std::ios::binary);
-    f.write(reinterpret_cast<const char*>(data.data()), static_cast<std::streamsize>(data.size()));
-    f.close();
-
-    return !f.fail();
-}
+using xsflib::rip::InputPath;
+using xsflib::rip::NameOfInput;
+using xsflib::rip::ReportOutput;
+using xsflib::rip::WriteFile;
 
 void ListArchives(const rip::GameFiles& game)
 {
@@ -93,13 +85,13 @@ void ListArchives(const rip::GameFiles& game)
 
         try
         {
-            const auto archive = csar::SoundArchive::Load(bytes);
+            const auto archive = ntdlib::sar::SoundArchive::Load(bytes, kSarOptions);
             std::size_t sequences = 0, wave_sounds = 0, streams = 0;
             for (const auto& s : archive.Sounds())
             {
-                sequences += s.type == csar::SoundType::kSequence;
-                wave_sounds += s.type == csar::SoundType::kWaveSound;
-                streams += s.type == csar::SoundType::kStream;
+                sequences += s.type == ntdlib::sar::SoundType::kSequence;
+                wave_sounds += s.type == ntdlib::sar::SoundType::kWaveSound;
+                streams += s.type == ntdlib::sar::SoundType::kStream;
             }
             std::fprintf(stderr, "  %s: %zu bytes, %zu sequences, %zu wave sounds, %zu streams\n", path.c_str(),
                          bytes.size(), sequences, wave_sounds, streams);
@@ -111,46 +103,14 @@ void ListArchives(const rip::GameFiles& game)
     }
 }
 
-struct Options
+struct Options : xsflib::cli::RipOptions
 {
-    std::regex only{".*"};
-    std::string only_text; // the pattern --only gave, or empty
-    std::string out_dir, mode, only_archive, game_name, artist, year, copyright, by = "3sfrip";
-    bool list = false, lengths = true, bgm = false;
-    unsigned jobs = 0;
     Variables variables; // --var: set before each sequence starts, and written as the 3sf_var tag
 
     // The firmware --firmware names, and a firmware file among the inputs, which only loose sound archives use.
     std::string firmware_file, input_firmware_file;
     std::vector<uint8_t> firmware, input_firmware;
 };
-
-Tags CommonTags(const Options& o, const std::string& game_name, const char* mode)
-{
-    Tags common;
-    common["game"] = game_name;
-
-    if (!o.artist.empty())
-    {
-        common["artist"] = o.artist;
-    }
-
-    if (!o.year.empty())
-    {
-        common["year"] = o.year;
-    }
-
-    if (!o.copyright.empty())
-    {
-        common["copyright"] = o.copyright;
-    }
-
-    common["3sfby"] = o.by;
-    common["3sf_mode"] = mode;
-    common["utf8"] = "1"; // tags are UTF-8 (PSF convention)
-
-    return common;
-}
 
 struct Job
 {
@@ -166,72 +126,23 @@ void AnalyzeLengths(std::vector<Job>& jobs, const std::vector<uint8_t>& archive,
                     const Variables& variables, unsigned threads)
 {
     const rip::LengthAnalyzer analyzer(archive, firmware, variables);
-    std::atomic<std::size_t> next{0};
-    std::atomic<std::size_t> done{0};
-    std::atomic<bool> out_of_memory{false};
-    const auto worker = [&]
+    const auto analyze = [&analyzer](Job& job)
     {
-        for (std::size_t i; (i = next++) < jobs.size();)
+        if (!job.sequence)
         {
-            if (jobs[i].sequence)
-            {
-                try
-                {
-                    jobs[i].timing = analyzer.Analyze(jobs[i].index);
-                }
-                catch (const std::bad_alloc&)
-                {
-                    out_of_memory = true;
-                    next = jobs.size(); // the other threads take no more jobs
-                    return;
-                }
-
-                if (!jobs[i].timing)
-                {
-                    std::fprintf(stderr, "warning: length analysis failed for %s; no length tag written\n",
-                                 jobs[i].label.c_str());
-                }
-            }
-
-            const std::size_t n = ++done;
-            if (n % 100 == 0 || n == jobs.size())
-            {
-                std::fprintf(stderr, "  analyzed %zu of %zu\n", n, jobs.size());
-            }
+            return false;
         }
+
+        job.timing = analyzer.Analyze(job.index);
+
+        return true;
     };
-
-    threads = std::max(1u, std::min<unsigned>(threads, static_cast<unsigned>(jobs.size())));
-    std::vector<std::thread> pool;
-    for (unsigned t = 1; t < threads; t++)
-    {
-        // If another thread can't start (the system is out of threads or memory), the ones already going do the work.
-        try
-        {
-            pool.emplace_back(worker);
-        }
-        catch (const std::exception&)
-        {
-            break;
-        }
-    }
-
-    worker();
-
-    for (auto& t : pool)
-    {
-        t.join();
-    }
-
-    if (out_of_memory)
-    {
-        throw std::runtime_error("out of memory for the length analysis; try fewer --jobs");
-    }
+    xsflib::cli::AnalyzeLengths(jobs, threads, analyze);
 }
 
 // Lists and drops the sounds whose volume in the archive is 0. The game's sound library multiplies everything a sound
 // plays by that volume. Such a sound therefore makes no sound. Returns how many it dropped.
-std::size_t DropMuted(std::vector<Job>& jobs, const csar::SoundArchive& archive)
+std::size_t DropMuted(std::vector<Job>& jobs, const ntdlib::sar::SoundArchive& archive)
 {
     const auto muted = [&archive](const Job& job)
     {
@@ -241,6 +152,7 @@ std::size_t DropMuted(std::vector<Job>& jobs, const csar::SoundArchive& archive)
         }
 
         std::fprintf(stderr, "skipped %s: it makes no sound (volume 0)\n", job.label.c_str());
+
         return true;
     };
     return std::erase_if(jobs, muted);
@@ -258,6 +170,7 @@ std::size_t DropUnheard(std::vector<Job>& jobs)
         }
 
         std::fprintf(stderr, "skipped %s: it makes no sound\n", job.label.c_str());
+
         return true;
     };
     return std::erase_if(jobs, unheard);
@@ -266,41 +179,7 @@ std::size_t DropUnheard(std::vector<Job>& jobs)
 // "; 3 sounds skipped (2 data outside the archive, 1 no sound)", or nothing when none were skipped.
 std::string SkippedText(std::size_t missing_data, std::size_t silent)
 {
-    const std::size_t total = missing_data + silent;
-    if (total == 0)
-    {
-        return "";
-    }
-
-    std::string why = missing_data ? "data outside the archive" : "no sound";
-    if (missing_data && silent)
-    {
-        why = std::to_string(missing_data) + " data outside the archive, " + std::to_string(silent) + " no sound";
-    }
-
-    return "; " + std::to_string(total) + (total == 1 ? " sound" : " sounds") + " skipped (" + why + ")";
-}
-
-// Returns the input's absolute path, without the trailing separator of a directory given as "game/" or ".".
-fs::path InputPath(const std::string& input)
-{
-    const fs::path path = fs::absolute(input).lexically_normal();
-    return path.has_filename() ? path : path.parent_path();
-}
-
-// The name of the game in `input` when no profile gives one: the image's file name without its extension, or the
-// directory's name.
-std::string NameOfInput(const std::string& input)
-{
-    const fs::path path = InputPath(input);
-    return fs::is_directory(path) ? path.filename().string() : path.stem().string();
-}
-
-// Returns the directory that a rip of `input` goes in without -o: one next to the input, named after it with "_3sf"
-// added.
-fs::path DefaultOutputDir(const std::string& input)
-{
-    return InputPath(input).parent_path() / (NameOfInput(input) + "_3sf");
+    return xsflib::cli::SkippedText(missing_data, "data outside the archive", silent, "sound");
 }
 
 // Whether --only or --bgm picks sounds, so that picking none is an error.
@@ -309,15 +188,15 @@ bool PicksSounds(const Options& o)
     return o.bgm || !o.only_text.empty();
 }
 
-std::vector<Job> SelectSounds(const csar::SoundArchive& archive, const Options& o, bool with_wave_sounds)
+std::vector<Job> SelectSounds(const ntdlib::sar::SoundArchive& archive, const Options& o, bool with_wave_sounds)
 {
     std::vector<Job> jobs;
     const auto& sounds = archive.Sounds();
     for (std::size_t i = 0; i < sounds.size(); i++)
     {
         const auto& s = sounds[i];
-        const bool sequence = s.type == csar::SoundType::kSequence;
-        if (!sequence && !(with_wave_sounds && s.type == csar::SoundType::kWaveSound))
+        const bool sequence = s.type == ntdlib::sar::SoundType::kSequence;
+        if (!sequence && !(with_wave_sounds && s.type == ntdlib::sar::SoundType::kWaveSound))
         {
             continue; // streams are out of scope
         }
@@ -331,35 +210,10 @@ std::vector<Job> SelectSounds(const csar::SoundArchive& archive, const Options& 
     return jobs;
 }
 
-// Writes one .mini3sf per job; `build` makes the file for a sound id and its tags.
-int WriteMinis(const std::string& out_dir, rip::FileNames& names, const std::vector<Job>& jobs, const Tags& common,
-               const std::function<std::vector<uint8_t>(uint32_t, const Tags&)>& build)
+// The item id of a job's sound: the item type of sounds (1) in the top byte, and the sound's index.
+uint32_t SoundId(const Job& job)
 {
-    int count = 0;
-    for (const Job& job : jobs)
-    {
-        Tags tags = common;
-        tags["title"] = job.label;
-        tags["3sf_sound"] = job.label;
-        if (job.timing)
-        {
-            tags["length"] = FormatTime(job.timing->length_ms);
-            tags["fade"] = FormatTime(job.timing->fade_ms);
-        }
-
-        const std::string name = names.Mini(job.index, job.label);
-        if (!WriteFile(fs::path(out_dir) / name, build(0x01000000u | job.index, tags)))
-        {
-            std::fprintf(stderr, "error: can't write %s\n", name.c_str());
-            return -1;
-        }
-
-        count++;
-        std::fprintf(stderr, "%s%s%s\n", name.c_str(), tags.count("length") ? "  length " : "",
-                     tags.count("length") ? tags["length"].c_str() : "");
-    }
-
-    return count;
+    return ntdlib::sar::kSoundItem << 24 | job.index;
 }
 
 // Rips one sound archive in archive mode, adding the number of sounds --only picked to `matched`. Returns the number of
@@ -369,10 +223,10 @@ int RipArchive(const std::string& out_dir, rip::FileNames& names, const std::str
                const std::string& firmware_path, const std::vector<uint8_t>& firmware, const std::string& game_name,
                const Options& o, std::size_t& matched)
 {
-    std::optional<csar::SoundArchive> archive;
+    std::optional<ntdlib::sar::SoundArchive> archive;
     try
     {
-        archive = csar::SoundArchive::Load(archive_bytes);
+        archive = ntdlib::sar::SoundArchive::Load(archive_bytes, kSarOptions);
     }
     catch (const std::exception& e)
     {
@@ -392,7 +246,7 @@ int RipArchive(const std::string& out_dir, rip::FileNames& names, const std::str
     std::size_t wave_sounds = 0;
     for (const auto& s : archive->Sounds())
     {
-        wave_sounds += s.type == csar::SoundType::kWaveSound;
+        wave_sounds += s.type == ntdlib::sar::SoundType::kWaveSound;
     }
 
     // Sequences whose data isn't all in the archive would play with missing instruments.
@@ -437,11 +291,11 @@ int RipArchive(const std::string& out_dir, rip::FileNames& names, const std::str
         return 0;
     }
 
-    const Tags common = CommonTags(o, game_name, "archive");
+    const Tags common = xsflib::cli::RipTags(o, game_name, "3sf", "archive");
     const std::string lib_name = names.Library(lib_base);
     const auto lib = rip::BuildArchiveLibrary(archive_path, archive_bytes, firmware_path, firmware, common);
     fs::create_directories(out_dir);
-    if (!WriteFile(fs::path(out_dir) / lib_name, lib))
+    if (!WriteFile(fs::path(out_dir) / xsflib::PathFromUtf8(lib_name), lib))
     {
         std::fprintf(stderr, "error: can't write %s\n", lib_name.c_str());
         return -1;
@@ -449,17 +303,17 @@ int RipArchive(const std::string& out_dir, rip::FileNames& names, const std::str
 
     std::fprintf(stderr, "wrote %s (%zu bytes)\n", lib_name.c_str(), lib.size());
 
-    const auto build_mini = [&](uint32_t id, const Tags& tags)
-    {
-        return rip::BuildArchiveMini(id, lib_name, tags);
-    };
     Tags mini_tags = common;
     if (!o.variables.empty())
     {
         mini_tags["3sf_var"] = FormatVariables(o.variables);
     }
 
-    const int count = WriteMinis(out_dir, names, complete, mini_tags, build_mini);
+    const auto build_mini = [&](const Job& job, const Tags& tags)
+    {
+        return rip::BuildArchiveMini(SoundId(job), lib_name, tags);
+    };
+    const int count = xsflib::cli::WriteMinis(out_dir, names, complete, mini_tags, "3sf_sound", build_mini);
     if (count >= 0)
     {
         std::fprintf(stderr, "%s: %d mini3sf files%s; %zu wave sounds not ripped (archive mode only plays sequences)\n",
@@ -475,7 +329,7 @@ std::optional<std::pair<std::string, std::vector<uint8_t>>> FindFirmware(const s
 {
     for (const auto& p : paths)
     {
-        const std::string lower = AsciiLower(p);
+        const std::string lower = xsflib::AsciiLower(p);
         if (lower.size() < 4 || lower.compare(lower.size() - 4, 4, ".cdc") != 0)
         {
             continue;
@@ -550,21 +404,9 @@ constexpr char kUsage[] =
     "  --version            show the version\n"
     "  -h, --help           show this help\n";
 
-// Returns the first 0x104 bytes of a file, which tell a sound archive, a 3DS image and a DSP firmware image apart by
-// their magic, or an empty string for a directory or a file that can't be read.
-std::string ReadHead(const std::string& path)
-{
-    std::string head;
-    if (fs::is_regular_file(path))
-    {
-        std::ifstream f(path, std::ios::binary);
-        head.resize(0x104);
-        f.read(head.data(), static_cast<std::streamsize>(head.size()));
-        head.resize(static_cast<std::size_t>(f.gcount()));
-    }
-
-    return head;
-}
+// The bytes at the start of an input that tell a sound archive, a 3DS image and a DSP firmware image apart by their
+// magic. A DSP1 image has its magic at 0x100.
+constexpr std::size_t kHeadSize = 0x104;
 
 // Returns true if `head` starts a DSP firmware image (DSP1).
 bool IsFirmwareHead(const std::string& head)
@@ -589,12 +431,6 @@ int NoSoundMatches(const Options& o)
     }
 
     return 1;
-}
-
-// Prints the folder a rip went in, as the last line about the input. The macOS droplet opens the folder from it.
-void ReportOutput(const fs::path& out_dir)
-{
-    std::fprintf(stderr, "output: %s\n", fs::absolute(out_dir).lexically_normal().string().c_str());
 }
 
 // Rips a loose sound archive in archive mode. Returns the exit code.
@@ -801,8 +637,8 @@ int RipGameInGameMode(const std::string& input, const rip::GameFiles& game, cons
         return 1;
     }
 
-    const auto archive = csar::SoundArchive::Load(archive_bytes);
-    const Tags common = CommonTags(o, game_name, "game");
+    const auto archive = ntdlib::sar::SoundArchive::Load(archive_bytes, kSarOptions);
+    const Tags common = xsflib::cli::RipTags(o, game_name, "3sf", "game");
     const std::string lib_name = names.Library(game_name);
     std::string error;
     const auto lib = rip::BuildLibrary(game, profile, common, &error);
@@ -835,7 +671,7 @@ int RipGameInGameMode(const std::string& input, const rip::GameFiles& game, cons
     }
 
     fs::create_directories(out_dir);
-    if (!WriteFile(out_dir / lib_name, *lib))
+    if (!WriteFile(out_dir / xsflib::PathFromUtf8(lib_name), *lib))
     {
         std::fprintf(stderr, "error: can't write %s\n", lib_name.c_str());
         return 1;
@@ -843,11 +679,11 @@ int RipGameInGameMode(const std::string& input, const rip::GameFiles& game, cons
 
     std::fprintf(stderr, "wrote %s (%zu bytes)\n", lib_name.c_str(), lib->size());
 
-    const auto build_mini = [&](uint32_t id, const Tags& tags)
+    const auto build_mini = [&](const Job& job, const Tags& tags)
     {
-        return rip::BuildMini(id, lib_name, tags);
+        return rip::BuildMini(SoundId(job), lib_name, tags);
     };
-    const int count = WriteMinis(out_dir.string(), names, jobs, common, build_mini);
+    const int count = xsflib::cli::WriteMinis(out_dir, names, jobs, common, "3sf_sound", build_mini);
     if (count < 0)
     {
         return 1;
@@ -918,176 +754,38 @@ int RipGame(const std::string& input, const fs::path& out_dir, const Options& o,
     return RipGameInGameMode(input, game, *profile, out_dir, o, names);
 }
 
-// Reads the options and inputs. Returns 0 to go on, -1 when there's nothing more to do (after --help or --version), or
-// the exit code.
-int ParseArgs(int argc, char** argv, Options& o, std::vector<std::string>& inputs)
+// Takes 3sfrip's options that the frame doesn't have: --firmware and --var. Returns -1 for another option, 0 when it
+// took the option, or 2 after an error.
+int ParseOption(const std::string& a, const std::function<std::string()>& next, Options& o)
 {
-    std::string only;
-    for (int i = 1; i < argc; i++)
+    if (a == "--firmware")
     {
-        const std::string a = argv[i];
-
-        bool missing_value = false;
-        const auto next = [&]() -> std::string
-        {
-            if (i + 1 >= argc)
-            {
-                missing_value = true;
-                return "";
-            }
-
-            return argv[++i];
-        };
-
-        if (a == "-h" || a == "--help")
-        {
-            std::fputs(kUsage, stdout);
-            return -1;
-        }
-        else if (a == "--version")
-        {
-            std::puts("3sfrip " THREESF_VERSION);
-            return -1;
-        }
-        else if (a == "-o" || a == "--output")
-        {
-            o.out_dir = next();
-        }
-        else if (a == "--list")
-        {
-            o.list = true;
-        }
-        else if (a == "--mode")
-        {
-            o.mode = next();
-        }
-        else if (a == "--firmware")
-        {
-            o.firmware_file = next();
-        }
-        else if (a == "--archive")
-        {
-            o.only_archive = next();
-        }
-        else if (a == "--only")
-        {
-            only = next();
-        }
-        else if (a == "--bgm")
-        {
-            o.bgm = true;
-        }
-        else if (a == "--no-length")
-        {
-            o.lengths = false;
-        }
-        else if (a == "--var")
-        {
-            const std::string v = next();
-            const std::optional<Variables> variables = ParseVariables(v);
-            if (!variables || variables->size() != 1 || v.find_first_of(", \t\r\n") != std::string::npos)
-            {
-                std::fprintf(stderr,
-                             "error: --var takes N=V, with N from 0 to 31 and V from -32768 to 32767, not '%s'\n",
-                             v.c_str());
-                return 2;
-            }
-
-            o.variables[variables->begin()->first] = variables->begin()->second;
-        }
-        else if (a == "--jobs")
-        {
-            const std::string v = next();
-            char* end = nullptr;
-            const long n = std::strtol(v.c_str(), &end, 10);
-            if (v.empty() || *end || n < 1 || n > 1024)
-            {
-                std::fprintf(stderr, "error: --jobs takes a number of threads from 1 to 1024, not '%s'\n", v.c_str());
-                return 2;
-            }
-
-            o.jobs = static_cast<unsigned>(n);
-        }
-        else if (a == "--game")
-        {
-            o.game_name = next();
-        }
-        else if (a == "--artist")
-        {
-            o.artist = next();
-        }
-        else if (a == "--year")
-        {
-            o.year = next();
-        }
-        else if (a == "--copyright")
-        {
-            o.copyright = next();
-        }
-        else if (a == "--by")
-        {
-            o.by = next();
-        }
-        else if (a.size() > 1 && a[0] == '-')
-        {
-            std::fprintf(stderr, "error: unknown option %s (see --help)\n", a.c_str());
-            return 2;
-        }
-        else
-        {
-            inputs.push_back(a);
-        }
-
-        if (missing_value)
-        {
-            std::fprintf(stderr, "error: %s needs a value\n", a.c_str());
-            return 2;
-        }
+        o.firmware_file = next();
+        return 0;
     }
 
-    if (inputs.empty())
+    if (a != "--var")
     {
-        std::fprintf(stderr, "%s", kUsage);
+        return -1;
+    }
+
+    const std::string v = next();
+    const std::optional<xsflib::Assignment> assignment = xsflib::ParseAssignment(v);
+    if (!assignment || assignment->index < 0 || assignment->index > 31 || assignment->value < INT16_MIN ||
+        assignment->value > INT16_MAX)
+    {
+        std::fprintf(stderr, "error: --var takes N=V, with N from 0 to 31 and V from -32768 to 32767, not '%s'\n",
+                     v.c_str());
         return 2;
     }
 
-    if (!o.mode.empty() && o.mode != "game" && o.mode != "archive")
-    {
-        std::fprintf(stderr, "error: --mode is game or archive\n");
-        return 2;
-    }
-
-    // A pattern that doesn't compile is reported now, before anything is written.
-    if (!only.empty())
-    {
-        try
-        {
-            o.only = std::regex(only);
-            o.only_text = only;
-        }
-        catch (const std::regex_error& e)
-        {
-            std::fprintf(stderr, "error: --only: %s\n", e.what());
-            return 2;
-        }
-    }
-
-    // Each analysis emulates 64 MiB of FCRAM, so a 32-bit build, which has 2 GiB of address space, runs at most 8.
-    if (o.jobs == 0)
-    {
-        constexpr unsigned kMaxJobs32 = 8;
-        o.jobs = std::max(1u, std::thread::hardware_concurrency());
-        if constexpr (sizeof(void*) < 8)
-        {
-            o.jobs = std::min(o.jobs, kMaxJobs32);
-        }
-    }
+    o.variables[static_cast<int>(assignment->index)] = static_cast<int16_t>(assignment->value);
 
     return 0;
 }
 
-// Reads the DSP firmware file at `path` into `firmware`. Returns false, after an error message, if it's a folder,
-// can't be read or isn't a DSP1 image.
+// Reads the DSP firmware file at `path` into `firmware`. Returns false, after an error message, if it's a folder, can't
+// be read or isn't a DSP1 image.
 bool ReadFirmwareFile(const std::string& path, std::vector<uint8_t>& firmware)
 {
     std::error_code ec;
@@ -1118,7 +816,7 @@ int TakeFirmwareInputs(std::vector<std::string>& inputs, Options& o)
 {
     const auto is_input = [](const std::string& input)
     {
-        return !IsFirmwareHead(ReadHead(input));
+        return !IsFirmwareHead(xsflib::rip::ReadHead(input, kHeadSize));
     };
     const auto firmware_begin = std::stable_partition(inputs.begin(), inputs.end(), is_input);
     const std::vector<std::string> firmware_files(firmware_begin, inputs.end());
@@ -1152,7 +850,7 @@ int TakeFirmwareInputs(std::vector<std::string>& inputs, Options& o)
 }
 
 // Rips one input. Returns the exit code.
-int RipInput(const std::string& input, const Options& o, std::map<std::string, rip::FileNames>& names)
+int RipInput(const std::string& input, const Options& o, xsflib::cli::FileNameRegistries& names)
 {
     // Other consoles' sound archives, by their magic.
     constexpr std::array<std::pair<const char*, const char*>, 3> kOtherArchives = {{
@@ -1160,7 +858,7 @@ int RipInput(const std::string& input, const Options& o, std::map<std::string, r
         {"RSAR", "a Wii sound archive (RSAR)"},
         {"SDAT", "a DS sound archive (SDAT)"},
     }};
-    const std::string head = ReadHead(input);
+    const std::string head = xsflib::rip::ReadHead(input, kHeadSize);
     for (const auto& [magic, kind] : kOtherArchives)
     {
         if (head.starts_with(magic))
@@ -1170,11 +868,8 @@ int RipInput(const std::string& input, const Options& o, std::map<std::string, r
         }
     }
 
-    // Rips in the same folder share the registry of file names. That keeps them from overwriting each other's files.
-    // Folders whose names differ only in case count as the same. They're one folder on Windows and macOS, where two
-    // inputs named "Game.3ds" and "game.cia" rip into it.
-    const fs::path out_dir = o.out_dir.empty() ? DefaultOutputDir(input) : fs::path(o.out_dir);
-    rip::FileNames& out_names = names[AsciiLower(fs::absolute(out_dir).lexically_normal().string())];
+    const fs::path out_dir = o.out_dir.empty() ? xsflib::rip::DefaultOutputDir(input, "_3sf") : fs::path(o.out_dir);
+    rip::FileNames& out_names = xsflib::cli::NamesIn(names, out_dir, ".3sflib", ".mini3sf");
     if (head.starts_with("CSAR"))
     {
         return RipLooseArchive(input, out_dir, o, out_names);
@@ -1183,28 +878,10 @@ int RipInput(const std::string& input, const Options& o, std::map<std::string, r
     return RipGame(input, out_dir, o, out_names);
 }
 
-int Run(int argc, char** argv)
+// Runs before the first input: reads the firmware that --firmware names and takes the firmware files out of the inputs.
+// Returns 0, or the exit code.
+int BeforeInputs(std::vector<std::string>& inputs, Options& o)
 {
-    Options o;
-    std::vector<std::string> inputs;
-    if (const int parsed = ParseArgs(argc, argv, o, inputs))
-    {
-        return parsed < 0 ? 0 : parsed;
-    }
-
-    // Check all paths before writing anything. Dropped files always exist, so this catches typos and output paths
-    // passed as positional arguments instead of with -o.
-    for (std::size_t i = 0; i < inputs.size(); i++)
-    {
-        std::error_code ec;
-        if (!fs::exists(inputs[i], ec))
-        {
-            std::fprintf(stderr, "error: %s: no such file or folder%s\n", inputs[i].c_str(),
-                         i ? " (-o names the output folder)" : "");
-            return 1;
-        }
-    }
-
     SilenceStdout(); // Teakra reports unmodelled MMIO accesses on stdout
 
     if (!o.firmware_file.empty() && !ReadFirmwareFile(o.firmware_file, o.firmware))
@@ -1212,62 +889,24 @@ int Run(int argc, char** argv)
         return 1;
     }
 
-    if (const int taken = TakeFirmwareInputs(inputs, o))
-    {
-        return taken;
-    }
-
-    // Rip each input once, continuing after errors. Return the highest exit code.
-    std::map<std::string, rip::FileNames> names;
-    std::set<fs::path> done;
-    int result = 0;
-    for (std::size_t i = 0; i < inputs.size(); i++)
-    {
-        if (inputs.size() > 1)
-        {
-            std::fprintf(stderr, "%s%s:\n", i ? "\n" : "", InputPath(inputs[i]).filename().string().c_str());
-        }
-
-        std::error_code ec;
-        const fs::path canonical = fs::weakly_canonical(inputs[i], ec);
-        if (!done.insert(ec ? InputPath(inputs[i]) : canonical).second)
-        {
-            std::fprintf(stderr, "skipped duplicate input\n");
-            continue;
-        }
-
-        try
-        {
-            result = std::max(result, RipInput(inputs[i], o, names));
-        }
-        catch (const std::exception& e)
-        {
-            std::fprintf(stderr, "error: %s: %s\n", inputs[i].c_str(), e.what());
-            result = std::max(result, 1);
-        }
-    }
-
-    return result;
+    return TakeFirmwareInputs(inputs, o);
 }
 
 } // namespace
 
 int main(int argc, char** argv)
 {
-    SetUpConsole();
+    xsflib::cli::RipTool<Options> tool;
+    tool.name = "3sfrip";
+    tool.version = THREESF_VERSION;
+    tool.usage = kUsage;
+    tool.requires_a_value = "needs a value";
+    tool.mode_error = "--mode is game or archive";
+    // Each analysis emulates 64 MiB of FCRAM. A 32-bit build has 2 GiB of address space and runs at most 8.
+    tool.max_jobs_32bit = 8;
+    tool.parse_option = ParseOption;
+    tool.before_inputs = BeforeInputs;
+    tool.rip_input = RipInput;
 
-    // Report unhandled errors, including allocation failures.
-    int result = 1;
-    try
-    {
-        result = Run(argc, argv);
-    }
-    catch (const std::exception& e)
-    {
-        std::fprintf(stderr, "error: %s\n", e.what());
-    }
-
-    KeepConsoleOpen();
-
-    return result;
+    return xsflib::cli::RunRipTool(tool, argc, argv);
 }
