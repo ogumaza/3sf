@@ -12,12 +12,14 @@
 | [zlib](https://zlib.net), Copyright (C) 1995-2024 Jean-loup Gailly and Mark Adler | zlib | The PSF container. The system's copy is used, or v1.3.1 is downloaded when configuring. |
 | [libFLAC](https://xiph.org/flac/), Copyright the Xiph.Org Foundation | BSD-3-Clause | FLAC output in `3sfplay`. The system's copy is used, or 1.5.0 is downloaded when configuring. |
 | [foobar2000 SDK](https://www.foobar2000.org/SDK), Copyright Peter Pawlowski | BSD-style (the SDK's `sdk-license.txt`) | Only for `plugins/foobar2000`. Not included here; it's supplied when building the plugin. |
+| [XMPlay plugin SDK](https://www.un4seen.com/xmplay.html), from Un4seen Developments | None stated | Only for `plugins/xmplay`. Not included here. It's supplied when building the plugin. CI downloads it from un4seen.com. The plugin uses only the SDK's declarations of XMPlay's interface. |
 
 Binary distributions must include the MIT notices of 3SF, xsflib, ntdlib and Teakra, and the libFLAC
 notice when libFLAC is linked in. Shipping `LICENSE` and this file does that: the licence texts are
 at the end. zlib's licence, and those of the foobar2000 SDK and its pfc library, ask for no notice
 in binaries. Catch2's licence asks for its text in copies of the source code, which this file
 carries too. seqlib's checks go only into tests.
+No code from the XMPlay plugin SDK goes into the XMPlay plugin.
 
 ## Reference material (no code taken)
 

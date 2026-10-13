@@ -25,6 +25,7 @@ sound archive, with a DSP firmware file.
 | `3sfrip <input>...` | Rips each input into a `.3sflib` and one `.mini3sf` per sound, in a folder next to the input that's named after it with `_3sf` added (`-o DIR` puts them in `DIR`). An input is a decrypted `.3ds`/`.cci`, `.cxi` or `.cia` (encrypted images are rejected), an extracted game directory (`exefs/code.bin`, `exefs/exheader.bin`, `romfs/`), or a `.bcsar`. Games with a driver profile rip in game mode, everything else in archive mode (`--mode` chooses). A `.bcsar` needs a DSP firmware file, any game's `dspaudio.cdc` or a console's `dspfirm.cdc`: give it along with the archive, put it in the archive's folder, or name it with `--firmware`. `--list` shows the sound archives, `--bgm` picks the music (the sounds whose labels mark them as BGM, jingles or fanfares, and the sequences with 3 tracks or more and 50 notes or more), `--only REGEX` picks sounds by their labels, and `--game`/`--artist`/`--year`/`--copyright`/`--by` set tags. Some sequences play nothing until the game sets one of their variables: in archive mode, `--var N=V` sets variable N (0 to 15 the sound's player variables, 16 to 31 the global ones) to V before each sequence starts, and writes it in the rip's `3sf_var` tag. Sounds that make no sound are listed and skipped: those at a volume of 0 in the archive, and the sequences that the length analysis finds never sound. |
 | `3sfplay <file.mini3sf>...` | Renders each sound to a WAV file next to it, at the native 32728 Hz, with the tagged length, fade and volume. `-o FILE` names the output file for a single input, as WAV or FLAC by its extension. `--length` and `--fade` override the tags, `--default` gives the length of a file without one, and `--info` shows the tags. |
 | `plugins/foobar2000` | foobar2000 input component: `foo_input_3sf.dll` for Windows, built with clang-cl, and `foo_input_3sf.component` for macOS. Both are built with the foobar2000 SDK; see its [README](plugins/foobar2000/README.md). |
+| `plugins/xmplay` | XMPlay input plugin: `xmp-3sf.dll`, a 32-bit DLL for XMPlay on Windows, built with clang-cl and the XMPlay plugin SDK. See its [README](plugins/xmplay/README.md). |
 
 Both tools accept multiple inputs and continue if one fails. A nonexistent input path stops the
 command before it writes any files. For example,
@@ -33,8 +34,12 @@ command before it writes any files. For example,
 
 ### Downloads
 
-The Releases page has `3sfrip` and `3sfplay` for 64-bit Windows, and the foobar2000 component
-for 64-bit and 32-bit foobar2000 on Windows. On macOS, build 3SF from source (see "Building").
+The Releases page has `3sfrip` and `3sfplay` for 64-bit Windows, the foobar2000 component for
+64-bit and 32-bit foobar2000 on Windows, and the XMPlay plugin. On macOS, build 3SF from source
+(see "Building").
+
+To install the XMPlay plugin, unzip `xmp-3sf-X.Y.Z.zip` and put `xmp-3sf.dll` in XMPlay's folder,
+or in a folder inside it. Then restart XMPlay.
 
 ### Drag and drop
 
@@ -65,8 +70,9 @@ Python 3 is only needed for the scripts in `driver/`.
 - **macOS on Apple Silicon:** the Xcode command line tools (`xcode-select --install`) and CMake
   (`brew install cmake`). `brew install flac pkg-config` saves building libFLAC.
 
-Linux, Intel Macs, MSVC and 32-bit Windows aren't supported. The one exception is the 32-bit
-foobar2000 component. Build it with clang-cl, configured with `-A Win32 -T ClangCL`.
+Linux, Intel Macs, MSVC and 32-bit Windows aren't supported. The exceptions are the 32-bit
+foobar2000 component and the XMPlay plugin. Build them with clang-cl, configured with
+`-A Win32 -T ClangCL`.
 
 ```sh
 cmake -S . -B build
@@ -80,8 +86,8 @@ presets need CMake 3.23 or later. They don't select clang-cl. On Windows, use th
 above.
 
 CI (`.github/workflows/ci.yml`) builds 3SF and runs `ctest` on every push to `main` that changes
-more than documentation: on Windows with clang-cl (x64, and x86 for 32-bit foobar2000) and on
-macOS with Apple Clang (Apple Silicon).
+more than documentation: on Windows with clang-cl (x64, and x86 for 32-bit foobar2000 and XMPlay)
+and on macOS with Apple Clang (Apple Silicon).
 
 `externals/teakra` is [Teakra](https://github.com/wwylele/teakra) at upstream commit 3d697a1 with
 3SF's changes, excluding upstream's hardware tests, Git LFS setup and CI. Compare against that
@@ -101,8 +107,8 @@ than interpreting it. On Apple Silicon and in 32-bit builds Teakra interprets th
 Set `TEAKRA_JIT=0` in the environment to disable the JIT. A test runs random programs through
 both the JIT and interpreter and compares the results (`tests/teakra_jit_test.cpp`).
 
-During playback, the foobar2000 component renders ahead on a separate thread, as fast as the
-CPU allows, and buffers up to 10 minutes and 10 seconds of audio
+During playback, the foobar2000 component and the XMPlay plugin render ahead on a separate
+thread as fast as the CPU allows. They buffer up to 10 minutes and 10 seconds of audio
 (`externals/xsflib/src/player/render_ahead.cpp`). Seeking within the buffer is instant. Seeking further
 ahead waits for rendering to reach the requested position. Longer tracks also use save
 states. Every 2 seconds, the player takes a snapshot of the whole emulation
@@ -130,6 +136,7 @@ src/cli/             3sfrip, 3sfplay
 src/nnsnd, nwsnd/    the nw::snd/nn::snd model (archive mode)
 src/common/          small helpers shared by the rest (quiet stdout, how 3SF reads sound archives)
 plugins/foobar2000/  foobar2000 component
+plugins/xmplay/      XMPlay plugin
 tests/               ctest suites
 ```
 

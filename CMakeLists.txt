@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: MIT
 
 cmake_minimum_required(VERSION 3.20)
-# Shared version for 3sfrip, 3sfplay, the foobar2000 component, Windows file properties and macOS bundles
-# (THREESF_VERSION_ARGS below). For a release, update it here and add notes in docs/release-notes/.
-project(threesf VERSION 1.2.1 LANGUAGES CXX)
+# Shared version for 3sfrip, 3sfplay, the foobar2000 component, the XMPlay plugin, Windows file properties and macOS
+# bundles (THREESF_VERSION_ARGS below). For a release, update it here and add notes in docs/release-notes/.
+project(threesf VERSION 1.3.0 LANGUAGES CXX)
 
 # xsflib is a library for players and rippers of the PSF family. It's a submodule. Its XsflibProject.cmake sets what a
 # project built on it starts with: C++20, a release build by default, the static C runtime, the options that keep the
@@ -116,8 +116,8 @@ add_library(threesf_horizon STATIC
 target_link_libraries(threesf_horizon PUBLIC threesf_arm threesf_dsp)
 target_compile_options(threesf_horizon PRIVATE ${THREESF_WARNINGS})
 
-# 3SF core: the file format and the player (the emulated process). Portable, with no
-# platform audio or UI; used by the CLI tools and the foobar2000 plugin.
+# 3SF core: the file format and the player (the emulated process). It's portable, with no platform audio or UI. The CLI
+# tools, the foobar2000 component and the XMPlay plugin use it.
 add_library(threesf_core STATIC
     src/threesf/archive_player.cpp
     src/threesf/archive_player.h
@@ -168,6 +168,12 @@ endforeach()
 set(FOOBAR2000_SDK_DIR "" CACHE PATH "foobar2000 SDK (builds the foo_input_3sf component when set)")
 if (FOOBAR2000_SDK_DIR)
     add_subdirectory(plugins/foobar2000)
+endif()
+
+# XMPlay plugin (32-bit Windows with clang-cl): cmake -A Win32 -T ClangCL -DXMPLAY_SDK_DIR=<unpacked SDK> ...
+set(XMPLAY_SDK_DIR "" CACHE PATH "XMPlay plugin SDK (builds the xmp-3sf plugin when set)")
+if (XMPLAY_SDK_DIR)
+    add_subdirectory(plugins/xmplay)
 endif()
 
 enable_testing()

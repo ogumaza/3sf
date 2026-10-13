@@ -2,7 +2,7 @@
 
 // 3SF player core: loads a .3sf/.mini3sf set and produces its audio, in game mode (the game's sound code on an emulated
 // 3DS) or archive mode (3SF's model of the SDK sound player). Both run the game's DSP firmware in Teakra. Portable C++
-// with no platform audio or UI; used by the CLI renderer and the foobar2000 plugin.
+// with no platform audio or UI. The CLI renderer, the foobar2000 component and the XMPlay plugin use it.
 
 #pragma once
 

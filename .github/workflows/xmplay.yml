@@ -1,0 +1,25 @@
+# SPDX-License-Identifier: MIT
+
+# Builds the XMPlay plugin (xmp-3sf), a 32-bit DLL for XMPlay on Windows, with clang-cl. Uploads it with the licences
+# as the artifact xmp-3sf. Runs only when started by hand (Actions > XMPlay plugin > Run workflow). It uses no Actions
+# minutes otherwise. The XMPlay plugin SDK is downloaded from un4seen.com at build time
+# (externals/xsflib/ci/xmplay-sdk). It isn't stored in this repository.
+name: XMPlay plugin
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - uses: ./externals/xsflib/ci/xmplay-windows
+        with:
+          plugin: xmp-3sf
