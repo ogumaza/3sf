@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: MIT
 
 # Builds the foobar2000 component (foo_input_3sf) for 32-bit and 64-bit foobar2000 on Windows, with clang-cl, and for
-# foobar2000 on macOS, and uploads one .fb2k-component with all three: the 32-bit DLL at the top level, the 64-bit
-# DLL in x64/ and the Mac bundle (Apple Silicon and Intel) in mac/. Runs only when started by hand (Actions >
-# foobar2000 component > Run workflow), so it uses no Actions minutes otherwise. The foobar2000 SDK is downloaded from
-# foobar2000.org at build time (externals/xsflib/ci/foobar2000-sdk); it isn't stored in this repository.
+# foobar2000 on macOS. Uploads one .fb2k-component with all three: the 32-bit DLL at the top level, the 64-bit DLL in
+# x64/ and the Mac bundle (Apple Silicon) in mac/. Runs only when started by hand (Actions > foobar2000 component > Run
+# workflow). It uses no Actions minutes otherwise. The foobar2000 SDK is downloaded from foobar2000.org at build time
+# (externals/xsflib/ci/foobar2000-sdk); it isn't stored in this repository.
 name: foobar2000 component
 
 on:

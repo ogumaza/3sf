@@ -164,7 +164,7 @@ foreach (tool 3sfrip 3sfplay)
     xsflib_add_droplet(${tool} VERSION ${threesf_VERSION})
 endforeach()
 
-# foobar2000 component (Windows with clang-cl or MSVC, or macOS): cmake -DFOOBAR2000_SDK_DIR=<unpacked SDK> ...
+# foobar2000 component (Windows with clang-cl, or macOS): cmake -DFOOBAR2000_SDK_DIR=<unpacked SDK> ...
 set(FOOBAR2000_SDK_DIR "" CACHE PATH "foobar2000 SDK (builds the foo_input_3sf component when set)")
 if (FOOBAR2000_SDK_DIR)
     add_subdirectory(plugins/foobar2000)

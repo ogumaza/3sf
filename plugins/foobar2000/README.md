@@ -5,14 +5,12 @@ core as `3sfplay`, which runs the game's DSP firmware in Teakra, driven either b
 sound code on an emulated ARM11 (game mode) or by 3SF's model of the SDK sound player (archive
 mode).
 
-**Status:** it builds with clang-cl (or MSVC) for 32-bit and 64-bit foobar2000 on Windows, and
-with Apple Clang for foobar2000 on macOS, as one bundle for Apple Silicon and Intel. CI builds it
-on every push to `main` that changes more than documentation: in the Windows jobs (clang-cl for
-x64 and x86, and MSVC for x64), and for Apple Silicon only in the macOS ARM64 job. The bundle with
-both Mac architectures comes from the manual workflow (see "Building"). Releases include a
-package for 64-bit and 32-bit foobar2000 on Windows (`.github/workflows/release.yml`). `ctest`
-covers the player core. Both clang-cl and MSVC builds play in foobar2000 on Windows; see
-"Performance" for details.
+**Status:** the component builds with clang-cl for 32-bit and 64-bit foobar2000 on Windows, and
+with Apple Clang for foobar2000 on Apple Silicon Macs. CI builds it on every push to `main` that
+changes more than documentation: in the Windows x64 and x86 jobs with clang-cl, and in the macOS
+ARM64 job. Releases include a package for 64-bit and 32-bit foobar2000 on Windows
+(`.github/workflows/release.yml`). `ctest` covers the player core. See "Performance" for how fast
+each build plays.
 
 ## Features
 
@@ -63,23 +61,22 @@ the zip. For 32-bit foobar2000, configure with `-A Win32 -T ClangCL` and put tha
 level of the zip. With the 64-bit DLL in `pkg\x64`, Windows' own `tar` makes the zip:
 `tar -a -c -f foo_input_3sf.zip -C pkg x64` (add `foo_input_3sf.dll` after `x64` for a 32-bit DLL
 in `pkg` itself), then rename it to `foo_input_3sf.fb2k-component`. Windows PowerShell's
-`Compress-Archive` writes the folder's name with a backslash, which the zip format doesn't allow,
-and foobar2000 didn't recognize a package made that way. Omitting `-T ClangCL` selects MSVC,
-which produces the same audio but runs more slowly. MSVC builds made with Visual Studio 2022
-versions before 17.7 are slower still.
+`Compress-Archive` writes the folder's name with a backslash. The zip format doesn't allow that.
+foobar2000 didn't recognize a package made that way. Omitting `-T ClangCL` selects MSVC. MSVC
+builds aren't supported.
 
 **On macOS:** you need the Xcode command line tools (`xcode-select --install`), CMake 3.20 or
 later, and the foobar2000 SDK unpacked somewhere (macOS's `tar -xf SDK-<date>.7z` unpacks it).
 
 ```
 cmake -S . -B build-fb2k -DCMAKE_BUILD_TYPE=Release -DFOOBAR2000_SDK_DIR=/path/to/SDK \
-  "-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64" -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
+  -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
 cmake --build build-fb2k --target foo_input_3sf
 ```
 
 This produces `build-fb2k/plugins/foobar2000/foo_input_3sf.component`, a bundle for Apple
-Silicon and Intel Macs that runs on macOS 11 or later, the same minimum as the SDK's
-projects. Without the two `CMAKE_OSX_` options, the bundle is for the Mac that built it only. For
+Silicon Macs that runs on macOS 11 or later. That's the same minimum as the SDK's projects.
+Without the two `CMAKE_OSX_` options, the bundle is for the Mac that built it only. For
 a `.fb2k-component`, put the bundle in a `mac` folder inside the zip. The bundle is signed ad hoc,
 not with a Developer ID, and it isn't notarized.
 
