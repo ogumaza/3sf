@@ -45,6 +45,12 @@ public:
         return jit ? jit->Instructions() : 0;
     }
 
+    // Upstream Teakra's idling: the DSP idles even while an interrupt is signalled (see
+    // UserConfig::upstream_late_idle_interrupts).
+    void SetUpstreamLateIdleInterrupts(bool on) {
+        upstream_late_idle_interrupts = on;
+    }
+
     void PushPC() {
         u16 l = (u16)(regs.pc & 0xFFFF);
         u16 h = (u16)(regs.pc >> 16);
@@ -108,7 +114,9 @@ public:
             // The DSP goes idle in a branch to itself, and a component can signal an interrupt on
             // that branch's tick. Skipping ahead would then leave the interrupt waiting until the
             // next event or the end of the run, so the DSP only idles while none is signalled.
-            if (idle && !any_interrupt_pending.load(std::memory_order_relaxed)) {
+            // Upstream Teakra idles anyway.
+            if (idle && (upstream_late_idle_interrupts ||
+                         !any_interrupt_pending.load(std::memory_order_relaxed))) {
                 u64 skipped = core_timing.Skip(cycles - i - 1);
                 i += skipped;
 
@@ -3129,6 +3137,7 @@ private:
     std::atomic<u32> vinterrupt_address{0};
 
     bool idle = false;
+    bool upstream_late_idle_interrupts = false;
 
     // Translated code, where the host runs it (nullptr otherwise).
     std::unique_ptr<Jit> jit;

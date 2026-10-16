@@ -16,10 +16,10 @@
 namespace threesf::horizon
 {
 
-System::System(const ProcessImage& image, const KernelConfig& config)
+System::System(const ProcessImage& image, const KernelConfig& config, const dsp::UpstreamTeakra& upstream)
 {
     fcram_ = std::make_unique<Fcram>(config.app_memory * 2);
-    dsp_ = std::make_unique<dsp::TeakraDsp>(*fcram_);
+    dsp_ = std::make_unique<dsp::TeakraDsp>(*fcram_, upstream);
 
     // Merge the pages the memory segments touch into contiguous regions.
     constexpr uint32_t kPage = arm::Memory::kPageSize;

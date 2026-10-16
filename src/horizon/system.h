@@ -39,7 +39,9 @@ public:
     // Snapshot of the system between kernel runs, excluding output_. Can only be restored to this system.
     struct Snapshot;
 
-    System(const ProcessImage& image, const KernelConfig& config);
+    // `upstream` gives the DSP upstream Teakra's behaviour where 3SF's copy departs from it, for comparisons with an
+    // emulator built on upstream Teakra.
+    System(const ProcessImage& image, const KernelConfig& config, const dsp::UpstreamTeakra& upstream = {});
     ~System();
 
     Kernel& GetKernel()

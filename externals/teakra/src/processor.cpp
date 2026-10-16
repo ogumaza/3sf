@@ -53,6 +53,10 @@ u64 Processor::JitInstructions() const {
     return impl->interpreter.JitInstructions();
 }
 
+void Processor::SetUpstreamLateIdleInterrupts(bool on) {
+    impl->interpreter.SetUpstreamLateIdleInterrupts(on);
+}
+
 void Processor::Serialize(StateWriter& ar) {
     impl->Serialize(ar);
 }

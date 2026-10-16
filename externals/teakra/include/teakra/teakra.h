@@ -24,6 +24,17 @@ struct UserConfig {
     // DSP memory. By default set to nullptr. If it stays nullptr then Teakra will create its own
     // DSP memory and retain ownership of it. Otherwise, the user will own it.
     std::uint8_t* dsp_memory = nullptr;
+
+    // Upstream Teakra's behaviour in two places where 3SF's copy departs from it, for comparing the
+    // output with an emulator built on upstream Teakra. Both are off by default.
+    //
+    // An audio output slot for which the DSP wrote nothing reaches the audio callback as two
+    // zeros. 3SF's copy leaves the slot out.
+    bool upstream_underrun_zeros = false;
+    // The DSP idles in a branch to itself even while an interrupt is signalled. It then takes the
+    // interrupt when the idle skip ends: at the next event of a component, or at the end of the
+    // run. 3SF's copy takes it at once.
+    bool upstream_late_idle_interrupts = false;
 };
 
 static constexpr std::uint32_t DspMemorySize = 0x80000;

@@ -80,6 +80,12 @@ public:
         interrupt_handler = std::move(handler);
     }
 
+    // Upstream Teakra's underruns: an underrun slot reaches the audio callback as zeros (see
+    // UserConfig::upstream_underrun_zeros).
+    void SetUpstreamUnderrunZeros(bool on) {
+        upstream_underrun_zeros = on;
+    }
+
     template <typename Archive>
     void Serialize(Archive& ar) {
         ar(transmit_clock_config, transmit_period, transmit_timer, transmit_enable, transmit_empty,
@@ -96,6 +102,7 @@ private:
     bool transmit_empty = true;
     bool transmit_full = false;
     std::queue<u16> transmit_queue;
+    bool upstream_underrun_zeros = false;
     std::function<void(std::array<std::int16_t, 2>)> audio_callback;
     std::function<void()> interrupt_handler;
 

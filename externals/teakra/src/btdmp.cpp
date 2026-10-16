@@ -43,8 +43,9 @@ void Btdmp::Tick() {
             }
             // A slot with no data at all is an underrun: the DSP produced nothing for it. It
             // isn't passed to the host, which then gets exactly the samples the DSP produced
-            // (a zero inserted here is an audible click). The DSP sees no difference.
-            if (audio_callback && missing < 2) {
+            // (a zero inserted here is an audible click). The DSP sees no difference. Upstream
+            // Teakra passes it on as zeros (UserConfig::upstream_underrun_zeros).
+            if (audio_callback && (missing < 2 || upstream_underrun_zeros)) {
                 audio_callback(sample);
             }
         }
@@ -95,7 +96,7 @@ void Btdmp::Skip(u64 ticks) {
             }
         }
         // Underrun slots aren't passed to the host (see Tick).
-        if (audio_callback && missing < 2) {
+        if (audio_callback && (missing < 2 || upstream_underrun_zeros)) {
             audio_callback(sample);
         }
     }

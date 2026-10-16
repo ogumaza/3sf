@@ -239,9 +239,20 @@ std::vector<uint8_t> TakeFromRing(uint8_t* ram, const PipeEntry& entry, Pipe pip
     return data;
 }
 
+// Teakra's settings: upstream Teakra's behaviour where the caller asks for it. Teakra makes the DSP's memory itself.
+Teakra::UserConfig TeakraConfig(const UpstreamTeakra& upstream)
+{
+    Teakra::UserConfig config;
+    config.upstream_underrun_zeros = upstream.underrun_zeros;
+    config.upstream_late_idle_interrupts = upstream.late_idle_interrupts;
+
+    return config;
+}
+
 } // namespace
 
-TeakraDsp::TeakraDsp(Fcram& fcram) : teakra_(std::make_unique<Teakra::Teakra>(Teakra::UserConfig{}))
+TeakraDsp::TeakraDsp(Fcram& fcram, const UpstreamTeakra& upstream)
+    : teakra_(std::make_unique<Teakra::Teakra>(TeakraConfig(upstream)))
 {
     // The AHBM bus reaches FCRAM by physical address. An access that doesn't fit inside it reads 0 and writes nothing.
     Teakra::AHBMCallback bus;

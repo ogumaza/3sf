@@ -36,6 +36,14 @@ class Teakra;
 namespace threesf::dsp
 {
 
+// Upstream Teakra's behaviour in the places where 3SF's copy departs from it (Teakra::UserConfig), for comparing 3SF's
+// output with an emulator built on upstream Teakra. The players leave both off.
+struct UpstreamTeakra
+{
+    bool underrun_zeros = false;       // an output slot the DSP wrote nothing for reaches the sink as zeros
+    bool late_idle_interrupts = false; // the DSP idles while an interrupt is signalled, and takes it late
+};
+
 class TeakraDsp
 {
 public:
@@ -56,7 +64,7 @@ public:
         std::optional<uint16_t> deferred_notification;
     };
 
-    explicit TeakraDsp(Fcram& fcram); // `fcram` outlives the object
+    explicit TeakraDsp(Fcram& fcram, const UpstreamTeakra& upstream = {}); // `fcram` outlives the object
     ~TeakraDsp();
 
     // Waits for data in reply register `reg` (0 to 2) and reads it, which empties the register.

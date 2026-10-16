@@ -89,7 +89,12 @@ struct Teakra::Impl {
     }
 };
 
-Teakra::Teakra(const UserConfig& config) : impl(std::make_unique<Impl>(config.dsp_memory)) {}
+Teakra::Teakra(const UserConfig& config) : impl(std::make_unique<Impl>(config.dsp_memory)) {
+    for (Btdmp& b : impl->btdmp) {
+        b.SetUpstreamUnderrunZeros(config.upstream_underrun_zeros);
+    }
+    impl->processor.SetUpstreamLateIdleInterrupts(config.upstream_late_idle_interrupts);
+}
 Teakra::~Teakra() = default;
 
 void Teakra::Reset() {

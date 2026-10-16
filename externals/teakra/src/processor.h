@@ -26,6 +26,9 @@ public:
     // The instructions that translated code has run.
     u64 JitInstructions() const;
 
+    // Upstream Teakra's idling (see UserConfig::upstream_late_idle_interrupts).
+    void SetUpstreamLateIdleInterrupts(bool on);
+
     // Saves or loads the registers and the interpreter's state (see state.h).
     void Serialize(StateWriter& ar);
     void Serialize(StateReader& ar);
