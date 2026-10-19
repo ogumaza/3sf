@@ -217,7 +217,8 @@ void SetWord(TeakraDsp& dsp, uint32_t word, uint16_t value)
     xsflib::StoreLe16(dsp.Ram() + DataOffset(word), value);
 }
 
-// Returns the bytes of entry `number` of kNotifyFirmware's pipe table.
+// Returns the bytes of entry `number` of the pipe table at kPipeTable, where kNotifyFirmware and kDebugPipeFirmware put
+// theirs.
 uint8_t* Entry(TeakraDsp& dsp, unsigned number)
 {
     return dsp.Ram() + DataOffset(kPipeTable) + number * 10;
@@ -245,15 +246,21 @@ uint16_t WritePosition(TeakraDsp& dsp, unsigned number)
     return xsflib::LoadLe16(Entry(dsp, number) + 6);
 }
 
-// Starts kNotifyFirmware and numbers the entries of its pipe table, as a real firmware would. The table is all zeros
-// otherwise, since the start clears DSP RAM.
-void StartNotifyFirmware(TeakraDsp& dsp)
+// Numbers the entries of a started firmware's pipe table, as a real firmware would. The table is all zeros otherwise,
+// since the start clears DSP RAM.
+void NumberEntries(TeakraDsp& dsp)
 {
-    dsp.LoadComponent(MakeImage(kNotifyFirmware));
     for (unsigned number = 0; number < 32; number++)
     {
         Entry(dsp, number)[8] = static_cast<uint8_t>(number);
     }
+}
+
+// Starts kNotifyFirmware and numbers the entries of its pipe table.
+void StartNotifyFirmware(TeakraDsp& dsp)
+{
+    dsp.LoadComponent(MakeImage(kNotifyFirmware));
+    NumberEntries(dsp);
 }
 
 // Makes kNotifyFirmware write `value` to reply register `reg` (none if `reg` is negative) and then set `semaphore` in
@@ -607,10 +614,7 @@ void TestDebugPipeWhileCommandWaits()
     Fcram fcram(1 << 20);
     TeakraDsp dsp(fcram);
     dsp.LoadComponent(MakeImage(kDebugPipeFirmware));
-    for (unsigned number = 0; number < 32; number++)
-    {
-        Entry(dsp, number)[8] = static_cast<uint8_t>(number);
-    }
+    NumberEntries(dsp);
 
     for (uint32_t word = kFirstCommandWord; word < kFirstCommandWord + 3; word++)
     {

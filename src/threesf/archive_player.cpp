@@ -80,12 +80,12 @@ struct Traits
             return "the DSP firmware (" + d.firmware_path + ") is missing";
         }
 
-        if (!set.sound || (*set.sound >> 24) != ntdlib::sar::kSoundItem)
+        if (!set.sound || ntdlib::sar::ItemType(*set.sound) != ntdlib::sar::kSoundItem)
         {
             return "no sequence selected";
         }
 
-        found.index = *set.sound & 0x00FFFFFFu;
+        found.index = ntdlib::sar::ItemNumber(*set.sound);
 
         return std::nullopt;
     }

@@ -64,21 +64,12 @@ bool DspLink::Initialize(std::span<const uint8_t> component)
     audio_irq_ = false;
     dsp_->WritePipe(dsp::Pipe::kAudio, kInitializeCommand);
     dsp_->SetSemaphore(kInitSemaphore);
-    uint64_t waited = 0;
-    while (!audio_irq_)
-    {
-        if (waited > kMaxInitWaitCycles)
-        {
-            AfterDspRuns();
-            return false;
-        }
-
-        dsp_->Run(1024);
-        waited += 1024;
-    }
-
+    const bool answered = RunUntilAudioInterrupt(kMaxInitWaitCycles, 1024);
     AfterDspRuns();
-    audio_irq_ = false;
+    if (!answered)
+    {
+        return false;
+    }
 
     const auto count_bytes = dsp_->ReadPipe(dsp::Pipe::kAudio, 2);
     const uint16_t count = xsflib::LoadLe16(count_bytes.data());
@@ -123,21 +114,12 @@ bool DspLink::Initialize(std::span<const uint8_t> component)
 bool DspLink::WaitForFrame()
 {
     BeforeDspRuns();
-    uint64_t waited = 0;
-    while (!audio_irq_)
-    {
-        if (waited >= kMaxFrameWaitCycles)
-        {
-            AfterDspRuns();
-            return false;
-        }
-
-        dsp_->Run(256);
-        waited += 256;
-    }
-
+    const bool ended = RunUntilAudioInterrupt(kMaxFrameWaitCycles, 256);
     AfterDspRuns();
-    audio_irq_ = false;
+    if (!ended)
+    {
+        return false;
+    }
 
     // nn::snd 0x18b40c: the counter in the region not being written tells the DSP's progress.
     const uint16_t counter = LoadWord(kFrameCounter, (~frame_) & 1);
@@ -208,6 +190,22 @@ uint16_t DspLink::LoadWord(int structure, int region) const
 void DspLink::StoreWord(int structure, int region, uint16_t value)
 {
     xsflib::StoreLe16(Address(structure, region), value);
+}
+
+bool DspLink::RunUntilAudioInterrupt(uint64_t limit, uint64_t slice)
+{
+    for (uint64_t waited = 0; !audio_irq_; waited += slice)
+    {
+        if (waited >= limit)
+        {
+            return false;
+        }
+
+        dsp_->Run(slice);
+    }
+
+    audio_irq_ = false;
+    return true;
 }
 
 // The DSP reads the ARM11's parameters, and writes its own results, while it runs: the parameters go back to DSP RAM

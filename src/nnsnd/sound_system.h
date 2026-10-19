@@ -22,7 +22,7 @@ namespace threesf::nnsnd
 struct DspDefaults
 {
     uint16_t clipping_mode = 1;
-    uint16_t output_format = 1; // stereo (system setting)
+    uint16_t output_mode = 1; // stereo (system setting)
 };
 
 // The owner of a voice: the place of the nw::snd voice that holds it, and whether that voice is stereo. AllocVoice

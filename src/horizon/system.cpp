@@ -1,136 +1,180 @@
 // SPDX-License-Identifier: MIT
 
-// Emulated application process (see system.h).
+// The emulated process (see system.h).
 
 #include "horizon/system.h"
 
 #include <algorithm>
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
-#include <utility>
 #include <vector>
 
+#include "arm/cpu.h"
+#include "dsp/dsp.h"
+#include "dsp/fcram.h"
+#include "dsp/teakra_dsp.h"
+#include "horizon/kernel.h"
 #include "horizon/services.h"
 
 namespace threesf::horizon
 {
-
-System::System(const ProcessImage& image, const KernelConfig& config, const dsp::UpstreamTeakra& upstream)
+namespace
 {
-    fcram_ = std::make_unique<Fcram>(config.app_memory * 2);
-    dsp_ = std::make_unique<dsp::TeakraDsp>(*fcram_, upstream);
 
-    // Merge the pages the memory segments touch into contiguous regions.
-    constexpr uint32_t kPage = arm::Memory::kPageSize;
-    std::vector<std::pair<uint32_t, uint32_t>> ranges; // [first page, end page)
-    for (const auto& seg : image.memory)
+// The main thread's stack ends here, and DSP RAM starts here.
+constexpr uint32_t kStackTop = 0x10000000;
+constexpr uint32_t kDspRam = 0x1ff00000;
+
+constexpr uint64_t kPageSize = arm::Memory::kPageSize;
+
+// A run of pages, [first, end), in page numbers.
+struct PageRange
+{
+    uint64_t first;
+    uint64_t end;
+};
+
+// The pages of the segments that hold data, sorted, with ranges that overlap or touch merged.
+std::vector<PageRange> ProgramPages(const ProcessImage& image)
+{
+    std::vector<PageRange> ranges;
+    for (const ProcessImage::Segment& segment : image.memory)
     {
-        if (seg.data.empty())
+        if (!segment.data.empty())
         {
-            continue;
+            const uint64_t end = uint64_t{segment.address} + segment.data.size();
+            ranges.push_back({segment.address / kPageSize, (end + kPageSize - 1) / kPageSize});
         }
-
-        const uint64_t end = static_cast<uint64_t>(seg.address) + seg.data.size();
-        ranges.push_back({seg.address / kPage, static_cast<uint32_t>((end + kPage - 1) / kPage)});
     }
 
-    std::sort(ranges.begin(), ranges.end());
-    std::vector<std::pair<uint32_t, uint32_t>> merged;
-    for (const auto& r : ranges)
+    std::sort(ranges.begin(), ranges.end(), [](const PageRange& a, const PageRange& b)
+              { return a.first != b.first ? a.first < b.first : a.end < b.end; });
+    std::vector<PageRange> merged;
+    for (const PageRange& range : ranges)
     {
-        if (!merged.empty() && r.first <= merged.back().second)
+        if (!merged.empty() && range.first <= merged.back().end)
         {
-            merged.back().second = std::max(merged.back().second, r.second);
+            merged.back().end = std::max(merged.back().end, range.end);
         }
         else
         {
-            merged.push_back(r);
+            merged.push_back(range);
         }
     }
 
-    // The program's code, data and bss are the region that holds the entry point. A rip's driver sits apart from it.
-    KernelConfig kernel_config = config;
-    for (const auto& [first, last] : merged)
+    return merged;
+}
+
+// Where the program ends: the end of the range of pages that holds the entry point. A rip's driver sits apart from the
+// program and doesn't count. With the entry point outside every range, the config's value stays.
+uint32_t ProgramEnd(const std::vector<PageRange>& ranges, uint32_t entry, uint32_t otherwise)
+{
+    const uint64_t page = entry / kPageSize;
+    for (const PageRange& range : ranges)
     {
-        if (image.entry / kPage >= first && image.entry / kPage < last)
+        if (page >= range.first && page < range.end)
         {
-            kernel_config.program_end = last * kPage;
+            return static_cast<uint32_t>(range.end * kPageSize);
         }
     }
 
-    kernel_ = std::make_unique<Kernel>(kernel_config);
-    Kernel& k = *kernel_;
-    k.SetFcram(fcram_->At(kFcramBase), static_cast<uint32_t>(fcram_->Size()));
+    return otherwise;
+}
 
-    // Map the regions, then copy the segments in.
-    for (const auto& [first, last] : merged)
+KernelConfig WithProgramEnd(KernelConfig config, uint32_t program_end)
+{
+    config.program_end = program_end;
+    return config;
+}
+
+} // namespace
+
+struct System::Snapshot
+{
+    Kernel::Snapshot kernel;
+    Services::State services;
+    Fcram::Snapshot fcram;
+    dsp::TeakraDsp::Snapshot dsp;
+};
+
+// The order of the steps fixes the mappings, the handles and the results of overlapping segments. A region mapped
+// later replaces any mapping of the same pages.
+System::System(const ProcessImage& image, const KernelConfig& config, const dsp::UpstreamTeakra& upstream)
+    : fcram_(std::size_t{config.app_memory * 2}), dsp_(fcram_, upstream)
+{
+    const std::vector<PageRange> program = ProgramPages(image);
+    kernel_ = std::make_unique<Kernel>(WithProgramEnd(config, ProgramEnd(program, image.entry, config.program_end)));
+    Kernel& kernel = *kernel_;
+    arm::Memory& memory = kernel.Memory();
+    kernel.SetLinearMemory(fcram_.At(kFcramBase, fcram_.Size()), static_cast<uint32_t>(fcram_.Size()));
+
+    // The program's pages, then its segments in the image's order: a later segment overwrites an earlier one.
+    for (const PageRange& range : program)
     {
-        k.MapRegion(first * kPage, (last - first) * kPage);
+        kernel.MapNewRegion(static_cast<uint32_t>(range.first * kPageSize),
+                            static_cast<uint32_t>((range.end - range.first) * kPageSize));
     }
 
-    for (const auto& seg : image.memory)
+    for (const ProcessImage::Segment& segment : image.memory)
     {
-        k.Memory().WriteBlock(seg.address, seg.data.data(), seg.data.size());
+        memory.WriteBlock(segment.address, segment.data.data(), segment.data.size());
     }
 
-    // Main thread stack.
-    const uint32_t stack = (image.stack_size + kPage - 1) & ~(kPage - 1);
-    k.MapRegion(kStackTop - stack, stack);
+    // The main thread's stack, and DSP RAM. The guest and the DSP share DSP RAM. A write to the DSP's program memory
+    // calls ProgramWritten.
+    const uint32_t stack_size = arm::Memory::RoundUpToPage(image.stack_size);
+    kernel.MapNewRegion(kStackTop - stack_size, stack_size);
+    memory.Map(kDspRam, dsp_.Ram(), dsp::kRamSize);
+    memory.WatchWrites(dsp_.Ram(), dsp::kDataMemoryOffset, [this] { dsp_.ProgramWritten(); });
 
-    // DSP RAM (the application maps the shared-memory windows; map all of it).
-    k.MapExternal(kDspRamBase, dsp_->Ram(), dsp::kRamSize);
-
-    // Notify Teakra of writes to the program half so it can invalidate translated code.
-    k.Memory().WatchWrites(dsp_->Ram(), dsp::kRamSize / 2, [this] { dsp_->ProgramWritten(); });
-
-    InstallServices(k, std::make_shared<RomFs>(image.files), *dsp_);
-
-    // The DSP runs at half the ARM11 clock, in lock-step with emulated time.
-    k.device_step_ = [this](uint64_t to)
-    {
-        const uint64_t target = to / 2;
-        const uint64_t now = dsp_->Cycles();
-        if (target > now)
+    // The services, the DSP's steps with the clock and its samples, and the main thread.
+    services_ = std::make_unique<Services>(kernel, dsp_, image.files);
+    kernel.SetServiceHost(services_.get());
+    kernel.SetDeviceStep(
+        [this](uint64_t ticks)
         {
-            dsp_->Run(target - now);
-        }
-    };
-
-    const auto capture = [this](const std::array<int16_t, 2>& s)
-    {
-        output_.push_back(s[0]);
-        output_.push_back(s[1]);
-    };
-    dsp_->SetSampleSink(capture);
-
-    k.CreateMainThread(image.entry, kStackTop, image.priority);
+            const uint64_t target = ticks / 2;
+            const uint64_t cycles = dsp_.Cycles();
+            if (cycles < target)
+            {
+                dsp_.Run(target - cycles);
+            }
+        });
+    dsp_.SetSampleSink(
+        [this](std::array<int16_t, 2> sample)
+        {
+            output_.push_back(sample[0]);
+            output_.push_back(sample[1]);
+        });
+    kernel.CreateThread(image.priority, image.entry, 0, kStackTop);
 }
 
 System::~System() = default;
 
-struct System::Snapshot
+Kernel& System::GetKernel()
 {
-    Fcram::Snapshot fcram;
-    dsp::TeakraDsp::Snapshot dsp;
-    std::shared_ptr<Kernel::Snapshot> kernel;
-};
+    return *kernel_;
+}
 
 std::shared_ptr<System::Snapshot> System::Save(const Snapshot* previous)
 {
     auto snapshot = std::make_shared<Snapshot>();
-    snapshot->fcram = fcram_->Save(previous ? &previous->fcram : nullptr);
-    snapshot->dsp = dsp_->Save(previous ? &previous->dsp : nullptr);
-    snapshot->kernel = kernel_->Save(previous ? previous->kernel.get() : nullptr);
+    snapshot->kernel = kernel_->Save(previous ? &previous->kernel : nullptr);
+    snapshot->services = services_->Save();
+    snapshot->fcram = fcram_.Save(previous ? &previous->fcram : nullptr);
+    snapshot->dsp = dsp_.Save(previous ? &previous->dsp : nullptr);
 
     return snapshot;
 }
 
 void System::Restore(const Snapshot& snapshot)
 {
-    fcram_->Restore(snapshot.fcram);
-    dsp_->Restore(snapshot.dsp);
-    kernel_->Restore(*snapshot.kernel);
+    kernel_->Restore(snapshot.kernel);
+    services_->Restore(snapshot.services);
+    fcram_.Restore(snapshot.fcram);
+    dsp_.Restore(snapshot.dsp);
 }
 
 } // namespace threesf::horizon

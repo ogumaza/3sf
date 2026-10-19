@@ -25,6 +25,9 @@
 #include "xsflib/ascii.h"
 #include "xsflib/bytes.h"
 #include "xsflib/files.h"
+#include <zlib.h>
+
+#include "horizon/romfs.h"
 
 namespace threesf::rip
 {
@@ -155,16 +158,19 @@ struct RomFsEntry
 std::optional<std::string> ListRomFs(Image& img, uint64_t base, uint64_t limit,
                                      std::map<std::string, RomFsEntry>& files)
 {
-    uint8_t h[0x28];
+    using Layout = horizon::RomFsLayout;
+    uint8_t h[Layout::kHeaderSize];
     if (!img.Read(base, h, sizeof(h)))
     {
         return "truncated RomFS";
     }
 
-    const uint32_t dir_meta_off = xsflib::LoadLe32(h + 0x0c), dir_meta_size = xsflib::LoadLe32(h + 0x10);
-    const uint32_t file_meta_off = xsflib::LoadLe32(h + 0x1c), file_meta_size = xsflib::LoadLe32(h + 0x20);
-    const uint32_t data_off = xsflib::LoadLe32(h + 0x24);
-    if (xsflib::LoadLe32(h) != 0x28 || dir_meta_size > (16u << 20) || file_meta_size > (64u << 20))
+    const uint32_t dir_meta_off = xsflib::LoadLe32(h + Layout::kDirMetaOffset);
+    const uint32_t dir_meta_size = xsflib::LoadLe32(h + Layout::kDirMetaLength);
+    const uint32_t file_meta_off = xsflib::LoadLe32(h + Layout::kFileMetaOffset);
+    const uint32_t file_meta_size = xsflib::LoadLe32(h + Layout::kFileMetaLength);
+    const uint32_t data_off = xsflib::LoadLe32(h + Layout::kFileDataOffset);
+    if (xsflib::LoadLe32(h) != Layout::kHeaderSize || dir_meta_size > (16u << 20) || file_meta_size > (64u << 20))
     {
         return "not a RomFS (bad level-3 header)";
     }
@@ -176,62 +182,62 @@ std::optional<std::string> ListRomFs(Image& img, uint64_t base, uint64_t limit,
         return "truncated RomFS metadata";
     }
 
-    constexpr uint32_t kNone = 0xffffffff;
     std::string error;
     int visited = 0;
 
     std::function<void(uint32_t, const std::string&, int)> walk = [&](uint32_t dir, const std::string& path, int depth)
     {
-        if (depth > 64 || uint64_t{dir} + 0x18 > dirs.size() || ++visited > 1000000)
+        if (depth > 64 || uint64_t{dir} + Layout::kDirName > dirs.size() || ++visited > 1000000)
         {
             error = "corrupt RomFS directory tree";
             return;
         }
 
-        for (uint32_t f = xsflib::LoadLe32(&dirs[dir + 0x0c]); f != kNone && error.empty();)
+        for (uint32_t f = xsflib::LoadLe32(&dirs[dir + Layout::kDirFirstFile]); f != Layout::kNoEntry && error.empty();)
         {
-            if (uint64_t{f} + 0x20 > filemeta.size())
+            if (uint64_t{f} + Layout::kFileName > filemeta.size())
             {
                 error = "corrupt RomFS file entry";
                 return;
             }
 
             const uint8_t* e = &filemeta[f];
-            const uint32_t name_len = xsflib::LoadLe32(e + 0x1c);
-            if (uint64_t{f} + 0x20 + name_len > filemeta.size() || ++visited > 1000000)
+            const uint32_t name_len = xsflib::LoadLe32(e + Layout::kFileNameLength);
+            if (uint64_t{f} + Layout::kFileName + name_len > filemeta.size() || ++visited > 1000000)
             {
                 error = "corrupt RomFS file entry";
                 return;
             }
 
-            const uint64_t off = base + data_off + xsflib::LoadLe64(e + 0x08), size = xsflib::LoadLe64(e + 0x10);
+            const uint64_t off = base + data_off + xsflib::LoadLe64(e + Layout::kFileData);
+            const uint64_t size = xsflib::LoadLe64(e + Layout::kFileSize);
             if (off > limit || size > limit - off)
             {
                 error = "RomFS file outside the RomFS";
                 return;
             }
 
-            files[path + Utf16ToUtf8(e + 0x20, name_len)] = {off, size};
-            f = xsflib::LoadLe32(e + 0x04);
+            files[path + Utf16ToUtf8(e + Layout::kFileName, name_len)] = {off, size};
+            f = xsflib::LoadLe32(e + Layout::kFileSibling);
         }
 
-        for (uint32_t c = xsflib::LoadLe32(&dirs[dir + 0x08]); c != kNone && error.empty();)
+        for (uint32_t c = xsflib::LoadLe32(&dirs[dir + Layout::kDirFirstDir]); c != Layout::kNoEntry && error.empty();)
         {
-            if (uint64_t{c} + 0x18 > dirs.size())
+            if (uint64_t{c} + Layout::kDirName > dirs.size())
             {
                 error = "corrupt RomFS directory entry";
                 return;
             }
 
-            const uint32_t name_len = xsflib::LoadLe32(&dirs[c + 0x14]);
-            if (uint64_t{c} + 0x18 + name_len > dirs.size())
+            const uint32_t name_len = xsflib::LoadLe32(&dirs[c + Layout::kDirNameLength]);
+            if (uint64_t{c} + Layout::kDirName + name_len > dirs.size())
             {
                 error = "corrupt RomFS directory entry";
                 return;
             }
 
-            walk(c, path + Utf16ToUtf8(&dirs[c + 0x18], name_len) + "/", depth + 1);
-            c = xsflib::LoadLe32(&dirs[c + 0x04]);
+            walk(c, path + Utf16ToUtf8(&dirs[c + Layout::kDirName], name_len) + "/", depth + 1);
+            c = xsflib::LoadLe32(&dirs[c + Layout::kDirSibling]);
         }
     };
 
@@ -240,6 +246,85 @@ std::optional<std::string> ListRomFs(Image& img, uint64_t base, uint64_t limit,
     {
         return error;
     }
+
+    return std::nullopt;
+}
+
+// Reads .code from the ExeFS at `exefs` in the image. The ExeFS takes `size` media units.
+std::optional<std::string> ReadExeFsCode(Image& img, uint64_t exefs, uint32_t size, std::vector<uint8_t>& code)
+{
+    uint8_t eh[0x200];
+    if (!size || !img.Read(exefs, eh, sizeof(eh)))
+    {
+        return "the NCCH has no ExeFS";
+    }
+
+    bool found = false;
+    for (int i = 0; i < 10; i++)
+    {
+        const uint8_t* e = eh + i * 16;
+        if (std::memcmp(e, ".code\0\0\0", 8) != 0)
+        {
+            continue;
+        }
+
+        if (!img.Read(exefs + 0x200 + xsflib::LoadLe32(e + 8), xsflib::LoadLe32(e + 12), code))
+        {
+            return "truncated .code";
+        }
+
+        found = true;
+    }
+    if (!found)
+    {
+        return "the ExeFS has no .code (is the image really decrypted?)";
+    }
+
+    return std::nullopt;
+}
+
+// Puts the paths of the RomFS's files in out.romfs_files and a reader of the files in out.read_romfs. The RomFS starts
+// at `romfs` in the image and takes `size` bytes. No file may reach past `limit`. The RomFS is an IVFC image. Its
+// level-3 file system follows the IVFC header and the master hash.
+std::optional<std::string> OpenRomFs(const std::shared_ptr<Image>& img, uint64_t romfs, uint64_t size, uint64_t limit,
+                                     GameFiles& out)
+{
+    uint8_t ivfc[0x60];
+    if (!size || !img->Read(romfs, ivfc, sizeof(ivfc)))
+    {
+        return "the NCCH has no RomFS";
+    }
+
+    if (std::memcmp(ivfc, "IVFC", 4) != 0 || xsflib::LoadLe32(ivfc + 4) != 0x10000)
+    {
+        return "the RomFS has no IVFC header (is the image really decrypted?)";
+    }
+
+    const uint32_t block_log2 = xsflib::LoadLe32(ivfc + 0x4c);
+    if (block_log2 > 24)
+    {
+        return "bad IVFC header";
+    }
+
+    const uint64_t level3 =
+        romfs + AlignUp(0x60 + static_cast<uint64_t>(xsflib::LoadLe32(ivfc + 0x08)), 1ull << block_log2);
+    auto entries = std::make_shared<std::map<std::string, RomFsEntry>>();
+    if (auto err = ListRomFs(*img, level3, std::min(limit, romfs + size), *entries))
+    {
+        return err;
+    }
+
+    out.romfs_files.clear();
+    for (const auto& [path, e] : *entries)
+    {
+        out.romfs_files.push_back(path);
+    }
+
+    out.read_romfs = [img, entries](const std::string& path, std::vector<uint8_t>& data)
+    {
+        auto it = entries->find(path);
+        return it != entries->end() && img->Read(it->second.offset, it->second.size, data);
+    };
 
     return std::nullopt;
 }
@@ -284,35 +369,12 @@ std::optional<std::string> LoadNcch(const std::shared_ptr<Image>& img, uint64_t 
     }
 
     // Read .code from the ExeFS, and decompress it if the exheader says it's compressed.
-    const uint64_t exefs = base + xsflib::LoadLe32(h + 0x1a0) * mu;
-    uint8_t eh[0x200];
-    if (!xsflib::LoadLe32(h + 0x1a4) || !img->Read(exefs, eh, sizeof(eh)))
+    if (auto err = ReadExeFsCode(*img, base + xsflib::LoadLe32(h + 0x1a0) * mu, xsflib::LoadLe32(h + 0x1a4), out.code))
     {
-        return "the NCCH has no ExeFS";
+        return err;
     }
 
-    bool found = false;
-    for (int i = 0; i < 10; i++)
-    {
-        const uint8_t* e = eh + i * 16;
-        if (std::memcmp(e, ".code\0\0\0", 8) != 0)
-        {
-            continue;
-        }
-
-        if (!img->Read(exefs + 0x200 + xsflib::LoadLe32(e + 8), xsflib::LoadLe32(e + 12), out.code))
-        {
-            return "truncated .code";
-        }
-
-        found = true;
-    }
-    if (!found)
-    {
-        return "the ExeFS has no .code (is the image really decrypted?)";
-    }
-
-    if (out.exheader[0x0d] & 1)
+    if (out.exheader[kExheaderFlags] & 1)
     {
         auto code = BlzDecompress(out.code);
         if (!code)
@@ -323,47 +385,7 @@ std::optional<std::string> LoadNcch(const std::shared_ptr<Image>& img, uint64_t 
         out.code = std::move(*code);
     }
 
-    // The RomFS is an IVFC image, with the level-3 file system after its header and master hash.
-    const uint64_t romfs = base + xsflib::LoadLe32(h + 0x1b0) * mu;
-    const uint64_t romfs_size = xsflib::LoadLe32(h + 0x1b4) * mu;
-    uint8_t ivfc[0x60];
-    if (!romfs_size || !img->Read(romfs, ivfc, sizeof(ivfc)))
-    {
-        return "the NCCH has no RomFS";
-    }
-
-    if (std::memcmp(ivfc, "IVFC", 4) != 0 || xsflib::LoadLe32(ivfc + 4) != 0x10000)
-    {
-        return "the RomFS has no IVFC header (is the image really decrypted?)";
-    }
-
-    const uint32_t block_log2 = xsflib::LoadLe32(ivfc + 0x4c);
-    if (block_log2 > 24)
-    {
-        return "bad IVFC header";
-    }
-
-    const uint64_t level3 =
-        romfs + AlignUp(0x60 + static_cast<uint64_t>(xsflib::LoadLe32(ivfc + 0x08)), 1ull << block_log2);
-    auto entries = std::make_shared<std::map<std::string, RomFsEntry>>();
-    if (auto err = ListRomFs(*img, level3, std::min(limit, romfs + romfs_size), *entries))
-    {
-        return err;
-    }
-
-    out.romfs_files.clear();
-    for (const auto& [path, e] : *entries)
-    {
-        out.romfs_files.push_back(path);
-    }
-
-    out.read_romfs = [img, entries](const std::string& path, std::vector<uint8_t>& data)
-    {
-        auto it = entries->find(path);
-        return it != entries->end() && img->Read(it->second.offset, it->second.size, data);
-    };
-
-    return std::nullopt;
+    return OpenRomFs(img, base + xsflib::LoadLe32(h + 0x1b0) * mu, xsflib::LoadLe32(h + 0x1b4) * mu, limit, out);
 }
 
 std::optional<std::string> LoadCia(const std::shared_ptr<Image>& img, GameFiles& out)
@@ -441,12 +463,17 @@ std::optional<std::string> LoadCia(const std::shared_ptr<Image>& img, GameFiles&
 
 uint64_t GameFiles::ProgramId() const
 {
-    if (exheader.size() < 0x208)
+    if (exheader.size() < kExheaderProgramId + 8)
     {
         return 0;
     }
 
-    return xsflib::LoadLe64(exheader.data() + 0x200);
+    return xsflib::LoadLe64(exheader.data() + kExheaderProgramId);
+}
+
+uint32_t GameFiles::CodeCrc32() const
+{
+    return static_cast<uint32_t>(crc32(0, code.data(), static_cast<uInt>(code.size())));
 }
 
 std::vector<std::string> GameFiles::SoundArchives() const
@@ -559,8 +586,9 @@ std::optional<std::string> LoadGameDirectory(const std::string& dir, GameFiles& 
     }
 
     // A compressed code.bin is shorter than the text, rodata and data pages together.
-    const uint64_t pages = static_cast<uint64_t>(xsflib::LoadLe32(&out.exheader[0x14])) +
-                           xsflib::LoadLe32(&out.exheader[0x24]) + xsflib::LoadLe32(&out.exheader[0x34]);
+    const uint64_t pages = static_cast<uint64_t>(xsflib::LoadLe32(&out.exheader[kExheaderTextPages])) +
+                           xsflib::LoadLe32(&out.exheader[kExheaderRodataPages]) +
+                           xsflib::LoadLe32(&out.exheader[kExheaderDataPages]);
     if (out.code.size() < pages * 0x1000)
     {
         auto code = BlzDecompress(out.code);

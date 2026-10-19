@@ -16,6 +16,57 @@
 
 namespace threesf::nwsnd
 {
+namespace
+{
+
+// Reads `wave`, a wave in the wave archive `warc`, into a WaveInfo. nw::snd's WaveFileReader fills one the same way.
+// Each channel's data is the address of its samples in FCRAM. Returns nothing for a wave that the DSP can't play: an
+// IMA-ADPCM wave, or one without channels.
+std::optional<WaveInfo> ReadWaveInfo(const Engine::LoadedWarc& warc, const ntdlib::sar::Wave& wave)
+{
+    WaveInfo info;
+    switch (wave.encoding)
+    {
+    case ntdlib::sar::WaveEncoding::kPcm8:
+        info.format = SampleFormat::kPcm8;
+        break;
+    case ntdlib::sar::WaveEncoding::kPcm16:
+        info.format = SampleFormat::kPcm16;
+        break;
+    case ntdlib::sar::WaveEncoding::kDspAdpcm:
+        info.format = SampleFormat::kDspAdpcm;
+        break;
+    default: // IMA-ADPCM
+        return std::nullopt;
+    }
+
+    if (wave.channels.empty())
+    {
+        return std::nullopt;
+    }
+
+    info.loop = wave.loop;
+    info.channel_count = static_cast<int>(std::min<std::size_t>(wave.channels.size(), 2));
+    info.sample_rate = wave.sample_rate;
+    info.loop_start = wave.loop_start;
+    info.loop_end = wave.loop_end;
+    for (int c = 0; c < info.channel_count; c++)
+    {
+        const auto& src = wave.channels[c];
+        auto& dst = info.channels[c];
+        dst.data = warc.base + static_cast<ntdlib::PAddr>(src.data.data() - warc.file.data());
+        if (src.adpcm)
+        {
+            dst.coefs = src.adpcm->coefs;
+            dst.context = {src.adpcm->pred_scale, src.adpcm->yn1, src.adpcm->yn2};
+            dst.loop_context = {src.adpcm->loop_pred_scale, src.adpcm->loop_yn1, src.adpcm->loop_yn2};
+        }
+    }
+
+    return info;
+}
+
+} // namespace
 
 Engine::Engine(nnsnd::SoundSystem& snd, Fcram& fcram, const ntdlib::sar::SoundArchive& archive, EngineOptions options)
     : snd_(snd), fcram_(fcram), archive_(archive), options_(options), voices_(*this)
@@ -100,47 +151,7 @@ std::optional<WaveInfo> Engine::GetWave(uint32_t wave_archive_item, uint32_t ind
     const LoadedWarc* w = GetWarc(wave_archive_item);
     if (w && index < w->archive.waves.size())
     {
-        const ntdlib::sar::Wave wave = ntdlib::sar::Wave::Parse(w->archive.waves[index], kSarOptions);
-        WaveInfo info;
-        bool ok = true;
-        switch (wave.encoding)
-        {
-        case ntdlib::sar::WaveEncoding::kPcm8:
-            info.format = 0;
-            break;
-        case ntdlib::sar::WaveEncoding::kPcm16:
-            info.format = 1;
-            break;
-        case ntdlib::sar::WaveEncoding::kDspAdpcm:
-            info.format = 3;
-            break;
-        default: // IMA-ADPCM, which the DSP can't play
-            ok = false;
-            break;
-        }
-
-        if (ok && !wave.channels.empty())
-        {
-            info.loop = wave.loop;
-            info.channel_count = static_cast<int>(std::min<std::size_t>(wave.channels.size(), 2));
-            info.sample_rate = wave.sample_rate;
-            info.loop_start = wave.loop_start;
-            info.loop_end = wave.loop_end;
-            for (int c = 0; c < info.channel_count; c++)
-            {
-                const auto& src = wave.channels[c];
-                auto& dst = info.channels[c];
-                dst.data = w->base + static_cast<ntdlib::PAddr>(src.data.data() - w->file.data());
-                if (src.adpcm)
-                {
-                    dst.coefs = src.adpcm->coefs;
-                    dst.context = {src.adpcm->pred_scale, src.adpcm->yn1, src.adpcm->yn2};
-                    dst.loop_context = {src.adpcm->loop_pred_scale, src.adpcm->loop_yn1, src.adpcm->loop_yn2};
-                }
-            }
-
-            result = info;
-        }
+        result = ReadWaveInfo(*w, ntdlib::sar::Wave::Parse(w->archive.waves[index], kSarOptions));
     }
 
     waves_.emplace(key, result);
@@ -168,7 +179,7 @@ Channel* Engine::NoteOn(const std::vector<uint32_t>& bank_items, int bank_index,
     }
 
     const ntdlib::sar::WaveId& id = bank->waves[vr->wave_id_index];
-    if (id.index == 0xffffffff)
+    if (id.index == ntdlib::sar::kNoItem)
     {
         return nullptr;
     }
@@ -353,7 +364,7 @@ bool ArchiveModel::Start(std::span<const uint8_t> firmware, const ntdlib::sar::S
                          uint8_t output_mode)
 {
     nnsnd::DspDefaults defaults;
-    defaults.output_format = output_mode;
+    defaults.output_mode = output_mode;
     if (!snd.Initialize(firmware, defaults))
     {
         return false;

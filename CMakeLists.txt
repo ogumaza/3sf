@@ -3,7 +3,7 @@
 cmake_minimum_required(VERSION 3.20)
 # Shared version for 3sfrip, 3sfplay, the foobar2000 component, the XMPlay plugin, Windows file properties and macOS
 # bundles (THREESF_VERSION_ARGS below). For a release, update it here and add notes in docs/release-notes/.
-project(threesf VERSION 1.3.0 LANGUAGES CXX)
+project(threesf VERSION 1.3.1 LANGUAGES CXX)
 
 # xsflib is a library for players and rippers of the PSF family. It's a submodule. Its XsflibProject.cmake sets what a
 # project built on it starts with: C++20, a release build by default, the static C runtime, the options that keep the
@@ -123,6 +123,8 @@ add_library(threesf_core STATIC
     src/threesf/archive_player.h
     src/threesf/format.cpp
     src/threesf/format.h
+    src/threesf/game_mode.cpp
+    src/threesf/game_mode.h
     src/threesf/player.cpp
     src/threesf/player.h
 )
@@ -134,6 +136,10 @@ add_library(threesf_rip STATIC
     src/rip/driver_blob.h
     src/rip/game.cpp
     src/rip/game.h
+    src/rip/length.cpp
+    src/rip/length.h
+    src/rip/music.cpp
+    src/rip/music.h
     src/rip/rip.cpp
     src/rip/rip.h
 )
@@ -147,7 +153,7 @@ set(THREESF_VERSION_ARGS VERSION ${threesf_VERSION} DEFINE THREESF_VERSION PRODU
     COPYRIGHT "Copyright (c) 2026 the 3SF authors. MIT licence.")
 
 add_executable(3sfrip src/cli/3sfrip.cpp)
-target_link_libraries(3sfrip PRIVATE threesf_rip xsflib::cli xsflib::zlib)
+target_link_libraries(3sfrip PRIVATE threesf_rip xsflib::cli)
 target_compile_options(3sfrip PRIVATE ${THREESF_WARNINGS})
 xsflib_add_version(3sfrip ${THREESF_VERSION_ARGS} DESCRIPTION "3SF ripper")
 
@@ -176,27 +182,32 @@ if (XMPLAY_SDK_DIR)
     add_subdirectory(plugins/xmplay)
 endif()
 
-enable_testing()
+# The tests. -DTHREESF_TESTS=OFF leaves them out of a build that only makes the programs and plugins, such as CI's
+# macOS job.
+option(THREESF_TESTS "Build 3SF's tests and register them with CTest." ON)
+if (THREESF_TESTS)
+    enable_testing()
 
-# The unit tests: threesf_<name>_test from tests/<name>_test.cpp, registered as threesf_<name>.
-xsflib_add_project_test(threesf format threesf_core)
-xsflib_add_project_test(threesf kernel threesf_horizon)
-xsflib_add_project_test(threesf teakra_bounds threesf_dsp)
-xsflib_add_project_test(threesf teakra_dsp threesf_dsp)
-xsflib_add_project_test(threesf teakra_jit threesf_dsp)
-xsflib_add_project_test(threesf teakra_state threesf_dsp)
-xsflib_add_project_test(threesf rip threesf_rip)
+    # The unit tests: threesf_<name>_test from tests/<name>_test.cpp, registered as threesf_<name>.
+    xsflib_add_project_test(threesf format threesf_core)
+    xsflib_add_project_test(threesf kernel threesf_horizon)
+    xsflib_add_project_test(threesf teakra_bounds threesf_dsp)
+    xsflib_add_project_test(threesf teakra_dsp threesf_dsp)
+    xsflib_add_project_test(threesf teakra_jit threesf_dsp)
+    xsflib_add_project_test(threesf teakra_state threesf_dsp)
+    xsflib_add_project_test(threesf rip threesf_rip)
 
-# The tools report the version they were built as.
-string(REPLACE "." "\\." version_pattern ${threesf_VERSION})
-foreach (tool 3sfrip 3sfplay)
-    add_test(NAME version_${tool} COMMAND ${tool} --version)
-    set_tests_properties(version_${tool} PROPERTIES PASS_REGULAR_EXPRESSION "^${tool} ${version_pattern}[\r\n]*$")
-endforeach()
+    # The tools report the version they were built as.
+    string(REPLACE "." "\\." version_pattern ${threesf_VERSION})
+    foreach (tool 3sfrip 3sfplay)
+        add_test(NAME version_${tool} COMMAND ${tool} --version)
+        set_tests_properties(version_${tool} PROPERTIES PASS_REGULAR_EXPRESSION "^${tool} ${version_pattern}[\r\n]*$")
+    endforeach()
 
-# --var takes N=V with N from 0 to 31, and anything else is an error before an input is read.
-add_test(NAME var_out_of_range COMMAND 3sfrip --var 32=1 no-such-archive.bcsar)
-set_tests_properties(var_out_of_range PROPERTIES PASS_REGULAR_EXPRESSION "error: --var takes N=V")
+    # --var takes N=V with N from 0 to 31, and anything else is an error before an input is read.
+    add_test(NAME var_out_of_range COMMAND 3sfrip --var 32=1 no-such-archive.bcsar)
+    set_tests_properties(var_out_of_range PROPERTIES PASS_REGULAR_EXPRESSION "error: --var takes N=V")
 
-# Load local_tests.cmake from each immediate subdirectory to register tests that use locally supplied files.
-xsflib_include_local_tests()
+    # Load local_tests.cmake from each immediate subdirectory to register tests that use locally supplied files.
+    xsflib_include_local_tests()
+endif()

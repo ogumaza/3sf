@@ -38,17 +38,16 @@ each build plays.
 **On GitHub (no Windows machine or Mac needed):** the `foobar2000 component` workflow
 (`.github/workflows/foobar2000.yml`) builds the 32-bit and 64-bit DLLs and the Mac bundle, and
 uploads one `.fb2k-component` with all three. Start it from the repository's Actions tab (Run
-workflow). GitHub lists a manual workflow only once it's on the default branch (`main`). It needs
-GitHub Actions enabled for the repository. The workflow passes an SDK version to
-`externals/xsflib/ci/foobar2000-sdk`. That action downloads the SDK from foobar2000.org. CI uses
-the same version.
+workflow). GitHub lists a manual workflow only once it's on the default branch (`main`). The
+workflow requires GitHub Actions to be enabled for the repository. The workflow downloads the SDK
+from foobar2000.org with `externals/xsflib/ci/foobar2000-sdk`. That action pins the SDK's version.
+CI builds with the same version.
 
 **On Windows:** you need Visual Studio 2022 or later with the C++ workload and the "C++ Clang
 tools for Windows" component, plus CMake 3.20 or later. Download and unpack the foobar2000 SDK
 from <https://www.foobar2000.org/SDK>. Use the folder containing `pfc` and `foobar2000` as the
-SDK path below. CI builds with the version that the workflows pass to
-`externals/xsflib/ci/foobar2000-sdk`. A newer one may need changes to xsflib's
-`cmake/XsflibApps.cmake`.
+SDK path below. CI builds with the version that `externals/xsflib/ci/foobar2000-sdk` pins. A
+newer SDK may require changes to xsflib's `cmake/XsflibApps.cmake`.
 
 ```
 cmake -S . -B build-fb2k -A x64 -T ClangCL -DFOOBAR2000_SDK_DIR=C:/path/to/SDK

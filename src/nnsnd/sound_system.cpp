@@ -82,7 +82,7 @@ bool SoundSystem::Initialize(std::span<const uint8_t> component, const DspDefaul
 void SoundSystem::WriteDspDefaults(const DspDefaults& defaults)
 {
     // 0x148470 / 0x14862c: master volume, aux return volumes, aux bus enables, front bypass, rear ratio, surround
-    // depth, clipping mode, output buffer count, output format, sync mode.
+    // depth, clipping mode, output buffer count, output mode, sync mode.
     auto& c = link_.Mixer();
     c.master_volume = 1.0f;
     c.aux_return[0] = 1.0f;
@@ -93,9 +93,9 @@ void SoundSystem::WriteDspDefaults(const DspDefaults& defaults)
     c.aux_bypass[1] = 0;
     c.rear_ratio = 0x8000;
     c.surround_depth = 0x7fff;
-    c.limiter = defaults.clipping_mode;
+    c.clipping_mode = defaults.clipping_mode;
     c.output_buffers = 2;
-    c.output_mode = defaults.output_format;
+    c.output_mode = defaults.output_mode;
     c.dirty |= (1u << 6) | (1u << 7) | (1u << 8) | (1u << 9) | (1u << 15) | (1u << 16) | (1u << 24) | (1u << 25) |
                (1u << 26) | (1u << 27) | (1u << 29) | (1u << 31);
     c.sync_mode = 1; // MixerParams +0xbc: nn::snd writes the system sound mode here
@@ -104,7 +104,7 @@ void SoundSystem::WriteDspDefaults(const DspDefaults& defaults)
     // The voices get what the output leaves of the frame's cycles (0x18b380). The aux buses' effects (0x18d2f4) take
     // none: the model has none. When its voice manager's flag at +0xe is set, nn::snd also takes off the cycles over
     // 655,300 that the DSP last reported. The game doesn't set the flag.
-    voice_cycles_ = kFrameCycles - OutputCycles(defaults.output_format, defaults.clipping_mode);
+    voice_cycles_ = kFrameCycles - OutputCycles(defaults.output_mode, defaults.clipping_mode);
 }
 
 Voice* SoundSystem::AllocVoice(int priority, DropOwner owner)

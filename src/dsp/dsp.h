@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: MIT
 
-// The 3DS DSP as the ARM11 sees it: its pipes and interrupts, the layout of DSP RAM and the timing of its audio output.
-// TeakraDsp (teakra_dsp.h) is the DSP itself.
+// The 3DS DSP from the ARM11's side: its pipes and interrupts, the layout of DSP RAM, the timing of its audio output
+// and the layout of its firmware images. TeakraDsp (teakra_dsp.h) is the DSP itself.
 
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 
 namespace threesf::dsp
@@ -47,5 +48,26 @@ constexpr uint32_t DataOffset(uint32_t word_address)
 {
     return kDataMemoryOffset + word_address * 2;
 }
+
+// A DSP1 firmware image (3dbrew, "DSP Binary"): a header of 0x300 bytes, then the segments. The header holds "DSP1"
+// after a signature, the image's size, the number of segments, flags and a table of at most 10 segment records. A
+// record holds the segment's offset in the image, its word address in DSP memory and its size in bytes. The segment's
+// memory type comes after some padding.
+struct Dsp1Image
+{
+    static constexpr std::size_t kHeaderSize = 0x300;
+    static constexpr std::size_t kMagicOffset = 0x100;
+    static constexpr std::size_t kSizeOffset = 0x104;
+    static constexpr std::size_t kSegmentCountOffset = 0x10E;
+    static constexpr std::size_t kFlagsOffset = 0x10F;
+    static constexpr std::size_t kSegmentTableOffset = 0x120;
+    static constexpr std::size_t kSegmentRecordSize = 0x30;
+    static constexpr unsigned kMaxSegments = 10;
+
+    // The fields of a segment record after its offset in the image, by their places in the record.
+    static constexpr std::size_t kSegmentAddressOffset = 4;
+    static constexpr std::size_t kSegmentSizeOffset = 8;
+    static constexpr std::size_t kSegmentTypeOffset = 15;
+};
 
 } // namespace threesf::dsp

@@ -37,7 +37,7 @@ struct Traits
     static constexpr t_filesize kMaxFileSize = 256u << 20; // largest file read into memory
 
     // A sequence that waits for its variables would go silent if removing the tags dropped 3sf_var.
-    static constexpr std::array<const char*, 1> kKeptTags = {"3sf_var"};
+    static constexpr std::array<const char*, 1> kPlaybackTags = {"3sf_var"};
 
     // {A335A9E1-B807-48DD-A589-4D6511BCCE2B}
     static constexpr GUID kInputGuid = {0xa335a9e1, 0xb807, 0x48dd, {0xa5, 0x89, 0x4d, 0x65, 0x11, 0xbc, 0xce, 0x2b}};

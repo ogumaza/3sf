@@ -293,7 +293,7 @@ public:
             const u64 before = i;
             const u32 pc = regs.pc;
             i = RunOrdinary(i, i + steps);
-            if (jit->Stats()) {
+            if (jit->StatsEnabled()) {
                 jit->Interpreted(pc, i - before, limit == 0);
             }
             if (i == before || i == cycles ||

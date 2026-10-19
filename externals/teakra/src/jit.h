@@ -6,11 +6,12 @@
 // A block is a run of instructions from one address, translated for the mode registers it finds
 // there (the product shift, saturation, address steps and modulo, the memory interface's pages and
 // so on), which its code checks on entry. It ends before the first instruction it can't
-// translate, at the end of the innermost block-repeat loop, whose jump back it takes itself, or
-// after a limit. Its code touches only the registers and the data memory: before an instruction
-// that would read or write an MMIO register, the block stops, and the interpreter runs that
-// instruction. The interpreter only runs a block when none of the components can produce an event
-// before it ends (CoreTiming::BudgetLeft), so a block's instructions only need counting.
+// translate, after a jump, at the end of the innermost block-repeat loop or after a limit. At the
+// end of that loop, the block takes the jump back itself. Its code touches only the registers and
+// the data memory: before an instruction that would read or write an MMIO register, the block
+// stops, and the interpreter runs that instruction. The interpreter only runs a block when none of
+// the components can produce an event before it ends (CoreTiming::BudgetLeft). A block then only
+// has to count its instructions.
 //
 // Program memory changes when a firmware is loaded, which Reset precedes, and otherwise rarely:
 // the DSP writes it itself (movd, DMA that wraps around into it) and the host through
@@ -50,10 +51,12 @@ public:
     // The instructions that translated code has run.
     u64 Instructions() const;
 
-    // With TEAKRA_JIT_STATS set, the instructions the interpreter runs between blocks are counted
-    // (Interpreted: `count` from `pc`, and whether Run was called at all), and a summary is
-    // printed at the end.
-    bool Stats() const;
+    // True if TEAKRA_JIT_STATS is set. The JIT then keeps statistics and prints a summary of them
+    // when it's destroyed.
+    bool StatsEnabled() const;
+
+    // For the statistics: the interpreter ran `count` instructions from `pc` between blocks.
+    // `no_budget` is true when there was no budget for a block and Run wasn't called.
     void Interpreted(u32 pc, u64 count, bool no_budget);
 
     // Runs one instruction in the interpreter for a block that doesn't translate it. Exceptions

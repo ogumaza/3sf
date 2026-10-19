@@ -85,9 +85,9 @@ ctest --test-dir build -C Release
 presets need CMake 3.23 or later. They don't select clang-cl. On Windows, use the commands
 above.
 
-CI (`.github/workflows/ci.yml`) builds 3SF and runs `ctest` on every push to `main` that changes
-more than documentation: on Windows with clang-cl (x64, and x86 for 32-bit foobar2000 and XMPlay)
-and on macOS with Apple Clang (Apple Silicon).
+CI (`.github/workflows/ci.yml`) builds 3SF on every push to `main` that changes more than
+documentation: on Windows with clang-cl (x64, and x86 for 32-bit foobar2000 and XMPlay) and on
+macOS with Apple Clang (Apple Silicon). The Windows jobs also run `ctest`.
 
 `externals/teakra` is [Teakra](https://github.com/wwylele/teakra) at upstream commit 3d697a1 with
 3SF's changes, excluding upstream's hardware tests, Git LFS setup and CI. Compare against that
@@ -131,7 +131,7 @@ src/arm/             ARM11 interpreter (ARMv6K, Thumb, VFPv2)
 src/horizon/         Horizon kernel HLE, services, RomFS, the emulated system
 src/dsp/             the DSP: Teakra running the game's firmware, and FCRAM
 src/threesf/         3SF format and player core, both modes (no platform audio or UI)
-src/rip/             game loading (images, RomFS, BLZ), profiles, rip building
+src/rip/             game loading (images, RomFS, BLZ), profiles, rip building, lengths, --bgm
 src/cli/             3sfrip, 3sfplay
 src/nnsnd, nwsnd/    the nw::snd/nn::snd model (archive mode)
 src/common/          small helpers shared by the rest (quiet stdout, how 3SF reads sound archives)

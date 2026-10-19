@@ -15,6 +15,7 @@
 #include "xsflib/testing/check.h"
 
 #include "rip/game.h"
+#include "rip/music.h"
 
 using namespace threesf;
 using namespace xsflib::testing;

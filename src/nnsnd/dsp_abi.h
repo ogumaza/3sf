@@ -148,8 +148,8 @@ struct MixerParams
     float aux_return[2];
     uint16_t output_buffers;
     uint16_t unused_12[2];
-    uint16_t output_mode; // 0 mono, 1 stereo, 2 surround
-    uint16_t limiter;     // the firmware's clipping mode; nn::snd sets 1 (limiter on)
+    uint16_t output_mode;   // 0 mono, 1 stereo, 2 surround
+    uint16_t clipping_mode; // 0 limiter off, 1 limiter on (nn::snd sets 1)
     uint16_t headphones;
     uint16_t surround_depth;
     uint16_t speaker_position;
@@ -168,7 +168,7 @@ static_assert(offsetof(MixerParams, master_volume) == 0x04);
 static_assert(offsetof(MixerParams, aux_return) == 0x08);
 static_assert(offsetof(MixerParams, output_buffers) == 0x10);
 static_assert(offsetof(MixerParams, output_mode) == 0x16);
-static_assert(offsetof(MixerParams, limiter) == 0x18);
+static_assert(offsetof(MixerParams, clipping_mode) == 0x18);
 static_assert(offsetof(MixerParams, surround_depth) == 0x1C);
 static_assert(offsetof(MixerParams, rear_ratio) == 0x22);
 static_assert(offsetof(MixerParams, aux_bypass) == 0x24);

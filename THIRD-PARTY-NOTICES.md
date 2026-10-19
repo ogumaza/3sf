@@ -24,13 +24,15 @@ No code from the XMPlay plugin SDK goes into the XMPlay plugin.
 ## Reference material (no code taken)
 
 - [Azahar](https://github.com/azahar-emu/azahar) (GPL-2.0-or-later) was the reference for how
-  the 3DS kernel, its services and the DSP interface behave. An early version used a port of
-  its HLE audio mixer and DSP glue, and both have been removed. The DSP glue 3SF has now
-  (`src/dsp/teakra_dsp.*`) was written in a clean room: its author worked from a description
-  of the behaviour it had to keep, 3dbrew and Teakra's source, and never saw Azahar's code or
-  the earlier glue. Two sets of hardware facts come from Azahar: the SVC cycle costs in
-  `src/horizon/kernel.cpp`, which the format spec (`docs/3sf.md`) lists too, and the
-  configuration memory values of firmware 11.17.
+  the 3DS kernel, its services and the DSP interface behave. An early version used a port of its
+  HLE audio mixer and DSP glue. Both have been removed. Two parts of 3SF were later rewritten in
+  clean rooms: the DSP glue (`src/dsp/teakra_dsp.*`) and the Horizon layer (`src/horizon`: the
+  kernel, IPC, the services, the RomFS builder and the emulated system). Each author worked from
+  a description of the behaviour to keep and never saw Azahar's code or the code being replaced.
+  The glue's author also used 3dbrew and Teakra's source. Three sets of facts about the console
+  in `src/horizon` come from Azahar: the SVC cycle costs, the configuration memory values of
+  firmware 11.17, and the bytes of DSP pipe commands that the console's DSP module overwrites.
+  The format spec (`docs/3sf.md`) lists the SVC cycle costs too.
 - [3dbrew](https://www.3dbrew.org) documents the file formats, the DSP firmware format, the
   services and the kernel.
 

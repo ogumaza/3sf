@@ -382,6 +382,11 @@ and go back to the same command. A loop of another track, or one that goes back 
 starts the count again. Loops before the first sound don't count. A loop that completed without
 a sound ends the sequence at its last sound instead.
 
+The fade of a looping sequence also waits for the other tracks. It starts once every other track
+still playing rests or has made two passes that changed the sound. Each time another track opens
+a track again, the track makes such a pass. The fade therefore doesn't wait for the tracks that a
+looping track opens again in each of its loops.
+
 A track waits forever when it waits a negative number of ticks, waits out a held note, or waits
 for its notes to end while one of them has no length and plays a looping wave. A length or a
 wait taken from a variable left at its default of −1 makes a negative wait. A track can't

@@ -1,77 +1,128 @@
 // SPDX-License-Identifier: MIT
 
-// Horizon kernel HLE (see kernel.h).
+// The Horizon kernel's high-level emulation (see kernel.h).
 
 #include "horizon/kernel.h"
 
 #include <algorithm>
 #include <cstdarg>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <functional>
+#include <iterator>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include "xsflib/bytes.h"
+#include "xsflib/memory_image.h"
 
-#include "dsp/fcram.h"
+#include "arm/cpu.h"
+#include "horizon/ipc.h"
 
 namespace threesf::horizon
 {
 namespace
 {
 
-// Approximate cost of each SVC in ARM11 cycles, as measured on hardware (the figures Azahar uses).
-uint32_t SvcCycles(uint32_t number)
+// An SVC that the kernel implements (3dbrew, "SVC"): its number, the cycles that it adds to the clock and the function
+// that runs it.
+struct SvcEntry
 {
-    switch (number)
-    {
-    case 0x08:
-        return 5214;
-    case 0x0a:
-        return 946;
-    case 0x0b:
-        return 616;
-    case 0x0c:
-        return 1812;
-    case 0x14:
-        return 1324;
-    case 0x16:
-        return 2713;
-    case 0x17:
-        return 4329;
-    case 0x18:
-        return 3285;
-    case 0x19:
-        return 1389;
-    case 0x1b:
-        return 5163;
-    case 0x22:
-        return 5664;
-    case 0x23:
-        return 2937;
-    case 0x24:
-        return 4005;
-    case 0x25:
-        return 6918;
-    case 0x28:
-        return 340;
-    case 0x32:
-        return 5825;
-    case 0x37:
-        return 677;
-    default:
-        return 1000;
-    }
-}
+    uint32_t number;
+    uint64_t cycles;
+    void (Kernel::*run)();
+};
 
-constexpr uint32_t kInitialFpscr = 0x03c00000; // default NaN, flush to zero, round towards zero
+// The cycles of an SVC that the kernel doesn't implement.
+constexpr uint64_t kUnimplementedSvcCycles = 1000;
+
+// Result codes.
+constexpr uint32_t kTimeout = 0x09401bfe;
+constexpr uint32_t kInvalidHandle = 0xd8e007f7;
+constexpr uint32_t kNotFound = 0xd8e007fa;
+constexpr uint32_t kOutOfMemory = 0xd86007f3;
+constexpr uint32_t kInvalidAddress = 0xe0e01bf5;
+constexpr uint32_t kMisalignedAddress = 0xe0e01bf1;
+constexpr uint32_t kMisalignedSize = 0xe0e01bf2;
+constexpr uint32_t kOutOfRange = 0xd8e007fd;
+constexpr uint32_t kNotOwner = 0xd8e0041f;
+constexpr uint32_t kInvalidEnum = 0xd8e093ed;
+constexpr uint32_t kNotImplemented = 0xf8601bfd;
+
+// The handle that stands for the thread that calls an SVC, and the step between the handles of the table.
+constexpr uint32_t kCurrentThread = 0xffff8000;
+constexpr uint32_t kHandleStep = 0x10;
+
+// The address map: the heap, linear memory (page n of FCRAM at kLinearBase + n pages), configuration memory, the
+// shared page and the slots of thread-local storage, eight to a page.
+constexpr uint32_t kHeapBase = 0x08000000;
+constexpr uint32_t kHeapEnd = 0x0e000000;
+constexpr uint32_t kLinearBase = 0x14000000;
+constexpr uint32_t kConfigMemory = 0x1ff80000;
+constexpr uint32_t kSharedPage = 0x1ff81000;
+constexpr uint32_t kTlsBase = 0x1ff82000;
+constexpr uint32_t kTlsSize = 0x200;
+constexpr uint32_t kTlsSlotsPerPage = 8;
+
+// The value that turns a linear address into a physical one (GetProcessInfo's type 20). FCRAM starts at 0x20000000 in
+// physical memory.
+constexpr uint32_t kLinearToPhysical = 0x20000000 - kLinearBase;
+
+constexpr uint32_t kPageSize = arm::Memory::kPageSize;
+constexpr uint32_t kPageMask = arm::Memory::kPageMask;
+
+// A new thread's FPSCR: default NaN, flush to zero, round towards zero.
+constexpr uint32_t kThreadFpscr = 0x03c00000;
+
+// ControlMemory's operations, and the flag that selects linear memory.
+constexpr uint32_t kOperationFree = 1;
+constexpr uint32_t kOperationCommit = 3;
+constexpr uint32_t kOperationMap = 4;
+constexpr uint32_t kOperationUnmap = 5;
+constexpr uint32_t kOperationProtect = 6;
+constexpr uint32_t kOperationLinear = 0x10000;
+
+// The reset type of an event or timer that a wait clears, and of one that a signal clears at once.
+constexpr uint32_t kOneShot = 0;
+constexpr uint32_t kPulse = 2;
+
+// The index that WaitSynchronizationN reports when no single object ends the wait: when the thread gets all its
+// objects, and on a timeout. It's -1 as a u32.
+constexpr uint32_t kNoWaitIndex = 0xffffffff;
+
+// ArbitrateAddress's types.
+constexpr uint32_t kArbitrateSignal = 0;
+constexpr uint32_t kArbitrateWaitIfLess = 1;
+constexpr uint32_t kArbitrateDecrementAndWaitIfLess = 2;
+constexpr uint32_t kArbitrateWaitIfLessTimeout = 3;
+constexpr uint32_t kArbitrateDecrementAndWaitIfLessTimeout = 4;
+
+// The process id that GetProcessId returns.
 constexpr uint32_t kProcessId = 0x28;
 
-// ARM11 cycles for a time in nanoseconds, rounded up; 0 for a time that isn't positive.
+// The most bytes that OutputDebugString reads.
+constexpr uint32_t kDebugStringLimit = 4096;
+
+// A log message's buffer: a longer message is cut to its first 1023 bytes.
+constexpr std::size_t kLogBuffer = 1024;
+
+// Objects are collected once the table grows to twice what was live after the last collection, and at least this.
+constexpr std::size_t kCollectMinimum = 256;
+
+constexpr uint64_t kNsPerSecond = 1'000'000'000;
+
+// A time in nanoseconds from two registers: the s64 with `high` in its upper 32 bits.
+int64_t Nanoseconds(uint32_t low, uint32_t high)
+{
+    return static_cast<int64_t>(uint64_t{high} << 32 | low);
+}
+
+// Nanoseconds in ticks, rounded up. A time of 0 or less is 0 ticks.
 uint64_t NsToTicks(int64_t ns)
 {
     if (ns <= 0)
@@ -79,1540 +130,1877 @@ uint64_t NsToTicks(int64_t ns)
         return 0;
     }
 
-    const uint64_t sec = static_cast<uint64_t>(ns) / 1000000000;
-    const uint64_t rem = static_cast<uint64_t>(ns) % 1000000000;
-    return sec * kArmClock + (rem * kArmClock + 999999999) / 1000000000;
-}
-
-// Takes `thread` off the wait lists of the objects it waits on.
-void RemoveFromWaitLists(Thread& thread)
-{
-    for (auto& obj : thread.wait_objects_)
-    {
-        std::erase_if(obj->waiters_, [&](const std::shared_ptr<Thread>& t) { return t.get() == &thread; });
-    }
-
-    thread.wait_objects_.clear();
-    thread.arbiter_ = nullptr;
-}
-
-// Releases references to threads waiting on `object` and, if it's a thread, to objects it waits on. These shared
-// pointers form cycles that must be broken before the objects can be freed.
-void ForgetWaits(Object& object)
-{
-    if (auto* w = dynamic_cast<WaitObject*>(&object))
-    {
-        w->waiters_.clear();
-    }
-
-    if (auto* t = dynamic_cast<Thread*>(&object))
-    {
-        t->wait_objects_.clear();
-    }
+    const auto n = static_cast<uint64_t>(ns);
+    return n / kNsPerSecond * kArmClock + (n % kNsPerSecond * kArmClock + kNsPerSecond - 1) / kNsPerSecond;
 }
 
 } // namespace
 
-bool Mutex::ShouldWait(const Thread* thread) const
+Kernel::Kernel(const KernelConfig& config) : config_(config), cpu_(memory_)
 {
-    return holder_ != nullptr && holder_ != thread;
+    state_.collect_at = kCollectMinimum;
+
+    // Configuration memory: the values of firmware 11.17, with the application's memory (3dbrew, "Configuration
+    // Memory").
+    uint8_t* const config_memory = MapNewRegion(kConfigMemory, kPageSize);
+    config_memory[0x02] = 0x3a;                          // KERNEL_VERSIONMINOR
+    config_memory[0x03] = 0x02;                          // KERNEL_VERSIONMAJOR
+    xsflib::StoreLe32(config_memory + 0x08, 0x00008002); // NSTID
+    xsflib::StoreLe32(config_memory + 0x0c, 0x00040130);
+    xsflib::StoreLe32(config_memory + 0x10, 2);          // SYSCOREVER
+    config_memory[0x14] = 1;                             // ENVINFO: retail
+    config_memory[0x16] = 1;                             // PREV_FIRM
+    xsflib::StoreLe32(config_memory + 0x18, 0x0000f450); // KERNEL_CTRSDKVERSION
+    xsflib::StoreLe32(config_memory + 0x30, 0);          // APPMEMTYPE: memory mode 0
+    xsflib::StoreLe32(config_memory + 0x40, config.app_memory);
+    xsflib::StoreLe32(config_memory + 0x44, 0x02c00000); // SYSMEMALLOC
+    xsflib::StoreLe32(config_memory + 0x48, 0x01400000); // BASEMEMALLOC
+    config_memory[0x62] = 0x3a;                          // FIRM_VERSIONMINOR
+    config_memory[0x63] = 0x02;                          // FIRM_VERSIONMAJOR
+    xsflib::StoreLe32(config_memory + 0x64, 2);          // FIRM_SYSCOREVER
+    xsflib::StoreLe32(config_memory + 0x68, 0x0000f450); // FIRM_CTRSDKVERSION
+
+    // The shared page: a product, with the battery at charge level 5 and charging. Nothing updates it.
+    uint8_t* const shared_page = MapNewRegion(kSharedPage, kPageSize);
+    shared_page[0x04] = 1;    // RUNNING_HW
+    shared_page[0x85] = 0x17; // the battery: (5 << 2) | 3
+    shared_page[0x86] = 1;
 }
 
-void Mutex::Acquire(Thread* thread)
-{
-    holder_ = thread;
-    lock_count_++;
-}
-
-Kernel::Kernel(const KernelConfig& config) : cfg_(config), cpu_(mem_)
-{
-    // Configuration memory (values from firmware 11.17, as in Azahar).
-    uint8_t* config_mem = MapRegion(kConfigMemBase, 0x1000);
-    config_mem[0x02] = 0x3a; // kernel version 2.58
-    config_mem[0x03] = 0x02;
-    xsflib::StoreLe32(config_mem + 0x08, 0x00008002);
-    xsflib::StoreLe32(config_mem + 0x0c, 0x00040130);
-    xsflib::StoreLe32(config_mem + 0x10, 2);
-    config_mem[0x14] = 1; // retail
-    config_mem[0x16] = 1;
-    xsflib::StoreLe32(config_mem + 0x18, 0x0000f450);
-    xsflib::StoreLe32(config_mem + 0x30, 0); // memory mode 0 (64 MiB)
-    xsflib::StoreLe32(config_mem + 0x40, cfg_.app_memory);
-    xsflib::StoreLe32(config_mem + 0x44, 0x02c00000);
-    xsflib::StoreLe32(config_mem + 0x48, 0x01400000);
-    config_mem[0x62] = 0x3a;
-    config_mem[0x63] = 0x02;
-    xsflib::StoreLe32(config_mem + 0x64, 2);
-    xsflib::StoreLe32(config_mem + 0x68, 0x0000f450);
-
-    // Shared page
-    uint8_t* shared = MapRegion(kSharedPageBase, 0x1000);
-    shared[0x04] = 1;            // running hardware: product
-    shared[0x85] = (5 << 2) | 3; // battery: charge level 5, adapter connected, charging
-    shared[0x86] = 1;
-}
-
-Kernel::~Kernel()
-{
-    for (const std::weak_ptr<Object>& weak : objects_)
-    {
-        if (std::shared_ptr<Object> object = weak.lock())
-        {
-            ForgetWaits(*object);
-        }
-    }
-}
-
-void Kernel::Log(const char* fmt, ...) const
-{
-    char buf[1024];
-    va_list args;
-    va_start(args, fmt);
-    std::vsnprintf(buf, sizeof(buf), fmt, args);
-    va_end(args);
-
-    if (log_)
-    {
-        log_(buf);
-    }
-    else
-    {
-        std::fprintf(stderr, "%s\n", buf);
-    }
-}
-
-// --------------------------------------------------------------------------------------------- Memory
-uint8_t* Kernel::NewRegion(uint32_t size)
-{
-    auto region = std::make_shared<Region>();
-    region->bytes = std::make_unique<uint8_t[]>(size);
-    region->size = size;
-    regions_.push_back(region);
-
-    return region->bytes.get();
-}
-
-uint8_t* Kernel::MapRegion(uint32_t vaddr, uint32_t size)
-{
-    size = (size + arm::Memory::kPageMask) & ~arm::Memory::kPageMask;
-    uint8_t* p = NewRegion(size);
-    mem_.Map(vaddr, p, size);
-
-    return p;
-}
-
-void Kernel::MapExternal(uint32_t vaddr, uint8_t* host, uint32_t size)
-{
-    mem_.Map(vaddr, host, size);
-}
-
-void Kernel::SetFcram(uint8_t* base, uint32_t size)
-{
-    fcram_ = base;
-    fcram_size_ = size;
-    fcram_used_.assign(size / arm::Memory::kPageSize, false);
-}
-
-uint32_t Kernel::ControlMemory(uint32_t& out_addr, uint32_t op, uint32_t addr0, uint32_t addr1, uint32_t size)
-{
-    if ((addr0 | addr1) & arm::Memory::kPageMask)
-    {
-        return kResultMisalignedAddress;
-    }
-
-    const uint32_t kind = op & 0xff;
-    const bool linear = (op & 0x10000) != 0;
-    size = (size + arm::Memory::kPageMask) & ~arm::Memory::kPageMask;
-
-    switch (kind)
-    {
-    case 3: // COMMIT
-        {
-            if (linear)
-            {
-                if (!fcram_)
-                {
-                    return kResultOutOfMemory;
-                }
-
-                const uint32_t pages = size / arm::Memory::kPageSize;
-                uint32_t first = 0;
-                if (addr0 != 0)
-                {
-                    first = (addr0 - kLinearBase) / arm::Memory::kPageSize;
-                }
-                else
-                {
-                    // First fit from the start of FCRAM.
-                    uint32_t run = 0;
-                    bool found = false;
-                    for (uint32_t i = 0; i < fcram_used_.size(); i++)
-                    {
-                        run = fcram_used_[i] ? 0 : run + 1;
-                        if (run == pages)
-                        {
-                            first = i + 1 - pages;
-                            found = true;
-                            break;
-                        }
-                    }
-                    if (!found)
-                    {
-                        return kResultOutOfMemory;
-                    }
-                }
-
-                if (first + pages > fcram_used_.size())
-                {
-                    return kResultOutOfMemory;
-                }
-
-                for (uint32_t i = first; i < first + pages; i++)
-                {
-                    fcram_used_[i] = true;
-                }
-
-                const uint32_t offset = first * arm::Memory::kPageSize;
-                std::memset(fcram_ + offset, 0, size);
-                out_addr = kLinearBase + offset;
-                mem_.Map(out_addr, fcram_ + offset, size);
-                linear_size_ += size;
-                return kResultSuccess;
-            }
-
-            if (addr0 < kHeapBase || addr0 > kHeapEnd || size > kHeapEnd - addr0)
-            {
-                return kResultInvalidAddress;
-            }
-
-            MapRegion(addr0, size);
-            heap_size_ += size;
-            out_addr = addr0;
-            return kResultSuccess;
-        }
-
-    case 1: // FREE
-        {
-            if (linear || (addr0 >= kLinearBase && addr0 < kLinearBase + fcram_size_))
-            {
-                const uint32_t first = (addr0 - kLinearBase) / arm::Memory::kPageSize;
-                for (uint32_t i = 0; i < size / arm::Memory::kPageSize && first + i < fcram_used_.size(); i++)
-                {
-                    fcram_used_[first + i] = false;
-                }
-                linear_size_ -= std::min(linear_size_, size);
-            }
-            else
-            {
-                heap_size_ -= std::min(heap_size_, size);
-            }
-
-            mem_.Unmap(addr0, size);
-            out_addr = addr0;
-            return kResultSuccess;
-        }
-
-    case 4: // MAP addr1 to addr0
-        {
-            for (uint32_t off = 0; off < size; off += arm::Memory::kPageSize)
-            {
-                uint8_t* p = mem_.HostPtr(addr1 + off);
-                if (!p)
-                {
-                    return kResultInvalidAddress;
-                }
-
-                mem_.Map(addr0 + off, p, arm::Memory::kPageSize);
-            }
-
-            out_addr = addr0;
-            return kResultSuccess;
-        }
-
-    case 5: // UNMAP
-        mem_.Unmap(addr0, size);
-        out_addr = addr0;
-        return kResultSuccess;
-
-    case 6: // PROTECT
-        out_addr = addr0;
-        return kResultSuccess;
-
-    default:
-        Log("ControlMemory: unsupported operation %08x", op);
-        return kResultNotImplemented;
-    }
-}
-
-uint32_t Kernel::AllocateTls()
-{
-    if (!free_tls_.empty())
-    {
-        const uint32_t a = free_tls_.back();
-        free_tls_.pop_back();
-        mem_.ZeroBlock(a, kTlsSize);
-        return a;
-    }
-
-    const uint32_t a = kTlsBase + tls_count_ * kTlsSize;
-    if ((tls_count_ % (arm::Memory::kPageSize / kTlsSize)) == 0)
-    {
-        MapRegion(a, arm::Memory::kPageSize);
-    }
-
-    tls_count_++;
-
-    return a;
-}
-
-// --------------------------------------------------------------------------------------------- Snapshots
-std::shared_ptr<Kernel::Snapshot> Kernel::Save(const Snapshot* previous)
-{
-    auto snapshot = std::make_shared<Snapshot>();
-
-    std::erase_if(objects_, [](const std::weak_ptr<Object>& o) { return o.expired(); });
-    for (const std::weak_ptr<Object>& weak : objects_)
-    {
-        std::shared_ptr<Object> object = weak.lock();
-        std::unique_ptr<Object> copy = object->Clone();
-        snapshot->objects.emplace_back(std::move(object), std::move(copy));
-    }
-
-    std::erase_if(services_made_, [](const std::weak_ptr<Service>& s) { return s.expired(); });
-    for (const std::weak_ptr<Service>& weak : services_made_)
-    {
-        std::shared_ptr<Service> service = weak.lock();
-        std::unique_ptr<Service> copy = service->Clone();
-        snapshot->services.emplace_back(std::move(service), std::move(copy));
-    }
-
-    snapshot->ticks = ticks_;
-    snapshot->pending_cycles = pending_cycles_;
-    snapshot->events = events_;
-    snapshot->threads = threads_;
-    snapshot->current = current_;
-    snapshot->next_thread_id = next_thread_id_;
-    snapshot->ready_counter = ready_counter_;
-    snapshot->yielded = yielded_;
-    snapshot->free_tls = free_tls_;
-    snapshot->tls_count = tls_count_;
-    snapshot->exited = exited_;
-    snapshot->error = error_;
-    snapshot->handles = handles_;
-    snapshot->next_handle = next_handle_;
-
-    snapshot->regions = regions_;
-    for (std::size_t i = 0; i < regions_.size(); i++)
-    {
-        const xsflib::MemoryImage* before =
-            previous && i < previous->region_images.size() && previous->regions[i] == regions_[i]
-                ? &previous->region_images[i]
-                : nullptr;
-        snapshot->region_images.emplace_back(regions_[i]->bytes.get(), regions_[i]->size, before);
-    }
-
-    snapshot->fcram_used = fcram_used_;
-    snapshot->heap_size = heap_size_;
-    snapshot->linear_size = linear_size_;
-    snapshot->memory = mem_.Save(previous ? &previous->memory : nullptr);
-    snapshot->cpu = cpu_.Save();
-
-    return snapshot;
-}
-
-void Kernel::Restore(const Snapshot& snapshot)
-{
-    // Release references between objects absent from this snapshot. Other snapshots may keep them alive and restore
-    // their saved values later.
-    for (const std::weak_ptr<Object>& weak : objects_)
-    {
-        std::shared_ptr<Object> object = weak.lock();
-        if (object &&
-            std::ranges::find(snapshot.objects, object, &Snapshot::ObjectCopy::first) == snapshot.objects.end())
-        {
-            ForgetWaits(*object);
-        }
-    }
-
-    objects_.clear();
-    for (const auto& [object, copy] : snapshot.objects)
-    {
-        object->Assign(*copy);
-        objects_.push_back(object);
-    }
-
-    services_made_.clear();
-    for (const auto& [service, copy] : snapshot.services)
-    {
-        service->Assign(*copy);
-        services_made_.push_back(service);
-    }
-
-    ticks_ = snapshot.ticks;
-    pending_cycles_ = snapshot.pending_cycles;
-    events_ = snapshot.events;
-    threads_ = snapshot.threads;
-    current_ = snapshot.current;
-    next_thread_id_ = snapshot.next_thread_id;
-    ready_counter_ = snapshot.ready_counter;
-    yielded_ = snapshot.yielded;
-    free_tls_ = snapshot.free_tls;
-    tls_count_ = snapshot.tls_count;
-    exited_ = snapshot.exited;
-    error_ = snapshot.error;
-    handles_ = snapshot.handles;
-    next_handle_ = snapshot.next_handle;
-
-    regions_ = snapshot.regions;
-    for (std::size_t i = 0; i < regions_.size(); i++)
-    {
-        snapshot.region_images[i].Restore(regions_[i]->bytes.get());
-    }
-
-    fcram_used_ = snapshot.fcram_used;
-    heap_size_ = snapshot.heap_size;
-    linear_size_ = snapshot.linear_size;
-    mem_.Restore(snapshot.memory);
-    cpu_.Restore(snapshot.cpu);
-}
-
-// --------------------------------------------------------------------------------------------- Handles and objects
-Handle Kernel::AddHandle(std::shared_ptr<Object> object)
-{
-    const Handle h = next_handle_;
-    next_handle_ += 0x10;
-    handles_[h] = std::move(object);
-
-    return h;
-}
-
-std::shared_ptr<Object> Kernel::GetObject(Handle handle)
-{
-    if (handle == kCurrentThread)
-    {
-        return current_ ? current_->shared_from_this() : nullptr;
-    }
-
-    auto it = handles_.find(handle);
-    return it == handles_.end() ? nullptr : it->second;
-}
-
-bool Kernel::CloseHandle(Handle handle)
-{
-    return handles_.erase(handle) != 0;
-}
-
-void Kernel::RegisterService(const std::string& name, std::shared_ptr<Service> service)
-{
-    services_[name] = std::move(service);
-}
-
-std::shared_ptr<Service> Kernel::FindService(const std::string& name)
-{
-    auto it = services_.find(name);
-    return it == services_.end() ? nullptr : it->second;
-}
-
-void Kernel::RegisterPort(const std::string& name, std::shared_ptr<Service> service)
-{
-    ports_[name] = std::move(service);
-}
-
-Handle Kernel::CreateSessionHandle(std::shared_ptr<Service> service)
-{
-    auto s = Make<Session>();
-    s->service_ = std::move(service);
-
-    return AddHandle(s);
-}
-
-// --------------------------------------------------------------------------------------------- Threads and scheduling
-void Kernel::CreateMainThread(uint32_t entry, uint32_t stack_top, int32_t priority)
-{
-    Handle h;
-    CreateThread(h, entry, 0, stack_top, priority);
-}
-
-uint32_t Kernel::CreateThread(Handle& out, uint32_t entry, uint32_t arg, uint32_t stack_top, int32_t priority)
-{
-    auto t = Make<Thread>();
-    t->id_ = next_thread_id_++;
-    t->priority_ = priority;
-    t->context_.r[0] = arg;
-    t->context_.r[13] = stack_top & ~7u;
-    t->context_.r[15] = entry & ~1u;
-    t->context_.thumb = (entry & 1) != 0;
-    t->context_.fpscr = kInitialFpscr;
-    t->tls_address_ = AllocateTls();
-    t->context_.tls = t->tls_address_;
-    MakeReady(*t);
-    threads_.push_back(t);
-    out = AddHandle(t);
-
-    return kResultSuccess;
-}
-
-void Kernel::MakeReady(Thread& thread)
-{
-    thread.status_ = ThreadStatus::kReady;
-    thread.ready_seq_ = ++ready_counter_;
-}
-
-Thread* Kernel::PickNext()
-{
-    // Among threads of equal priority, Horizon keeps the current thread running unless it yields. A yield moves it to
-    // the end of the ready queue; the others run in the order they became ready.
-    const auto first = [this](const Thread* a, const Thread* b)
-    {
-        const bool a_keeps = a == current_ && !yielded_;
-        const bool b_keeps = b == current_ && !yielded_;
-        return a_keeps != b_keeps ? a_keeps : a->ready_seq_ < b->ready_seq_;
-    };
-
-    Thread* best = nullptr;
-    for (auto& t : threads_)
-    {
-        if (t->status_ != ThreadStatus::kReady)
-        {
-            continue;
-        }
-
-        if (!best || t->priority_ < best->priority_ || (t->priority_ == best->priority_ && first(t.get(), best)))
-        {
-            best = t.get();
-        }
-    }
-
-    yielded_ = false;
-
-    return best;
-}
-
-void Kernel::SwitchTo(Thread& thread)
-{
-    if (current_ == &thread)
-    {
-        return;
-    }
-
-    if (current_)
-    {
-        current_->context_ = cpu_.state_;
-    }
-
-    current_ = &thread;
-    cpu_.state_ = thread.context_;
-    cpu_.ClearExclusive();
-}
-
-void Kernel::Schedule(uint64_t time, std::function<void()> fn)
-{
-    events_.emplace(time, std::move(fn));
-}
-
-void Kernel::AdvanceTo(uint64_t time)
-{
-    if (time <= ticks_)
-    {
-        return;
-    }
-
-    ticks_ = time;
-
-    if (device_step_)
-    {
-        device_step_(time);
-    }
-}
-
-void Kernel::RunDueEvents()
-{
-    while (!events_.empty() && events_.begin()->first <= ticks_)
-    {
-        auto fn = std::move(events_.begin()->second);
-        events_.erase(events_.begin());
-        fn();
-    }
-}
-
-void Kernel::ResumeThread(Thread& thread, uint32_t result, int32_t index)
-{
-    thread.wait_generation_++;
-
-    if (thread.status_ == ThreadStatus::kWaitSync)
-    {
-        thread.context_.r[0] = result;
-        if (thread.wait_sets_index_)
-        {
-            thread.context_.r[1] = static_cast<uint32_t>(index);
-        }
-    }
-
-    MakeReady(thread);
-}
-
-void Kernel::StartTimeout(Thread& thread, int64_t timeout_ns)
-{
-    const uint64_t gen = thread.wait_generation_;
-    auto self = std::static_pointer_cast<Thread>(thread.shared_from_this());
-    const auto on_timeout = [this, self, gen]
-    {
-        if (self->wait_generation_ != gen)
-        {
-            return;
-        }
-
-        if (self->status_ == ThreadStatus::kWaitSync)
-        {
-            RemoveFromWaitLists(*self);
-            ResumeThread(*self, kResultTimeout, -1);
-        }
-        else if (self->status_ == ThreadStatus::kWaitArbiter || self->status_ == ThreadStatus::kSleeping)
-        {
-            RemoveFromWaitLists(*self);
-            ResumeThread(*self, 0, 0);
-        }
-    };
-    Schedule(ticks_ + NsToTicks(timeout_ns), on_timeout);
-}
-
-void Kernel::WaitOn(Thread& thread, std::vector<std::shared_ptr<WaitObject>> objects, bool wait_all, int64_t timeout_ns,
-                    bool sets_index)
-{
-    thread.wait_objects_ = std::move(objects);
-    thread.wait_all_ = wait_all;
-    thread.wait_sets_index_ = sets_index;
-    thread.status_ = ThreadStatus::kWaitSync;
-    auto self = std::static_pointer_cast<Thread>(thread.shared_from_this());
-    for (auto& obj : thread.wait_objects_)
-    {
-        obj->waiters_.push_back(self);
-    }
-
-    if (timeout_ns >= 0)
-    {
-        StartTimeout(thread, timeout_ns);
-    }
-}
-
-void Kernel::WakeWaiters(WaitObject& object)
-{
-    while (true)
-    {
-        Thread* best = nullptr;
-        for (auto& t : object.waiters_)
-        {
-            if (t->status_ != ThreadStatus::kWaitSync)
-            {
-                continue;
-            }
-
-            bool can;
-            if (t->wait_all_)
-            {
-                can = true;
-                for (auto& o : t->wait_objects_)
-                {
-                    if (o->ShouldWait(t.get()))
-                    {
-                        can = false;
-                    }
-                }
-            }
-            else
-            {
-                can = !object.ShouldWait(t.get());
-            }
-
-            if (can && (!best || t->priority_ < best->priority_))
-            {
-                best = t.get();
-            }
-        }
-        if (!best)
-        {
-            return;
-        }
-
-        int32_t index = -1;
-        if (best->wait_all_)
-        {
-            for (auto& o : best->wait_objects_)
-            {
-                o->Acquire(best);
-            }
-        }
-        else
-        {
-            object.Acquire(best);
-            for (std::size_t i = 0; i < best->wait_objects_.size(); i++)
-            {
-                if (best->wait_objects_[i].get() == &object)
-                {
-                    index = static_cast<int32_t>(i);
-                }
-            }
-        }
-
-        RemoveFromWaitLists(*best);
-        ResumeThread(*best, kResultSuccess, index);
-    }
-}
-
-void Kernel::SignalEvent(Event& event)
-{
-    event.signaled_ = true;
-    WakeWaiters(event);
-    if (event.reset_type_ == ResetType::kPulse)
-    {
-        event.signaled_ = false;
-    }
-}
-
-void Kernel::SignalTimer(const std::shared_ptr<Timer>& timer, uint64_t generation)
-{
-    if (timer->generation_ != generation)
-    {
-        return;
-    }
-
-    timer->signaled_ = true;
-    WakeWaiters(*timer);
-    if (timer->reset_type_ == ResetType::kPulse)
-    {
-        timer->signaled_ = false;
-    }
-
-    if (timer->interval_ticks_)
-    {
-        Schedule(ticks_ + timer->interval_ticks_, [this, timer, generation] { SignalTimer(timer, generation); });
-    }
-}
-
-void Kernel::ExitThread(Thread& thread)
-{
-    thread.status_ = ThreadStatus::kDead;
-
-    // Release the mutexes the thread holds.
-    for (auto& [h, obj] : handles_)
-    {
-        if (auto m = std::dynamic_pointer_cast<Mutex>(obj); m && m->holder_ == &thread)
-        {
-            m->holder_ = nullptr;
-            m->lock_count_ = 0;
-            WakeWaiters(*m);
-        }
-    }
-
-    WakeWaiters(thread);
-    free_tls_.push_back(thread.tls_address_);
-}
+Kernel::~Kernel() = default;
 
 Kernel::RunResult Kernel::RunUntil(uint64_t until)
 {
+    State& s = state_;
     while (true)
     {
-        if (exited_)
+        if (s.exited)
         {
-            // svcBreak ends the program with a reason in error_.
             return error_.empty() ? RunResult::kExited : RunResult::kError;
         }
 
         RunDueEvents();
-
-        if (ticks_ >= until)
+        if (s.ticks >= until)
         {
             return RunResult::kOk;
         }
 
-        Thread* next = PickNext();
-        if (!next)
+        // With no thread ready, the time moves on towards the next timed event in slices, and the DSP runs.
+        const uint32_t next = PickThread();
+        if (next == kNone)
         {
-            // Idle: advance in slices so that interrupts raised by the device (the DSP) wake threads promptly.
-            uint64_t target = std::min(until, ticks_ + cfg_.slice_cycles);
-            if (!events_.empty())
+            uint64_t target = std::min(until, s.ticks + config_.slice_cycles);
+            if (!s.events.empty())
             {
-                target = std::min(target, events_.begin()->first);
+                target = std::min(target, s.events.front().due);
             }
 
             AdvanceTo(target);
             continue;
         }
 
-        SwitchTo(*next);
-        uint64_t limit = std::min(until, ticks_ + cfg_.slice_cycles);
-        if (!events_.empty())
+        // The CPU runs until the slice ends, the next timed event is due or the thread stops. The SVCs' cycles reach
+        // the clock with the instructions'.
+        SwitchTo(next);
+        uint64_t limit = std::min(until, s.ticks + config_.slice_cycles);
+        if (!s.events.empty())
         {
-            limit = std::min(limit, std::max(events_.begin()->first, ticks_ + 1));
+            limit = std::min(limit, std::max(s.events.front().due, s.ticks + 1));
         }
 
-        const uint64_t before = cpu_.executed_;
-        const arm::StopReason reason = cpu_.Run(limit - ticks_);
-        const uint64_t cost = cpu_.executed_ - before + pending_cycles_;
-        pending_cycles_ = 0;
-        AdvanceTo(ticks_ + cost);
+        const uint64_t executed = cpu_.executed_;
+        const arm::StopReason reason = cpu_.Run(limit - s.ticks);
+        const uint64_t cost = cpu_.executed_ - executed + s.pending;
+        s.pending = 0;
+        AdvanceTo(s.ticks + cost);
 
         switch (reason)
         {
         case arm::StopReason::kSvc:
-            HandleSvc(*current_, cpu_.svc_number_);
-            break;
-
-        case arm::StopReason::kBudget:
-        case arm::StopReason::kNone:
+            HandleSvc();
             break;
 
         case arm::StopReason::kYield:
-            current_->ready_seq_ = ++ready_counter_;
-            yielded_ = true;
+            Yield(s.current);
             break;
 
         case arm::StopReason::kFault:
-            {
-                char buf[160];
-                std::snprintf(buf, sizeof(buf), "memory fault at %08x (%s) in thread %u at pc %08x",
-                              mem_.fault_address_, mem_.fault_write_ ? "write" : "read", current_->id_, cpu_.stop_pc_);
-                error_ = std::string(buf) + "\n" + cpu_.Describe();
-                mem_.fault_ = false;
-                return RunResult::kError;
-            }
+            error_ = FaultMessage();
+            memory_.fault_ = false;
+            return RunResult::kError;
 
         case arm::StopReason::kUndefined:
-            {
-                char buf[160];
-                std::snprintf(buf, sizeof(buf), "undefined instruction %08x in thread %u at pc %08x", cpu_.stop_opcode_,
-                              current_->id_, cpu_.stop_pc_);
-                error_ = std::string(buf) + "\n" + cpu_.Describe();
-                return RunResult::kError;
-            }
+            error_ = UndefinedMessage();
+            return RunResult::kError;
+
+        case arm::StopReason::kNone:
+        case arm::StopReason::kBudget:
+            break;
         }
 
-        if (current_ && current_->status_ != ThreadStatus::kReady)
+        if (s.current != kNone && s.threads[s.current].state != ThreadState::kReady)
         {
-            current_->context_ = cpu_.state_;
-            current_ = nullptr;
+            s.threads[s.current].registers = cpu_.state_;
+            s.current = kNone;
         }
     }
 }
 
-// --------------------------------------------------------------------------------------------- SVCs
-uint32_t Kernel::ArbitrateAddress(Thread& thread, Handle handle, uint32_t address, uint32_t type, int32_t value,
-                                  int64_t ns)
+uint64_t Kernel::Ticks() const
 {
-    auto arbiter = Get<AddressArbiter>(handle);
-    if (!arbiter)
+    return state_.ticks;
+}
+
+arm::Memory& Kernel::Memory()
+{
+    return memory_;
+}
+
+uint32_t Kernel::Read32(uint32_t address)
+{
+    return memory_.Read32(address);
+}
+
+void Kernel::Write32(uint32_t address, uint32_t value)
+{
+    memory_.Write32(address, value);
+}
+
+void Kernel::SetLinearMemory(uint8_t* fcram, uint32_t size)
+{
+    fcram_ = fcram;
+    fcram_size_ = size;
+    state_.fcram_used = std::make_shared<std::vector<uint8_t>>(size / kPageSize, 0);
+}
+
+uint8_t* Kernel::MapNewRegion(uint32_t address, uint32_t size)
+{
+    const Region& region = regions_[NewRegion(size)];
+    memory_.Map(address, region.host.get(), region.size);
+
+    return region.host.get();
+}
+
+void Kernel::SetServiceHost(ServiceHost* host)
+{
+    host_ = host;
+}
+
+void Kernel::SetDeviceStep(std::function<void(uint64_t ticks)> step)
+{
+    device_step_ = std::move(step);
+}
+
+uint32_t Kernel::CreateThread(int32_t priority, uint32_t entry, uint32_t argument, uint32_t stack_top)
+{
+    State& s = state_;
+    Thread thread;
+    thread.id = s.next_thread_id++;
+    thread.priority = priority;
+    thread.registers.r[0] = argument;
+    thread.registers.r[13] = stack_top & ~7u;
+    thread.registers.r[15] = entry & ~1u;
+    thread.registers.thumb = (entry & 1) != 0;
+    thread.registers.fpscr = kThreadFpscr;
+    thread.tls = AllocateTls();
+    thread.registers.tls = thread.tls;
+    thread.ready_number = ++s.ready_counter;
+
+    const auto index = static_cast<uint32_t>(s.threads.size());
+    s.threads.push_back(std::move(thread));
+    s.ready_threads++;
+    const uint32_t object = NewObject(ObjectKind::kThread);
+    s.objects[object].thread = index;
+    s.threads[index].object = object;
+
+    return NewHandle(object);
+}
+
+uint32_t Kernel::NewEvent(uint32_t reset_type)
+{
+    const uint32_t object = NewObject(ObjectKind::kEvent);
+    state_.objects[object].reset_type = reset_type;
+
+    return object;
+}
+
+uint32_t Kernel::NewMutex()
+{
+    return NewObject(ObjectKind::kMutex);
+}
+
+uint32_t Kernel::NewSemaphore(int32_t count, int32_t maximum)
+{
+    const uint32_t object = NewObject(ObjectKind::kSemaphore);
+    state_.objects[object].count = count;
+    state_.objects[object].maximum = maximum;
+
+    return object;
+}
+
+uint32_t Kernel::NewSession(uint32_t service)
+{
+    const uint32_t object = NewObject(ObjectKind::kSession);
+    state_.objects[object].service = service;
+
+    return object;
+}
+
+uint32_t Kernel::NewHandle(uint32_t object)
+{
+    State& s = state_;
+    const uint32_t handle = s.next_handle;
+    s.next_handle += kHandleStep;
+    s.handles.push_back({handle, object});
+
+    return handle;
+}
+
+uint32_t Kernel::Lookup(uint32_t handle) const
+{
+    const State& s = state_;
+    if (handle == kCurrentThread)
     {
-        return kResultInvalidHandle;
+        return s.current == kNone ? kNone : s.threads[s.current].object;
     }
 
-    const auto block = [&](bool timeout)
+    const auto entry = FindHandle(handle);
+
+    return entry != s.handles.end() ? entry->object : kNone;
+}
+
+bool Kernel::IsEvent(uint32_t object) const
+{
+    return object != kNone && state_.objects[object].kind == ObjectKind::kEvent;
+}
+
+void Kernel::SetSignalHook(uint32_t event)
+{
+    state_.objects[event].hooked = true;
+}
+
+void Kernel::Signal(uint32_t object)
+{
+    state_.objects[object].signalled = true;
+    WakeWaiters(object);
+    if (state_.objects[object].reset_type == kPulse)
     {
-        thread.status_ = ThreadStatus::kWaitArbiter;
-        thread.arbiter_ = arbiter.get();
-        thread.arbiter_address_ = address;
-        if (timeout)
+        state_.objects[object].signalled = false;
+    }
+}
+
+void Kernel::AddPending(uint64_t cycles)
+{
+    state_.pending += cycles;
+}
+
+uint32_t Kernel::CurrentThreadId() const
+{
+    return state_.current == kNone ? 0 : state_.threads[state_.current].id;
+}
+
+uint32_t Kernel::CurrentTls() const
+{
+    return state_.current == kNone ? 0 : state_.threads[state_.current].tls;
+}
+
+void Kernel::Log(const char* format, ...)
+{
+    char message[kLogBuffer];
+    message[0] = 0;
+    va_list arguments;
+    va_start(arguments, format);
+    std::vsnprintf(message, sizeof(message), format, arguments);
+    va_end(arguments);
+
+    if (log_)
+    {
+        log_(message);
+    }
+    else
+    {
+        std::fprintf(stderr, "%s\n", message);
+    }
+}
+
+Kernel::Snapshot Kernel::Save(const Snapshot* previous) const
+{
+    Snapshot snapshot;
+    snapshot.state = state_;
+    snapshot.error = error_;
+    snapshot.regions.reserve(regions_.size());
+    for (std::size_t i = 0; i < regions_.size(); i++)
+    {
+        const xsflib::MemoryImage* before = previous && i < previous->regions.size() ? &previous->regions[i] : nullptr;
+        snapshot.regions.emplace_back(regions_[i].host.get(), regions_[i].size, before);
+    }
+
+    snapshot.memory = memory_.Save(previous ? &previous->memory : nullptr);
+    snapshot.cpu = cpu_.Save();
+
+    return snapshot;
+}
+
+void Kernel::Restore(const Snapshot& snapshot)
+{
+    // Regions made after the snapshot stay. Nothing in the restored state refers to them.
+    state_ = snapshot.state;
+    error_ = snapshot.error;
+    for (std::size_t i = 0; i < snapshot.regions.size(); i++)
+    {
+        snapshot.regions[i].Restore(regions_[i].host.get());
+    }
+
+    memory_.Restore(snapshot.memory);
+    cpu_.Restore(snapshot.cpu);
+}
+
+// An event runs after another when it's due later. Events due at the same time run in the order they were scheduled.
+bool Kernel::TimedEvent::RunsAfter(const TimedEvent& a, const TimedEvent& b)
+{
+    return a.due != b.due ? a.due > b.due : a.order > b.order;
+}
+
+// Runs the timed events that are due, the earliest first. One that an event schedules for a time already reached runs
+// in the same pass.
+void Kernel::RunDueEvents()
+{
+    State& s = state_;
+    while (!s.events.empty() && s.events.front().due <= s.ticks)
+    {
+        std::pop_heap(s.events.begin(), s.events.end(), TimedEvent::RunsAfter);
+        const TimedEvent event = s.events.back();
+        s.events.pop_back();
+        switch (event.kind)
         {
-            StartTimeout(thread, ns);
+        case TimedEvent::Kind::kTimeout:
+            ExpireTimeout(event.target, event.generation);
+            break;
+        case TimedEvent::Kind::kTimerExpiry:
+            ExpireTimer(event.target, event.generation);
+            break;
         }
+    }
+}
+
+// A thread's timeout ends its wait or sleep. A wait for objects ends with the timeout result. A wait on an arbiter and
+// a sleep end with the registers as they were. A wake since the timeout started makes it stale.
+void Kernel::ExpireTimeout(uint32_t thread, uint64_t generation)
+{
+    if (state_.threads[thread].wait_generation != generation)
+    {
+        return;
+    }
+
+    switch (state_.threads[thread].state)
+    {
+    case ThreadState::kWaitObjects:
+        EndWaitForObjects(thread, kTimeout, kNoWaitIndex);
+        break;
+    case ThreadState::kWaitArbiter:
+    case ThreadState::kSleeping:
+        Resume(thread);
+        break;
+    case ThreadState::kReady:
+    case ThreadState::kDead:
+        break;
+    }
+}
+
+// A timer's expiry signals the timer. A periodic timer's next expiry counts from now. A set or cancel since the expiry
+// was scheduled makes it stale.
+void Kernel::ExpireTimer(uint32_t timer, uint64_t generation)
+{
+    if (state_.objects[timer].generation != generation)
+    {
+        return;
+    }
+
+    Signal(timer);
+    const uint64_t interval = state_.objects[timer].interval;
+    if (interval != 0)
+    {
+        ScheduleExpiry(timer, state_.ticks + interval);
+    }
+}
+
+// The ready thread to run next: the lowest priority number, then the current thread unless it has just yielded, then
+// the thread that became ready first.
+uint32_t Kernel::PickThread()
+{
+    State& s = state_;
+    const bool yielded = s.just_yielded;
+    s.just_yielded = false;
+    if (s.ready_threads == 0)
+    {
+        return kNone;
+    }
+
+    uint32_t best = kNone;
+    for (uint32_t i = 0; i < s.threads.size(); i++)
+    {
+        const Thread& thread = s.threads[i];
+        if (thread.state == ThreadState::kReady && (best == kNone || thread.priority < s.threads[best].priority))
+        {
+            best = i;
+        }
+    }
+
+    const int32_t priority = s.threads[best].priority;
+    if (!yielded && s.current != kNone && s.threads[s.current].state == ThreadState::kReady &&
+        s.threads[s.current].priority == priority)
+    {
+        return s.current;
+    }
+
+    for (uint32_t i = best + 1; i < s.threads.size(); i++)
+    {
+        const Thread& thread = s.threads[i];
+        if (thread.state == ThreadState::kReady && thread.priority == priority &&
+            thread.ready_number < s.threads[best].ready_number)
+        {
+            best = i;
+        }
+    }
+
+    return best;
+}
+
+void Kernel::SwitchTo(uint32_t thread)
+{
+    State& s = state_;
+    if (thread == s.current)
+    {
+        return;
+    }
+
+    if (s.current != kNone)
+    {
+        s.threads[s.current].registers = cpu_.state_;
+    }
+
+    cpu_.state_ = s.threads[thread].registers;
+    s.current = thread;
+    cpu_.ClearExclusive();
+}
+
+// Moves the clock on to `ticks`, if that's later, and steps the devices to it.
+void Kernel::AdvanceTo(uint64_t ticks)
+{
+    if (ticks > state_.ticks)
+    {
+        state_.ticks = ticks;
+        if (device_step_)
+        {
+            device_step_(ticks);
+        }
+    }
+}
+
+std::string Kernel::FaultMessage() const
+{
+    char message[96];
+    std::snprintf(message, sizeof(message), "memory fault at %08x (%s) in thread %u at pc %08x", memory_.fault_address_,
+                  memory_.fault_write_ ? "write" : "read", CurrentThreadId(), cpu_.stop_pc_);
+
+    return std::string(message) + "\n" + cpu_.Describe();
+}
+
+std::string Kernel::UndefinedMessage() const
+{
+    char message[96];
+    std::snprintf(message, sizeof(message), "undefined instruction %08x in thread %u at pc %08x", cpu_.stop_opcode_,
+                  CurrentThreadId(), cpu_.stop_pc_);
+
+    return std::string(message) + "\n" + cpu_.Describe();
+}
+
+// Adds the SVC's cycles to the pending ones and runs the SVC. One that the kernel doesn't implement fails.
+void Kernel::HandleSvc()
+{
+    // Every SVC that the kernel implements, in the order of their numbers.
+    static constexpr SvcEntry kSvcs[] = {
+        {0x01, 1000, &Kernel::SvcControlMemory},
+        {0x03, 1000, &Kernel::SvcExitProcess},
+        {0x08, 5214, &Kernel::SvcCreateThread},
+        {0x09, 1000, &Kernel::SvcExitThread},
+        {0x0a, 946, &Kernel::SvcSleepThread},
+        {0x0b, 616, &Kernel::SvcGetThreadPriority},
+        {0x0c, 1812, &Kernel::SvcSetThreadPriority},
+        {0x13, 1000, &Kernel::SvcCreateMutex},
+        {0x14, 1324, &Kernel::SvcReleaseMutex},
+        {0x15, 1000, &Kernel::SvcCreateSemaphore},
+        {0x16, 2713, &Kernel::SvcReleaseSemaphore},
+        {0x17, 4329, &Kernel::SvcCreateEvent},
+        {0x18, 3285, &Kernel::SvcSignalEvent},
+        {0x19, 1389, &Kernel::SvcClearEvent},
+        {0x1a, 1000, &Kernel::SvcCreateTimer},
+        {0x1b, 5163, &Kernel::SvcSetTimer},
+        {0x1c, 1000, &Kernel::SvcCancelTimer},
+        {0x1d, 1000, &Kernel::SvcClearTimer},
+        {0x1e, 1000, &Kernel::SvcCreateMemoryBlock},
+        {0x1f, 1000, &Kernel::SvcMapMemoryBlock},
+        {0x20, 1000, &Kernel::SvcUnmapMemoryBlock},
+        {0x21, 1000, &Kernel::SvcCreateAddressArbiter},
+        {0x22, 5664, &Kernel::SvcArbitrateAddress},
+        {0x23, 2937, &Kernel::SvcCloseHandle},
+        {0x24, 4005, &Kernel::SvcWaitSynchronization1},
+        {0x25, 6918, &Kernel::SvcWaitSynchronizationN},
+        {0x27, 1000, &Kernel::SvcDuplicateHandle},
+        {0x28, 340, &Kernel::SvcGetSystemTick},
+        {0x29, 1000, &Kernel::SvcGetHandleInfo},
+        {0x2a, 1000, &Kernel::SvcGetSystemInfo},
+        {0x2b, 1000, &Kernel::SvcGetProcessInfo},
+        {0x2d, 1000, &Kernel::SvcConnectToPort},
+        {0x32, 5825, &Kernel::SvcSendSyncRequest},
+        {0x35, 1000, &Kernel::SvcGetProcessId},
+        {0x37, 677, &Kernel::SvcGetThreadId},
+        {0x38, 1000, &Kernel::SvcGetResourceLimit},
+        {0x39, 1000, &Kernel::SvcGetResourceLimitLimitValues},
+        {0x3a, 1000, &Kernel::SvcGetResourceLimitCurrentValues},
+        {0x3c, 1000, &Kernel::SvcBreak},
+        {0x3d, 1000, &Kernel::SvcOutputDebugString},
     };
 
+    const uint32_t number = cpu_.svc_number_;
+    const auto svc =
+        std::find_if(std::begin(kSvcs), std::end(kSvcs), [number](const SvcEntry& s) { return s.number == number; });
+    if (svc == std::end(kSvcs))
+    {
+        state_.pending += kUnimplementedSvcCycles;
+        Log("unimplemented SVC 0x%02x at %08x", number, cpu_.stop_pc_);
+        cpu_.state_.r[0] = kNotImplemented;
+        return;
+    }
+
+    state_.pending += svc->cycles;
+    (this->*svc->run)();
+}
+
+void Kernel::SvcControlMemory()
+{
+    arm::CpuState& r = cpu_.state_;
+    uint32_t address = 0;
+    const uint32_t result = ControlMemory(r.r[0], r.r[1], r.r[2], r.r[3], address);
+    r.r[0] = result;
+    r.r[1] = result == kSuccess ? address : 0;
+}
+
+// Runs the operation in the low byte of `operation`. Every operation but a linear commit gives addr0 as the address.
+uint32_t Kernel::ControlMemory(uint32_t operation, uint32_t addr0, uint32_t addr1, uint32_t size, uint32_t& address)
+{
+    if ((addr0 & kPageMask) != 0 || (addr1 & kPageMask) != 0)
+    {
+        return kMisalignedAddress;
+    }
+
+    const bool linear = (operation & kOperationLinear) != 0;
+    size = arm::Memory::RoundUpToPage(size);
+    address = addr0;
+    switch (operation & 0xff)
+    {
+    case kOperationCommit:
+        return linear ? CommitLinear(addr0, size, address) : CommitHeap(addr0, size);
+
+    case kOperationFree:
+        FreeMemory(addr0, size, linear);
+        return kSuccess;
+
+    case kOperationMap:
+        // The pages of addr1 appear at addr0 too.
+        return MapAlias(addr0, addr1, size) ? kSuccess : kInvalidAddress;
+
+    case kOperationUnmap:
+        memory_.Unmap(addr0, size);
+        return kSuccess;
+
+    case kOperationProtect:
+        // Permissions don't exist: every page can be read, written and executed.
+        return kSuccess;
+
+    default:
+        Log("ControlMemory: unsupported operation %08x", operation);
+        return kNotImplemented;
+    }
+}
+
+// Commits heap memory: a new region of zeros at addr0. Heap memory isn't part of FCRAM. A commit over mapped pages
+// replaces them.
+uint32_t Kernel::CommitHeap(uint32_t addr0, uint32_t size)
+{
+    if (addr0 < kHeapBase || addr0 > kHeapEnd || size > kHeapEnd - addr0)
+    {
+        return kInvalidAddress;
+    }
+
+    MapNewRegion(addr0, size);
+    state_.heap_size += size;
+
+    return kSuccess;
+}
+
+// Commits linear memory: FCRAM's pages at the address given, or at the first free run of pages for an address of 0.
+// Nothing checks that pages at a given address are free.
+uint32_t Kernel::CommitLinear(uint32_t addr0, uint32_t size, uint32_t& address)
+{
+    State& s = state_;
+    const uint64_t pages = size / kPageSize;
+    const std::optional<uint64_t> first = addr0 == 0 ? FirstFreePages(pages) : (addr0 - kLinearBase) / kPageSize;
+    if (!first || *first + pages > s.fcram_used->size())
+    {
+        return kOutOfMemory;
+    }
+
+    std::vector<uint8_t>& used = FcramUsedForChange();
+    std::fill_n(used.begin() + static_cast<std::ptrdiff_t>(*first), static_cast<std::size_t>(pages), 1);
+    uint8_t* const host = fcram_ + static_cast<std::size_t>(*first * kPageSize);
+    std::memset(host, 0, size);
+    address = kLinearBase + static_cast<uint32_t>(*first * kPageSize);
+    memory_.Map(address, host, size);
+    s.linear_size += size;
+
+    return kSuccess;
+}
+
+// The first page of the earliest run of `pages` free pages of FCRAM, or nothing when no run is that long. A run of 0
+// pages starts just after the first page in use. There's none when no page is in use.
+std::optional<uint64_t> Kernel::FirstFreePages(uint64_t pages) const
+{
+    const std::vector<uint8_t>& used = *state_.fcram_used;
+    uint64_t run = 0;
+    for (uint64_t page = 0; page < used.size(); page++)
+    {
+        run = used[static_cast<std::size_t>(page)] ? 0 : run + 1;
+        if (run == pages)
+        {
+            return page + 1 - pages;
+        }
+    }
+
+    return std::nullopt;
+}
+
+// Unmaps the pages at addr0 and takes their size off the heap size or the linear size. A free in linear memory gives
+// FCRAM's pages back without clearing them.
+void Kernel::FreeMemory(uint32_t addr0, uint32_t size, bool linear)
+{
+    State& s = state_;
+    if (linear || (addr0 >= kLinearBase && addr0 - kLinearBase < fcram_size_))
+    {
+        const uint64_t first = (addr0 - kLinearBase) / kPageSize;
+        const uint64_t end = std::min<uint64_t>(first + size / kPageSize, s.fcram_used->size());
+        if (first < end)
+        {
+            std::vector<uint8_t>& used = FcramUsedForChange();
+            std::fill(used.begin() + static_cast<std::ptrdiff_t>(first),
+                      used.begin() + static_cast<std::ptrdiff_t>(end), 0);
+        }
+
+        s.linear_size -= std::min(size, s.linear_size);
+    }
+    else
+    {
+        s.heap_size -= std::min(size, s.heap_size);
+    }
+
+    memory_.Unmap(addr0, size);
+}
+
+// Maps the host pages behind [from, from + size) at `to` too. Each page is looked up as it's mapped now. Returns false
+// at the first unmapped page. The pages mapped before it stay mapped.
+bool Kernel::MapAlias(uint32_t to, uint32_t from, uint32_t size)
+{
+    for (uint64_t offset = 0; offset < size; offset += kPageSize)
+    {
+        uint8_t* const host = memory_.HostPtr(from + static_cast<uint32_t>(offset));
+        if (!host)
+        {
+            return false;
+        }
+
+        memory_.Map(to + static_cast<uint32_t>(offset), host, kPageSize);
+    }
+
+    return true;
+}
+
+// FCRAM's page flags, ready for a change. While a snapshot shares them, the state gets a copy first.
+std::vector<uint8_t>& Kernel::FcramUsedForChange()
+{
+    std::shared_ptr<std::vector<uint8_t>>& used = state_.fcram_used;
+    if (used.use_count() > 1)
+    {
+        used = std::make_shared<std::vector<uint8_t>>(*used);
+    }
+
+    return *used;
+}
+
+void Kernel::SvcCreateThread()
+{
+    arm::CpuState& r = cpu_.state_;
+    const uint32_t handle = CreateThread(static_cast<int32_t>(r.r[0]), r.r[1], r.r[2], r.r[3]);
+    r.r[0] = kSuccess;
+    r.r[1] = handle;
+}
+
+void Kernel::SvcSleepThread()
+{
+    const arm::CpuState& r = cpu_.state_;
+    const int64_t ns = Nanoseconds(r.r[0], r.r[1]);
+    if (ns <= 0)
+    {
+        Yield(state_.current);
+        return;
+    }
+
+    Sleep(state_.current, ns);
+}
+
+// The thread dies. The kernel releases each mutex that the thread holds and that a handle refers to, in the order of
+// the handle table, and wakes the mutex's waiters. The thread's waiters then wake. The slot of thread-local storage
+// goes back to the free list.
+void Kernel::SvcExitThread()
+{
+    State& s = state_;
+    const uint32_t thread = s.current;
+    SetThreadState(thread, ThreadState::kDead);
+    for (std::size_t i = 0; i < s.handles.size(); i++)
+    {
+        Object& object = s.objects[s.handles[i].object];
+        if (object.kind == ObjectKind::kMutex && object.holder == thread)
+        {
+            object.holder = kNone;
+            object.lock_count = 0;
+            WakeWaiters(s.handles[i].object);
+        }
+    }
+
+    WakeWaiters(s.threads[thread].object);
+    s.free_tls.push_back(s.threads[thread].tls);
+}
+
+// The process exits and the calling thread dies. Nothing else happens.
+void Kernel::SvcExitProcess()
+{
+    state_.exited = true;
+    SetThreadState(state_.current, ThreadState::kDead);
+}
+
+void Kernel::SvcGetThreadPriority()
+{
+    arm::CpuState& r = cpu_.state_;
+    const uint32_t object = LookupKind(r.r[1], ObjectKind::kThread);
+    if (object == kNone)
+    {
+        r.r[0] = kInvalidHandle;
+        return;
+    }
+
+    r.r[0] = kSuccess;
+    r.r[1] = static_cast<uint32_t>(state_.threads[state_.objects[object].thread].priority);
+}
+
+// Nothing checks the priority. It counts from the next pick.
+void Kernel::SvcSetThreadPriority()
+{
+    arm::CpuState& r = cpu_.state_;
+    const uint32_t object = LookupKind(r.r[0], ObjectKind::kThread);
+    if (object == kNone)
+    {
+        r.r[0] = kInvalidHandle;
+        return;
+    }
+
+    state_.threads[state_.objects[object].thread].priority = static_cast<int32_t>(r.r[1]);
+    r.r[0] = kSuccess;
+}
+
+// A mutex that the calling thread holds from the start when r1 isn't 0.
+void Kernel::SvcCreateMutex()
+{
+    arm::CpuState& r = cpu_.state_;
+    const uint32_t mutex = NewMutex();
+    if (r.r[1] != 0)
+    {
+        Acquire(mutex, state_.current);
+    }
+
+    r.r[0] = kSuccess;
+    r.r[1] = NewHandle(mutex);
+}
+
+void Kernel::SvcReleaseMutex()
+{
+    arm::CpuState& r = cpu_.state_;
+    const uint32_t mutex = LookupKind(r.r[0], ObjectKind::kMutex);
+    if (mutex == kNone)
+    {
+        r.r[0] = kInvalidHandle;
+        return;
+    }
+
+    Object& object = state_.objects[mutex];
+    if (object.holder != state_.current)
+    {
+        r.r[0] = kNotOwner;
+        return;
+    }
+
+    if (--object.lock_count == 0)
+    {
+        object.holder = kNone;
+        WakeWaiters(mutex);
+    }
+
+    r.r[0] = kSuccess;
+}
+
+void Kernel::SvcCreateSemaphore()
+{
+    arm::CpuState& r = cpu_.state_;
+    const uint32_t semaphore = NewSemaphore(static_cast<int32_t>(r.r[1]), static_cast<int32_t>(r.r[2]));
+    r.r[0] = kSuccess;
+    r.r[1] = NewHandle(semaphore);
+}
+
+void Kernel::SvcReleaseSemaphore()
+{
+    arm::CpuState& r = cpu_.state_;
+    const uint32_t semaphore = LookupKind(r.r[1], ObjectKind::kSemaphore);
+    if (semaphore == kNone)
+    {
+        r.r[0] = kInvalidHandle;
+        return;
+    }
+
+    Object& object = state_.objects[semaphore];
+    const auto release = static_cast<int32_t>(r.r[2]);
+    if (release < 0 || int64_t{object.count} + release > object.maximum)
+    {
+        r.r[0] = kOutOfRange;
+        return;
+    }
+
+    r.r[1] = static_cast<uint32_t>(object.count);
+    object.count += release;
+    WakeWaiters(semaphore);
+    r.r[0] = kSuccess;
+}
+
+void Kernel::SvcCreateEvent()
+{
+    arm::CpuState& r = cpu_.state_;
+    const uint32_t event = NewEvent(r.r[1]);
+    r.r[0] = kSuccess;
+    r.r[1] = NewHandle(event);
+}
+
+// A hooked event runs the services' hook before the signal.
+void Kernel::SvcSignalEvent()
+{
+    arm::CpuState& r = cpu_.state_;
+    const uint32_t event = LookupKind(r.r[0], ObjectKind::kEvent);
+    if (event == kNone)
+    {
+        r.r[0] = kInvalidHandle;
+        return;
+    }
+
+    if (state_.objects[event].hooked && host_)
+    {
+        host_->RunSignalHook(event);
+    }
+
+    Signal(event);
+    r.r[0] = kSuccess;
+}
+
+void Kernel::SvcClearEvent()
+{
+    arm::CpuState& r = cpu_.state_;
+    const uint32_t event = LookupKind(r.r[0], ObjectKind::kEvent);
+    if (event == kNone)
+    {
+        r.r[0] = kInvalidHandle;
+        return;
+    }
+
+    state_.objects[event].signalled = false;
+    r.r[0] = kSuccess;
+}
+
+void Kernel::SvcCreateTimer()
+{
+    arm::CpuState& r = cpu_.state_;
+    const uint32_t timer = NewObject(ObjectKind::kTimer);
+    state_.objects[timer].reset_type = r.r[1];
+    r.r[0] = kSuccess;
+    r.r[1] = NewHandle(timer);
+}
+
+// Sets a timer to expire after the initial time, and then after each interval. The expiries scheduled before become
+// stale.
+void Kernel::SvcSetTimer()
+{
+    arm::CpuState& r = cpu_.state_;
+    const uint32_t timer = LookupKind(r.r[0], ObjectKind::kTimer);
+    if (timer == kNone)
+    {
+        r.r[0] = kInvalidHandle;
+        return;
+    }
+
+    Object& object = state_.objects[timer];
+    object.generation++;
+    object.interval = NsToTicks(Nanoseconds(r.r[1], r.r[4]));
+    ScheduleExpiry(timer, state_.ticks + NsToTicks(Nanoseconds(r.r[2], r.r[3])));
+    r.r[0] = kSuccess;
+}
+
+// The expiries scheduled before become stale. The signal stays.
+void Kernel::SvcCancelTimer()
+{
+    arm::CpuState& r = cpu_.state_;
+    const uint32_t timer = LookupKind(r.r[0], ObjectKind::kTimer);
+    if (timer == kNone)
+    {
+        r.r[0] = kInvalidHandle;
+        return;
+    }
+
+    state_.objects[timer].generation++;
+    r.r[0] = kSuccess;
+}
+
+void Kernel::SvcClearTimer()
+{
+    arm::CpuState& r = cpu_.state_;
+    const uint32_t timer = LookupKind(r.r[0], ObjectKind::kTimer);
+    if (timer == kNone)
+    {
+        r.r[0] = kInvalidHandle;
+        return;
+    }
+
+    state_.objects[timer].signalled = false;
+    r.r[0] = kSuccess;
+}
+
+// A block of memory to map elsewhere: the memory at an address, or with an address of 0 a new region.
+void Kernel::SvcCreateMemoryBlock()
+{
+    arm::CpuState& r = cpu_.state_;
+    const uint32_t address = r.r[1];
+    const uint32_t size = r.r[2];
+    if ((address & kPageMask) != 0)
+    {
+        r.r[0] = kInvalidAddress;
+        return;
+    }
+
+    if ((size & kPageMask) != 0)
+    {
+        r.r[0] = kMisalignedSize;
+        return;
+    }
+
+    const uint32_t block = NewObject(ObjectKind::kMemoryBlock);
+    state_.objects[block].address = address;
+    state_.objects[block].size = size;
+    if (address == 0)
+    {
+        const uint32_t storage = NewRegion(size);
+        state_.objects[block].storage = storage;
+    }
+
+    r.r[0] = kSuccess;
+    r.r[1] = NewHandle(block);
+}
+
+// Maps a block's pages at the address. A block made at an address takes the pages there as they're mapped now. The
+// pages mapped before an unmapped one stay mapped. A block made without an address maps its storage.
+void Kernel::SvcMapMemoryBlock()
+{
+    arm::CpuState& r = cpu_.state_;
+    const uint32_t block = LookupKind(r.r[0], ObjectKind::kMemoryBlock);
+    if (block == kNone)
+    {
+        r.r[0] = kInvalidHandle;
+        return;
+    }
+
+    const uint32_t address = r.r[1];
+    if ((address & kPageMask) != 0)
+    {
+        r.r[0] = kMisalignedAddress;
+        return;
+    }
+
+    const Object& object = state_.objects[block];
+    if (object.address != 0)
+    {
+        r.r[0] = MapAlias(address, object.address, object.size) ? kSuccess : kInvalidAddress;
+        return;
+    }
+
+    memory_.Map(address, regions_[object.storage].host.get(), object.size);
+    r.r[0] = kSuccess;
+}
+
+// Nothing checks that the address is page aligned. arm::Memory unmaps from the start of the page that holds it.
+void Kernel::SvcUnmapMemoryBlock()
+{
+    arm::CpuState& r = cpu_.state_;
+    const uint32_t block = LookupKind(r.r[0], ObjectKind::kMemoryBlock);
+    if (block == kNone)
+    {
+        r.r[0] = kInvalidHandle;
+        return;
+    }
+
+    memory_.Unmap(r.r[1], state_.objects[block].size);
+    r.r[0] = kSuccess;
+}
+
+void Kernel::SvcCreateAddressArbiter()
+{
+    arm::CpuState& r = cpu_.state_;
+    const uint32_t arbiter = NewObject(ObjectKind::kArbiter);
+    r.r[0] = kSuccess;
+    r.r[1] = NewHandle(arbiter);
+}
+
+// Signals the threads that wait on an arbiter at an address or makes the calling thread wait there.
+void Kernel::SvcArbitrateAddress()
+{
+    arm::CpuState& r = cpu_.state_;
+    const uint32_t arbiter = LookupKind(r.r[0], ObjectKind::kArbiter);
+    if (arbiter == kNone)
+    {
+        r.r[0] = kInvalidHandle;
+        return;
+    }
+
+    const uint32_t address = r.r[1];
+    const uint32_t type = r.r[2];
+    const auto value = static_cast<int32_t>(r.r[3]);
     switch (type)
     {
-    case 0: // signal
-        {
-            int32_t woken = 0;
-            while (value < 0 || woken < value)
-            {
-                Thread* best = nullptr;
-                for (auto& t : threads_)
-                {
-                    if (t->status_ == ThreadStatus::kWaitArbiter && t->arbiter_ == arbiter.get() &&
-                        t->arbiter_address_ == address && (!best || t->priority_ < best->priority_))
-                    {
-                        best = t.get();
-                    }
-                }
-                if (!best)
-                {
-                    break;
-                }
+    case kArbitrateSignal:
+        SignalArbiter(arbiter, address, value);
+        r.r[0] = kSuccess;
+        break;
 
-                best->arbiter_ = nullptr;
-                ResumeThread(*best, 0, 0);
-                woken++;
-            }
-
-            return kResultSuccess;
-        }
-
-    case 1: // wait if less than
-        if (static_cast<int32_t>(mem_.Read32(address)) < value)
-        {
-            block(false);
-        }
-
-        return kResultSuccess;
-
-    case 2: // decrement and wait if less than
-        {
-            const int32_t v = static_cast<int32_t>(mem_.Read32(address));
-            if (v < value)
-            {
-                mem_.Write32(address, static_cast<uint32_t>(v) - 1);
-                block(false);
-            }
-
-            return kResultSuccess;
-        }
-
-    case 3: // wait if less than, with timeout
-        if (static_cast<int32_t>(mem_.Read32(address)) < value)
-        {
-            block(true);
-        }
-
-        return kResultTimeout;
-
-    case 4: // decrement and wait if less than, with timeout
-        {
-            const int32_t v = static_cast<int32_t>(mem_.Read32(address));
-            if (v < value)
-            {
-                mem_.Write32(address, static_cast<uint32_t>(v) - 1);
-                block(true);
-            }
-
-            return kResultTimeout;
-        }
+    case kArbitrateWaitIfLess:
+    case kArbitrateDecrementAndWaitIfLess:
+    case kArbitrateWaitIfLessTimeout:
+    case kArbitrateDecrementAndWaitIfLessTimeout:
+        r.r[0] = WaitOnArbiter(arbiter, address, type, value, Nanoseconds(r.r[4], r.r[5]));
+        break;
 
     default:
-        return kResultInvalidEnumValue;
+        r.r[0] = kInvalidEnum;
+        break;
     }
 }
 
-uint32_t Kernel::SendSyncRequest(Thread& thread, Handle handle)
+// Wakes up to `value` threads that wait on the arbiter at the address, or all of them for a negative value: the lowest
+// priority number first, then the thread made first.
+void Kernel::SignalArbiter(uint32_t arbiter, uint32_t address, int32_t value)
 {
-    auto session = Get<Session>(handle);
-    if (!session)
+    State& s = state_;
+    for (int64_t woken = 0; value < 0 || woken < value; woken++)
     {
-        return kResultInvalidHandle;
+        uint32_t best = kNone;
+        for (uint32_t i = 0; i < s.threads.size(); i++)
+        {
+            const Thread& thread = s.threads[i];
+            if (thread.state == ThreadState::kWaitArbiter && thread.arbiter == arbiter &&
+                thread.arbiter_address == address && (best == kNone || thread.priority < s.threads[best].priority))
+            {
+                best = i;
+            }
+        }
+
+        if (best == kNone)
+        {
+            break;
+        }
+
+        Resume(best);
     }
-
-    const uint32_t cmdbuf = thread.tls_address_ + kIpcCommandOffset;
-    session->service_->HandleRequest(*this, cmdbuf);
-
-    return kResultSuccess;
 }
 
-void Kernel::HandleSvc(Thread& thread, uint32_t number)
+// The calling thread waits on the arbiter at the address if the word there is less than the value. The decrementing
+// types take 1 from the word only when the thread waits. The types with a timeout start the timeout even for a time of
+// 0 or less. They return the timeout result in every case. Returns the result.
+uint32_t Kernel::WaitOnArbiter(uint32_t arbiter, uint32_t address, uint32_t type, int32_t value, int64_t ns)
 {
-    auto& r = cpu_.state_.r;
-    pending_cycles_ += SvcCycles(number);
-
-    const auto timeout_ns = [](uint32_t lo, uint32_t hi)
+    State& s = state_;
+    const bool timed = type == kArbitrateWaitIfLessTimeout || type == kArbitrateDecrementAndWaitIfLessTimeout;
+    const bool decrement = type == kArbitrateDecrementAndWaitIfLess || type == kArbitrateDecrementAndWaitIfLessTimeout;
+    const uint32_t result = timed ? kTimeout : kSuccess;
+    const uint32_t word = memory_.Read32(address);
+    if (static_cast<int32_t>(word) >= value)
     {
-        return static_cast<int64_t>((static_cast<uint64_t>(hi) << 32) | lo);
-    };
+        return result;
+    }
 
-    switch (number)
+    if (decrement)
     {
-    case 0x01: // ControlMemory
+        memory_.Write32(address, word - 1);
+    }
+
+    Thread& thread = s.threads[s.current];
+    thread.arbiter = arbiter;
+    thread.arbiter_address = address;
+    SetThreadState(s.current, ThreadState::kWaitArbiter);
+    if (timed)
+    {
+        StartTimeout(s.current, ns);
+    }
+
+    return result;
+}
+
+void Kernel::SvcCloseHandle()
+{
+    arm::CpuState& r = cpu_.state_;
+    const auto entry = FindHandle(r.r[0]);
+    if (entry == state_.handles.end())
+    {
+        r.r[0] = kInvalidHandle;
+        return;
+    }
+
+    state_.handles.erase(entry);
+    r.r[0] = kSuccess;
+}
+
+void Kernel::SvcWaitSynchronization1()
+{
+    arm::CpuState& r = cpu_.state_;
+    const uint32_t object = LookupWaitable(r.r[0]);
+    if (object == kNone)
+    {
+        r.r[0] = kInvalidHandle;
+        return;
+    }
+
+    const uint32_t thread = state_.current;
+    if (!MustWait(object, thread))
+    {
+        Acquire(object, thread);
+        r.r[0] = kSuccess;
+        return;
+    }
+
+    // The result stays the timeout result until a wake replaces it.
+    r.r[0] = kTimeout;
+    const int64_t ns = Nanoseconds(r.r[2], r.r[3]);
+    if (ns != 0)
+    {
+        WaitForObjects(thread, {object}, false, ns, false);
+    }
+}
+
+// The calling thread waits for the objects of the r2 handles at r1. When r3 isn't 0, the thread waits for all of them.
+// Otherwise any one of them ends the wait. r1 gets the index that the wait reports.
+void Kernel::SvcWaitSynchronizationN()
+{
+    arm::CpuState& r = cpu_.state_;
+    const bool all = r.r[3] != 0;
+    const int64_t ns = Nanoseconds(r.r[0], r.r[4]);
+    std::vector<uint32_t> objects;
+    if (!ReadWaitObjects(r.r[1], r.r[2], objects))
+    {
+        r.r[0] = kInvalidHandle;
+        return;
+    }
+
+    // The objects that the thread gets at once end the wait before it starts.
+    const uint32_t thread = state_.current;
+    const std::optional<uint32_t> index = all ? TryAcquireAll(objects, thread) : TryAcquireAny(objects, thread);
+    if (index)
+    {
+        r.r[0] = kSuccess;
+        r.r[1] = *index;
+        return;
+    }
+
+    // The result stays the timeout result until a wake replaces it. A wait on no handles sleeps for the time. A
+    // negative time gives that sleep a timeout of 0.
+    r.r[0] = kTimeout;
+    r.r[1] = kNoWaitIndex;
+    if (ns == 0)
+    {
+        return;
+    }
+
+    if (objects.empty())
+    {
+        Sleep(thread, ns);
+        return;
+    }
+
+    WaitForObjects(thread, std::move(objects), all, ns, true);
+}
+
+// Reads a word for each of `count` handles at `address`. Appends each handle's object to `objects`. Returns false at
+// the first handle that isn't a waitable object.
+bool Kernel::ReadWaitObjects(uint32_t address, uint32_t count, std::vector<uint32_t>& objects)
+{
+    for (uint32_t i = 0; i < count; i++)
+    {
+        const uint32_t object = LookupWaitable(memory_.Read32(address + 4 * i));
+        if (object == kNone)
         {
-            uint32_t out = 0;
-            r[0] = ControlMemory(out, r[0], r[1], r[2], r[3]);
-            r[1] = out;
-            break;
+            return false;
         }
 
-    case 0x03: // ExitProcess
-        exited_ = true;
-        thread.status_ = ThreadStatus::kDead;
+        objects.push_back(object);
+    }
+
+    return true;
+}
+
+void Kernel::SvcDuplicateHandle()
+{
+    arm::CpuState& r = cpu_.state_;
+    const uint32_t object = Lookup(r.r[1]);
+    if (object == kNone)
+    {
+        r.r[0] = kInvalidHandle;
+        return;
+    }
+
+    r.r[0] = kSuccess;
+    r.r[1] = NewHandle(object);
+}
+
+// The time, with the cycles of the SVCs since the last CPU run, this one's included.
+void Kernel::SvcGetSystemTick()
+{
+    arm::CpuState& r = cpu_.state_;
+    const uint64_t ticks = state_.ticks + state_.pending;
+    r.r[0] = static_cast<uint32_t>(ticks);
+    r.r[1] = static_cast<uint32_t>(ticks >> 32);
+}
+
+// Every handle gives 0 for every type.
+void Kernel::SvcGetHandleInfo()
+{
+    arm::CpuState& r = cpu_.state_;
+    r.r[0] = kSuccess;
+    r.r[1] = 0;
+    r.r[2] = 0;
+}
+
+void Kernel::SvcGetSystemInfo()
+{
+    arm::CpuState& r = cpu_.state_;
+    const uint32_t type = r.r[1];
+    const uint32_t parameter = r.r[2];
+    const uint64_t value = type == 0 && parameter == 1 ? state_.heap_size + state_.linear_size : 0;
+    r.r[0] = kSuccess;
+    r.r[1] = static_cast<uint32_t>(value);
+    r.r[2] = static_cast<uint32_t>(value >> 32);
+}
+
+void Kernel::SvcGetProcessInfo()
+{
+    arm::CpuState& r = cpu_.state_;
+    uint64_t value = 0;
+    switch (r.r[2])
+    {
+    case 0:
+        value = state_.heap_size + state_.linear_size;
         break;
-
-    case 0x08: // CreateThread(priority, entry, arg, stack top, processor): one core, so the processor doesn't matter
-        {
-            Handle h = 0;
-            const int32_t priority = static_cast<int32_t>(r[0]);
-            r[0] = CreateThread(h, r[1], r[2], r[3], priority);
-            r[1] = h;
-            break;
-        }
-
-    case 0x09: // ExitThread
-        ExitThread(thread);
+    case 2:
+    case 6:
+        value = state_.linear_size;
         break;
-
-    case 0x0a: // SleepThread
-        {
-            const int64_t ns = timeout_ns(r[0], r[1]);
-            if (ns <= 0)
-            {
-                thread.ready_seq_ = ++ready_counter_; // yield to threads of equal priority
-                yielded_ = true;
-                break;
-            }
-
-            thread.status_ = ThreadStatus::kSleeping;
-            StartTimeout(thread, ns);
-            break;
-        }
-
-    case 0x0b: // GetThreadPriority
-        {
-            auto t = Get<Thread>(r[1]);
-            if (!t)
-            {
-                r[0] = kResultInvalidHandle;
-                break;
-            }
-
-            r[0] = kResultSuccess;
-            r[1] = static_cast<uint32_t>(t->priority_);
-            break;
-        }
-
-    case 0x0c: // SetThreadPriority
-        {
-            auto t = Get<Thread>(r[0]);
-            if (!t)
-            {
-                r[0] = kResultInvalidHandle;
-                break;
-            }
-
-            t->priority_ = static_cast<int32_t>(r[1]);
-            r[0] = kResultSuccess;
-            break;
-        }
-
-    case 0x13: // CreateMutex
-        {
-            auto m = Make<Mutex>();
-            if (r[1])
-            {
-                m->holder_ = &thread;
-                m->lock_count_ = 1;
-            }
-
-            r[0] = kResultSuccess;
-            r[1] = AddHandle(m);
-            break;
-        }
-
-    case 0x14: // ReleaseMutex
-        {
-            auto m = Get<Mutex>(r[0]);
-            if (!m)
-            {
-                r[0] = kResultInvalidHandle;
-                break;
-            }
-
-            if (m->holder_ != &thread)
-            {
-                r[0] = kResultNotLockOwner;
-                break;
-            }
-
-            if (--m->lock_count_ == 0)
-            {
-                m->holder_ = nullptr;
-                WakeWaiters(*m);
-            }
-
-            r[0] = kResultSuccess;
-            break;
-        }
-
-    case 0x15: // CreateSemaphore
-        {
-            auto s = Make<Semaphore>();
-            s->count_ = static_cast<int32_t>(r[1]);
-            s->max_count_ = static_cast<int32_t>(r[2]);
-            r[0] = kResultSuccess;
-            r[1] = AddHandle(s);
-            break;
-        }
-
-    case 0x16: // ReleaseSemaphore
-        {
-            auto s = Get<Semaphore>(r[1]);
-            if (!s)
-            {
-                r[0] = kResultInvalidHandle;
-                break;
-            }
-
-            const int32_t release = static_cast<int32_t>(r[2]);
-            if (release < 0 || int64_t{s->count_} + release > s->max_count_)
-            {
-                r[0] = kResultOutOfRange;
-                break;
-            }
-
-            const int32_t previous = s->count_;
-            s->count_ += release;
-            WakeWaiters(*s);
-            r[0] = kResultSuccess;
-            r[1] = static_cast<uint32_t>(previous);
-            break;
-        }
-
-    case 0x17: // CreateEvent
-        {
-            auto e = Make<Event>();
-            e->reset_type_ = static_cast<ResetType>(r[1]);
-            r[0] = kResultSuccess;
-            r[1] = AddHandle(e);
-            break;
-        }
-
-    case 0x18: // SignalEvent
-        {
-            auto e = Get<Event>(r[0]);
-            if (!e)
-            {
-                r[0] = kResultInvalidHandle;
-                break;
-            }
-
-            r[0] = kResultSuccess;
-            if (e->on_signal_)
-            {
-                e->on_signal_();
-            }
-            SignalEvent(*e);
-            break;
-        }
-
-    case 0x19: // ClearEvent
-        {
-            auto e = Get<Event>(r[0]);
-            if (!e)
-            {
-                r[0] = kResultInvalidHandle;
-                break;
-            }
-
-            e->signaled_ = false;
-            r[0] = kResultSuccess;
-            break;
-        }
-
-    case 0x1a: // CreateTimer
-        {
-            auto t = Make<Timer>();
-            t->reset_type_ = static_cast<ResetType>(r[1]);
-            r[0] = kResultSuccess;
-            r[1] = AddHandle(t);
-            break;
-        }
-
-    case 0x1b: // SetTimer(handle, initial = r2:r3, interval = r1:r4)
-        {
-            auto t = Get<Timer>(r[0]);
-            if (!t)
-            {
-                r[0] = kResultInvalidHandle;
-                break;
-            }
-
-            const int64_t initial = timeout_ns(r[2], r[3]);
-            const int64_t interval = timeout_ns(r[1], r[4]);
-            const uint64_t gen = ++t->generation_;
-            t->interval_ticks_ = NsToTicks(interval);
-            Schedule(ticks_ + NsToTicks(initial), [this, t, gen] { SignalTimer(t, gen); });
-            r[0] = kResultSuccess;
-            break;
-        }
-
-    case 0x1c: // CancelTimer
-        {
-            auto t = Get<Timer>(r[0]);
-            if (!t)
-            {
-                r[0] = kResultInvalidHandle;
-                break;
-            }
-
-            t->generation_++;
-            r[0] = kResultSuccess;
-            break;
-        }
-
-    case 0x1d: // ClearTimer
-        {
-            auto t = Get<Timer>(r[0]);
-            if (!t)
-            {
-                r[0] = kResultInvalidHandle;
-                break;
-            }
-
-            t->signaled_ = false;
-            r[0] = kResultSuccess;
-            break;
-        }
-
-    case 0x1e: // CreateMemoryBlock(other_perm = r0, addr = r1, size = r2, my_perm = r3)
-        {
-            if (r[1] & arm::Memory::kPageMask)
-            {
-                r[0] = kResultInvalidAddress;
-                break;
-            }
-
-            if (r[2] & arm::Memory::kPageMask)
-            {
-                r[0] = kResultMisalignedSize;
-                break;
-            }
-
-            auto block = Make<SharedMemory>();
-            block->size_ = r[2];
-            block->source_address_ = r[1];
-            if (r[1] == 0)
-            {
-                // The kernel keeps the memory, since its pages stay mapped after the block's handle is closed.
-                block->storage_ = NewRegion(r[2]);
-            }
-
-            r[0] = kResultSuccess;
-            r[1] = AddHandle(block);
-            break;
-        }
-
-    case 0x1f: // MapMemoryBlock(handle, addr, my_perm, other_perm)
-        {
-            auto block = Get<SharedMemory>(r[0]);
-            if (!block)
-            {
-                r[0] = kResultInvalidHandle;
-                break;
-            }
-
-            if (r[1] & arm::Memory::kPageMask)
-            {
-                r[0] = kResultMisalignedAddress;
-                break;
-            }
-
-            // A page at a time: the creator's pages needn't be one piece of host memory.
-            r[0] = kResultSuccess;
-            for (uint64_t off = 0; off < block->size_; off += arm::Memory::kPageSize)
-            {
-                const auto offset = static_cast<uint32_t>(off);
-                uint8_t* page =
-                    block->source_address_ ? mem_.HostPtr(block->source_address_ + offset) : block->storage_ + offset;
-                if (!page)
-                {
-                    r[0] = kResultInvalidAddress;
-                    break;
-                }
-
-                mem_.Map(r[1] + offset, page, arm::Memory::kPageSize);
-            }
-            break;
-        }
-
-    case 0x20: // UnmapMemoryBlock(handle, addr)
-        {
-            auto block = Get<SharedMemory>(r[0]);
-            if (!block)
-            {
-                r[0] = kResultInvalidHandle;
-                break;
-            }
-
-            mem_.Unmap(r[1], block->size_);
-            r[0] = kResultSuccess;
-            break;
-        }
-
-    case 0x21: // CreateAddressArbiter
-        r[0] = kResultSuccess;
-        r[1] = AddHandle(Make<AddressArbiter>());
+    case 20:
+        value = kLinearToPhysical;
         break;
-
-    case 0x22: // ArbitrateAddress(handle, address, type, value, ns = r4:r5)
-        r[0] = ArbitrateAddress(thread, r[0], r[1], r[2], static_cast<int32_t>(r[3]), timeout_ns(r[4], r[5]));
-        break;
-
-    case 0x23: // CloseHandle
-        r[0] = CloseHandle(r[0]) ? kResultSuccess : kResultInvalidHandle;
-        break;
-
-    case 0x24: // WaitSynchronization1(handle, ns = r2:r3)
-        {
-            auto obj = std::dynamic_pointer_cast<WaitObject>(GetObject(r[0]));
-            if (!obj)
-            {
-                r[0] = kResultInvalidHandle;
-                break;
-            }
-
-            const int64_t ns = timeout_ns(r[2], r[3]);
-
-            if (!obj->ShouldWait(&thread))
-            {
-                obj->Acquire(&thread);
-                r[0] = kResultSuccess;
-                break;
-            }
-
-            r[0] = kResultTimeout;
-            if (ns != 0)
-            {
-                WaitOn(thread, {obj}, false, ns, false);
-            }
-            break;
-        }
-
-    case 0x25: // WaitSynchronizationN(ns lo = r0, handles = r1, count = r2, wait_all = r3, ns hi = r4)
-        {
-            const int64_t ns = timeout_ns(r[0], r[4]);
-            const uint32_t count = r[2];
-            const bool wait_all = r[3] != 0;
-            std::vector<std::shared_ptr<WaitObject>> objects;
-            for (uint32_t i = 0; i < count; i++)
-            {
-                auto obj = std::dynamic_pointer_cast<WaitObject>(GetObject(mem_.Read32(r[1] + 4 * i)));
-                if (!obj)
-                {
-                    break;
-                }
-
-                objects.push_back(std::move(obj));
-            }
-
-            if (objects.size() != count)
-            {
-                r[0] = kResultInvalidHandle;
-                break;
-            }
-
-            const auto ready = [&](const std::shared_ptr<WaitObject>& o)
-            {
-                return !o->ShouldWait(&thread);
-            };
-            if (wait_all && std::ranges::all_of(objects, ready))
-            {
-                for (auto& o : objects)
-                {
-                    o->Acquire(&thread);
-                }
-
-                r[0] = kResultSuccess;
-                r[1] = 0xffffffff;
-                break;
-            }
-
-            if (!wait_all)
-            {
-                if (const auto it = std::ranges::find_if(objects, ready); it != objects.end())
-                {
-                    (*it)->Acquire(&thread);
-                    r[0] = kResultSuccess;
-                    r[1] = static_cast<uint32_t>(it - objects.begin());
-                    break;
-                }
-            }
-
-            r[0] = kResultTimeout;
-            r[1] = 0xffffffff;
-            if (ns == 0)
-            {
-                break;
-            }
-
-            if (count == 0) // used as a sleep
-            {
-                thread.status_ = ThreadStatus::kSleeping;
-                StartTimeout(thread, ns);
-                break;
-            }
-
-            WaitOn(thread, std::move(objects), wait_all, ns, true);
-            break;
-        }
-
-    case 0x27: // DuplicateHandle
-        {
-            auto obj = GetObject(r[1]);
-            if (!obj)
-            {
-                r[0] = kResultInvalidHandle;
-                break;
-            }
-
-            r[0] = kResultSuccess;
-            r[1] = AddHandle(obj);
-            break;
-        }
-
-    case 0x28: // GetSystemTick
-        {
-            const uint64_t now = ticks_ + pending_cycles_;
-            r[0] = static_cast<uint32_t>(now);
-            r[1] = static_cast<uint32_t>(now >> 32);
-            break;
-        }
-
-    case 0x29: // GetHandleInfo
-        r[0] = kResultSuccess;
-        r[1] = 0;
-        r[2] = 0;
-        break;
-
-    case 0x2a: // GetSystemInfo(type = r1, param = r2)
-        {
-            // Only the memory the application region uses (type 0, param 1) is reported; everything else is 0.
-            const uint64_t value = r[1] == 0 && r[2] == 1 ? heap_size_ + linear_size_ : 0;
-            r[0] = kResultSuccess;
-            r[1] = static_cast<uint32_t>(value);
-            r[2] = static_cast<uint32_t>(value >> 32);
-            break;
-        }
-
-    case 0x2b: // GetProcessInfo(handle = r1, type = r2)
-        {
-            int64_t value = 0;
-            switch (r[2])
-            {
-            case 0:
-                value = heap_size_ + linear_size_;
-                break;
-            case 2:
-            case 6: // linear memory usage
-                value = linear_size_;
-                break;
-            case 20:
-                value = static_cast<int64_t>(kFcramBase) - kLinearBase;
-                break;
-            default:
-                break;
-            }
-
-            r[0] = kResultSuccess;
-            r[1] = static_cast<uint32_t>(value);
-            r[2] = static_cast<uint32_t>(static_cast<uint64_t>(value) >> 32);
-            break;
-        }
-
-    case 0x2d: // ConnectToPort(name = r1)
-        {
-            const std::string name = mem_.ReadCString(r[1], 12);
-            auto it = ports_.find(name);
-            if (it == ports_.end())
-            {
-                Log("ConnectToPort: unknown port '%s'", name.c_str());
-                r[0] = kResultNotFound;
-                break;
-            }
-
-            r[0] = kResultSuccess;
-            r[1] = CreateSessionHandle(it->second);
-            break;
-        }
-
-    case 0x32: // SendSyncRequest
-        r[0] = SendSyncRequest(thread, r[0]);
-        break;
-
-    case 0x35: // GetProcessId
-        r[0] = kResultSuccess;
-        r[1] = kProcessId;
-        break;
-
-    case 0x37: // GetThreadId
-        {
-            auto t = Get<Thread>(r[1]);
-            if (!t)
-            {
-                r[0] = kResultInvalidHandle;
-                break;
-            }
-
-            r[0] = kResultSuccess;
-            r[1] = t->id_;
-            break;
-        }
-
-    case 0x38: // GetResourceLimit
-        r[0] = kResultSuccess;
-        r[1] = AddHandle(Make<ResourceLimit>());
-        break;
-
-    case 0x39: // GetResourceLimitLimitValues(values, handle, names, count)
-    case 0x3a: // GetResourceLimitCurrentValues
-        {
-            // A count that runs into unmapped memory stops at the fault, which ends the emulation.
-            const bool limit = number == 0x39;
-            for (uint32_t i = 0; i < r[3] && !mem_.fault_; i++)
-            {
-                const uint32_t name = mem_.Read32(r[2] + 4 * i);
-                int64_t value = 0;
-                switch (name)
-                {
-                case 0: // priority
-                    value = 0x18;
-                    break;
-                case 1: // commit: the heap and linear memory, plus the address where the program ends
-                    value = limit ? cfg_.app_memory : heap_size_ + linear_size_ + cfg_.program_end;
-                    break;
-                case 2: // threads
-                    value = limit ? 0x20 : static_cast<int64_t>(threads_.size());
-                    break;
-                case 3: // events
-                case 4: // mutexes
-                    value = limit ? 0x20 : 0;
-                    break;
-                case 5: // semaphores
-                case 6: // timers
-                    value = limit ? 0x08 : 0;
-                    break;
-                case 7: // shared memory blocks
-                    value = limit ? 0x10 : 0;
-                    break;
-                case 8: // address arbiters
-                    value = limit ? 0x02 : 0;
-                    break;
-                default: // CPU time (9) and anything unknown: 0
-                    break;
-                }
-
-                mem_.Write64(r[0] + 8 * i, static_cast<uint64_t>(value));
-            }
-
-            r[0] = kResultSuccess;
-            break;
-        }
-
-    case 0x3c: // Break
-        {
-            char buf[64];
-            std::snprintf(buf, sizeof(buf), "svcBreak(%u) called from %08x", r[0], r[14]);
-            error_ = buf;
-            Log("%s", buf);
-            exited_ = true;
-            thread.status_ = ThreadStatus::kDead;
-            break;
-        }
-
-    case 0x3d: // OutputDebugString
-        {
-            std::string s(r[1] < 4096 ? r[1] : 4096, '\0');
-            mem_.ReadBlock(r[0], s.data(), s.size());
-            Log("[debug] %s", s.c_str());
-            r[0] = kResultSuccess;
-            break;
-        }
-
     default:
-        Log("unimplemented SVC 0x%02x at %08x", number, cpu_.stop_pc_);
-        r[0] = kResultNotImplemented;
         break;
     }
+
+    r.r[0] = kSuccess;
+    r.r[1] = static_cast<uint32_t>(value);
+    r.r[2] = static_cast<uint32_t>(value >> 32);
+}
+
+void Kernel::SvcConnectToPort()
+{
+    arm::CpuState& r = cpu_.state_;
+    const std::string name = memory_.ReadCString(r.r[1], 12);
+    const uint32_t service = host_ ? host_->PortService(name) : kNone;
+    if (service == kNone)
+    {
+        Log("ConnectToPort: unknown port '%s'", name.c_str());
+        r.r[0] = kNotFound;
+        return;
+    }
+
+    r.r[0] = kSuccess;
+    r.r[1] = NewHandle(NewSession(service));
+}
+
+// The session's service handles the request at once, in the calling thread's command buffer.
+void Kernel::SvcSendSyncRequest()
+{
+    arm::CpuState& r = cpu_.state_;
+    const uint32_t session = LookupKind(r.r[0], ObjectKind::kSession);
+    if (session == kNone)
+    {
+        r.r[0] = kInvalidHandle;
+        return;
+    }
+
+    const uint32_t service = state_.objects[session].service;
+    if (host_)
+    {
+        host_->HandleRequest(service, CurrentTls() + ipc::kCommandBuffer);
+    }
+
+    r.r[0] = kSuccess;
+}
+
+void Kernel::SvcGetProcessId()
+{
+    arm::CpuState& r = cpu_.state_;
+    r.r[0] = kSuccess;
+    r.r[1] = kProcessId;
+}
+
+void Kernel::SvcGetThreadId()
+{
+    arm::CpuState& r = cpu_.state_;
+    const uint32_t object = LookupKind(r.r[1], ObjectKind::kThread);
+    if (object == kNone)
+    {
+        r.r[0] = kInvalidHandle;
+        return;
+    }
+
+    r.r[0] = kSuccess;
+    r.r[1] = state_.threads[state_.objects[object].thread].id;
+}
+
+// Each call makes a new resource limit object.
+void Kernel::SvcGetResourceLimit()
+{
+    arm::CpuState& r = cpu_.state_;
+    const uint32_t limit = NewObject(ObjectKind::kResourceLimit);
+    r.r[0] = kSuccess;
+    r.r[1] = NewHandle(limit);
+}
+
+void Kernel::SvcGetResourceLimitLimitValues()
+{
+    WriteResourceFigures(&ResourceFigures::limit);
+}
+
+void Kernel::SvcGetResourceLimitCurrentValues()
+{
+    WriteResourceFigures(&ResourceFigures::current);
+}
+
+// The figures of the resource called `name`. Names above 8 give 0 for both. Name 9 is CPU time.
+Kernel::ResourceFigures Kernel::Resource(uint32_t name) const
+{
+    const State& s = state_;
+    switch (name)
+    {
+    case 0: // priority
+        return {0x18, 0x18};
+    case 1: // commit
+        return {config_.app_memory, s.heap_size + s.linear_size + config_.program_end};
+    case 2: // threads
+        return {0x20, s.threads.size()};
+    case 3: // events
+    case 4: // mutexes
+        return {0x20, 0};
+    case 5: // semaphores
+    case 6: // timers
+        return {8, 0};
+    case 7: // shared memory
+        return {0x10, 0};
+    case 8: // address arbiters
+        return {2, 0};
+    default:
+        return {};
+    }
+}
+
+// For each name at r2, writes one figure of its resource at r0 as a u64. `figure` picks the limit or the amount in
+// use. The writes stop at the count in r3 or after the first access that faults.
+void Kernel::WriteResourceFigures(uint64_t ResourceFigures::* figure)
+{
+    arm::CpuState& r = cpu_.state_;
+    const uint32_t values = r.r[0];
+    const uint32_t names = r.r[2];
+    const uint32_t count = r.r[3];
+    for (uint32_t i = 0; i < count && !memory_.fault_; i++)
+    {
+        const uint64_t value = Resource(memory_.Read32(names + 4 * i)).*figure;
+        memory_.Write32(values + 8 * i, static_cast<uint32_t>(value));
+        memory_.Write32(values + 8 * i + 4, static_cast<uint32_t>(value >> 32));
+    }
+
+    r.r[0] = kSuccess;
+}
+
+// The error gives the reason and the caller. The process then exits as for ExitProcess.
+void Kernel::SvcBreak()
+{
+    const arm::CpuState& r = cpu_.state_;
+    char message[64];
+    std::snprintf(message, sizeof(message), "svcBreak(%u) called from %08x", r.r[0], r.r[14]);
+    error_ = message;
+    Log("%s", message);
+    SvcExitProcess();
+}
+
+void Kernel::SvcOutputDebugString()
+{
+    arm::CpuState& r = cpu_.state_;
+    const uint32_t length = std::min(r.r[1], kDebugStringLimit);
+    std::vector<char> text(length + 1, 0);
+    memory_.ReadBlock(r.r[0], text.data(), length);
+    Log("[debug] %s", text.data());
+    r.r[0] = kSuccess;
+}
+
+void Kernel::SetThreadState(uint32_t thread, ThreadState state)
+{
+    State& s = state_;
+    const bool was_ready = s.threads[thread].state == ThreadState::kReady;
+    const bool ready = state == ThreadState::kReady;
+    if (was_ready != ready)
+    {
+        if (ready)
+        {
+            s.ready_threads++;
+        }
+        else
+        {
+            s.ready_threads--;
+        }
+    }
+
+    s.threads[thread].state = state;
+}
+
+void Kernel::MakeReady(uint32_t thread)
+{
+    SetThreadState(thread, ThreadState::kReady);
+    state_.threads[thread].ready_number = ++state_.ready_counter;
+}
+
+// The thread goes behind the other ready threads of its priority. The current thread then doesn't come first in the
+// next pick.
+void Kernel::Yield(uint32_t thread)
+{
+    state_.threads[thread].ready_number = ++state_.ready_counter;
+    state_.just_yielded = true;
+}
+
+// The thread sleeps until a timeout of `ns` nanoseconds wakes it. A time of 0 or less wakes it at the next run of due
+// events.
+void Kernel::Sleep(uint32_t thread, int64_t ns)
+{
+    SetThreadState(thread, ThreadState::kSleeping);
+    StartTimeout(thread, ns);
+}
+
+// Ends a thread's wait or sleep. The thread becomes ready with its registers as they are. A timeout started before then
+// becomes stale.
+void Kernel::Resume(uint32_t thread)
+{
+    Thread& t = state_.threads[thread];
+    t.wait_generation++;
+    t.arbiter = kNone;
+    MakeReady(thread);
+}
+
+// The thread waits for the objects, joining each one's waiter list once for each place it has in the list. A
+// negative time means no limit.
+void Kernel::WaitForObjects(uint32_t thread, std::vector<uint32_t> objects, bool all, int64_t ns, bool reports_index)
+{
+    State& s = state_;
+    Thread& t = s.threads[thread];
+    t.wait_objects = std::move(objects);
+    t.wait_all = all;
+    t.wait_reports_index = reports_index;
+    SetThreadState(thread, ThreadState::kWaitObjects);
+    for (const uint32_t object : t.wait_objects)
+    {
+        s.objects[object].waiters.push_back(thread);
+    }
+
+    if (ns >= 0)
+    {
+        StartTimeout(thread, ns);
+    }
+}
+
+// Ends a thread's wait for objects. The thread leaves the objects' waiter lists and gets the result in r0. A wait that
+// reports an index gives it in r1.
+void Kernel::EndWaitForObjects(uint32_t thread, uint32_t result, uint32_t index)
+{
+    LeaveWaiterLists(thread);
+    arm::CpuState& registers = RegistersOf(thread);
+    registers.r[0] = result;
+    if (state_.threads[thread].wait_reports_index)
+    {
+        registers.r[1] = index;
+    }
+
+    Resume(thread);
+}
+
+void Kernel::LeaveWaiterLists(uint32_t thread)
+{
+    State& s = state_;
+    Thread& t = s.threads[thread];
+    for (const uint32_t object : t.wait_objects)
+    {
+        std::vector<uint32_t>& waiters = s.objects[object].waiters;
+        waiters.erase(std::remove(waiters.begin(), waiters.end(), thread), waiters.end());
+    }
+
+    t.wait_objects.clear();
+}
+
+// A timeout counts from the time without the pending cycles. A wake makes it stale.
+void Kernel::StartTimeout(uint32_t thread, int64_t ns)
+{
+    Schedule(state_.ticks + NsToTicks(ns), TimedEvent::Kind::kTimeout, thread, state_.threads[thread].wait_generation);
+}
+
+// A set or cancel of the timer makes the expiry stale.
+void Kernel::ScheduleExpiry(uint32_t timer, uint64_t due)
+{
+    Schedule(due, TimedEvent::Kind::kTimerExpiry, timer, state_.objects[timer].generation);
+}
+
+void Kernel::Schedule(uint64_t due, TimedEvent::Kind kind, uint32_t target, uint64_t generation)
+{
+    State& s = state_;
+    s.events.push_back({due, s.next_event_order++, kind, target, generation});
+    std::push_heap(s.events.begin(), s.events.end(), TimedEvent::RunsAfter);
+}
+
+// Wakes the waiters of an object for as long as one can have it: the lowest priority number first, then the one that
+// started waiting first. A thread that waits for all its objects wakes once none of them requires a wait. The thread
+// then acquires them all.
+void Kernel::WakeWaiters(uint32_t object)
+{
+    State& s = state_;
+    while (true)
+    {
+        uint32_t best = kNone;
+        for (const uint32_t waiter : s.objects[object].waiters)
+        {
+            const Thread& thread = s.threads[waiter];
+            if (thread.state != ThreadState::kWaitObjects ||
+                (best != kNone && thread.priority >= s.threads[best].priority))
+            {
+                continue;
+            }
+
+            const bool can_wake =
+                thread.wait_all ? CanAcquireAll(thread.wait_objects, waiter) : !MustWait(object, waiter);
+            if (can_wake)
+            {
+                best = waiter;
+            }
+        }
+
+        if (best == kNone)
+        {
+            return;
+        }
+
+        // The index is the object's last place in the thread's list.
+        Thread& thread = s.threads[best];
+        uint32_t index = kNoWaitIndex;
+        if (thread.wait_all)
+        {
+            AcquireAll(thread.wait_objects, best);
+        }
+        else
+        {
+            Acquire(object, best);
+            for (uint32_t i = 0; i < thread.wait_objects.size(); i++)
+            {
+                if (thread.wait_objects[i] == object)
+                {
+                    index = i;
+                }
+            }
+        }
+
+        EndWaitForObjects(best, kSuccess, index);
+    }
+}
+
+bool Kernel::MustWait(uint32_t object, uint32_t thread) const
+{
+    const Object& o = state_.objects[object];
+    switch (o.kind)
+    {
+    case ObjectKind::kEvent:
+    case ObjectKind::kTimer:
+        return !o.signalled;
+    case ObjectKind::kMutex:
+        return o.holder != kNone && o.holder != thread;
+    case ObjectKind::kSemaphore:
+        return o.count <= 0;
+    case ObjectKind::kThread:
+        return state_.threads[o.thread].state != ThreadState::kDead;
+    default:
+        return true;
+    }
+}
+
+void Kernel::Acquire(uint32_t object, uint32_t thread)
+{
+    Object& o = state_.objects[object];
+    switch (o.kind)
+    {
+    case ObjectKind::kEvent:
+    case ObjectKind::kTimer:
+        if (o.reset_type == kOneShot)
+        {
+            o.signalled = false;
+        }
+        break;
+
+    case ObjectKind::kMutex:
+        o.holder = thread;
+        o.lock_count++;
+        break;
+
+    case ObjectKind::kSemaphore:
+        o.count--;
+        break;
+
+    default:
+        break;
+    }
+}
+
+// Whether the thread can have every one of the objects: it doesn't have to wait for any of them.
+bool Kernel::CanAcquireAll(const std::vector<uint32_t>& objects, uint32_t thread) const
+{
+    return std::none_of(objects.begin(), objects.end(), [&](uint32_t object) { return MustWait(object, thread); });
+}
+
+// The thread acquires each of the objects in order.
+void Kernel::AcquireAll(const std::vector<uint32_t>& objects, uint32_t thread)
+{
+    for (const uint32_t object : objects)
+    {
+        Acquire(object, thread);
+    }
+}
+
+// The thread acquires all the objects if it doesn't have to wait for any of them. Each is tested before any is
+// acquired. Returns the index that such a wait reports, or nothing when the thread has to wait.
+std::optional<uint32_t> Kernel::TryAcquireAll(const std::vector<uint32_t>& objects, uint32_t thread)
+{
+    if (!CanAcquireAll(objects, thread))
+    {
+        return std::nullopt;
+    }
+
+    AcquireAll(objects, thread);
+
+    return kNoWaitIndex;
+}
+
+// The thread acquires the first of the objects that it doesn't have to wait for. Returns that object's index, or
+// nothing when the thread has to wait for each of them.
+std::optional<uint32_t> Kernel::TryAcquireAny(const std::vector<uint32_t>& objects, uint32_t thread)
+{
+    for (uint32_t i = 0; i < objects.size(); i++)
+    {
+        if (!MustWait(objects[i], thread))
+        {
+            Acquire(objects[i], thread);
+            return i;
+        }
+    }
+
+    return std::nullopt;
+}
+
+// A slot of thread-local storage: the one that a dead thread gave back last, zeroed, or else a new one. Every eighth
+// new slot starts a new page.
+uint32_t Kernel::AllocateTls()
+{
+    State& s = state_;
+    if (!s.free_tls.empty())
+    {
+        const uint32_t tls = s.free_tls.back();
+        s.free_tls.pop_back();
+        memory_.ZeroBlock(tls, kTlsSize);
+        return tls;
+    }
+
+    const uint32_t slot = s.new_tls_slots++;
+    const uint32_t tls = kTlsBase + slot * kTlsSize;
+    if (slot % kTlsSlotsPerPage == 0)
+    {
+        MapNewRegion(tls, kPageSize);
+    }
+
+    return tls;
+}
+
+arm::CpuState& Kernel::RegistersOf(uint32_t thread)
+{
+    return thread == state_.current ? cpu_.state_ : state_.threads[thread].registers;
+}
+
+// A new object in an empty slot, after a collection once the table has grown enough.
+uint32_t Kernel::NewObject(ObjectKind kind)
+{
+    State& s = state_;
+    if (s.free_objects.empty() && s.objects.size() >= s.collect_at)
+    {
+        CollectObjects();
+    }
+
+    uint32_t object;
+    if (!s.free_objects.empty())
+    {
+        object = s.free_objects.back();
+        s.free_objects.pop_back();
+        s.objects[object] = Object();
+    }
+    else
+    {
+        object = static_cast<uint32_t>(s.objects.size());
+        s.objects.emplace_back();
+    }
+
+    s.objects[object].kind = kind;
+
+    return object;
+}
+
+// Empties the slots of the objects that nothing refers to any more: no handle, thread, timed event or service.
+void Kernel::CollectObjects()
+{
+    State& s = state_;
+    std::vector<bool> live(s.objects.size(), false);
+    for (const HandleEntry& entry : s.handles)
+    {
+        live[entry.object] = true;
+    }
+
+    for (const Thread& thread : s.threads)
+    {
+        if (thread.object != kNone)
+        {
+            live[thread.object] = true;
+        }
+
+        for (const uint32_t object : thread.wait_objects)
+        {
+            live[object] = true;
+        }
+
+        if (thread.arbiter != kNone)
+        {
+            live[thread.arbiter] = true;
+        }
+    }
+
+    for (const TimedEvent& event : s.events)
+    {
+        if (event.kind == TimedEvent::Kind::kTimerExpiry)
+        {
+            live[event.target] = true;
+        }
+    }
+
+    if (host_)
+    {
+        host_->MarkObjects(live);
+    }
+
+    std::size_t live_count = 0;
+    s.free_objects.clear();
+    for (std::size_t i = 0; i < s.objects.size(); i++)
+    {
+        if (live[i])
+        {
+            live_count++;
+        }
+        else
+        {
+            s.objects[i] = Object();
+            s.free_objects.push_back(static_cast<uint32_t>(i));
+        }
+    }
+
+    s.collect_at = std::max(kCollectMinimum, 2 * live_count);
+}
+
+// The entry of `handle` in the handle table, or the table's end. The table is sorted by handle.
+std::vector<Kernel::HandleEntry>::const_iterator Kernel::FindHandle(uint32_t handle) const
+{
+    const std::vector<HandleEntry>& handles = state_.handles;
+    const auto entry = std::lower_bound(handles.begin(), handles.end(), handle,
+                                        [](const HandleEntry& e, uint32_t h) { return e.handle < h; });
+
+    return entry != handles.end() && entry->handle == handle ? entry : handles.end();
+}
+
+uint32_t Kernel::LookupKind(uint32_t handle, ObjectKind kind) const
+{
+    const uint32_t object = Lookup(handle);
+
+    return object != kNone && state_.objects[object].kind == kind ? object : kNone;
+}
+
+// The object of a handle if a thread can wait for it: a thread, an event, a timer, a mutex or a semaphore. kNone for
+// any other handle.
+uint32_t Kernel::LookupWaitable(uint32_t handle) const
+{
+    const uint32_t object = Lookup(handle);
+    if (object == kNone)
+    {
+        return kNone;
+    }
+
+    switch (state_.objects[object].kind)
+    {
+    case ObjectKind::kThread:
+    case ObjectKind::kEvent:
+    case ObjectKind::kTimer:
+    case ObjectKind::kMutex:
+    case ObjectKind::kSemaphore:
+        return object;
+    default:
+        return kNone;
+    }
+}
+
+// A new region of zeros, rounded up to a page, mapped nowhere yet.
+uint32_t Kernel::NewRegion(uint32_t size)
+{
+    const uint32_t rounded = arm::Memory::RoundUpToPage(size);
+    regions_.push_back({std::make_unique<uint8_t[]>(rounded), rounded});
+
+    return static_cast<uint32_t>(regions_.size() - 1);
 }
 
 } // namespace threesf::horizon

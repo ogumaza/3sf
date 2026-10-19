@@ -9,6 +9,7 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "bit.h"
@@ -45,11 +46,23 @@ namespace {
 
 using namespace X64;
 
-constexpr u32 ProgramWords = 0x20000; // the program memory, where blocks can start
 constexpr u32 NoLoopEnd = 0xFFFFFFFF; // as Interpreter::NoLoopEnd
 constexpr u32 MaxBlockInstructions = 64;
 constexpr u32 MaxVariants = 8; // blocks from one address, for other loops or modes
 constexpr std::size_t CodeSize = 32 << 20;
+
+// The offset of `field` in `regs`, which holds it.
+template <typename T>
+s32 OffsetIn(const RegisterState& regs, const T& field) {
+    return static_cast<s32>(reinterpret_cast<const u8*>(&field) -
+                            reinterpret_cast<const u8*>(&regs));
+}
+
+// The size of a frame of the block repeat stack, and the offsets of its fields.
+constexpr s32 FrameSize = static_cast<s32>(sizeof(RegisterState::BlockRepeatFrame));
+constexpr s32 FrameStart = static_cast<s32>(offsetof(RegisterState::BlockRepeatFrame, start));
+constexpr s32 FrameEnd = static_cast<s32>(offsetof(RegisterState::BlockRepeatFrame, end));
+constexpr s32 FrameLc = static_cast<s32>(offsetof(RegisterState::BlockRepeatFrame, lc));
 
 // What a block's code reads and reports. Its layout is part of the generated code.
 struct Context {
@@ -341,10 +354,14 @@ public:
 
     // ------------------------------------------------------------------ Through the interpreter
 
+    // Whether an instruction may change a mode register. The translated code depends on the
+    // modes. A block therefore ends after an instruction that may change one.
+    enum class Modes { Kept, MayChange };
+
     // Runs the instruction in the interpreter (Jit::Handler), for instructions whose only data
-    // memory is the stack words at sp + each of `stack` (checked for MMIO first). With
-    // `ends_block`, it may change a mode register, and the block ends after it.
-    bool ViaHandler(bool ends_block, std::initializer_list<s32> stack = {}) {
+    // memory is the stack words at sp + each of `stack` (checked for MMIO first).
+    bool ViaHandler(Modes effect, std::initializer_list<s32> stack = {}) {
+        const bool ends_block = effect == Modes::MayChange;
         if (!handler || (ends_block && next == loop_end)) {
             return Refuse();
         }
@@ -388,52 +405,52 @@ public:
     // Instructions on registers the translator doesn't handle (the mode registers among them) and
     // the stack.
     bool push(ArArpSttMod) {
-        return ViaHandler(false, {-1});
+        return ViaHandler(Modes::Kept, {-1});
     }
     bool pop(ArArpSttMod) {
-        return ViaHandler(true, {0});
+        return ViaHandler(Modes::MayChange, {0});
     }
     bool pusha(Ax) {
-        return ViaHandler(false, {-1, -2});
+        return ViaHandler(Modes::Kept, {-1, -2});
     }
     bool pusha(Bx) {
-        return ViaHandler(false, {-1, -2});
+        return ViaHandler(Modes::Kept, {-1, -2});
     }
     bool popa(Ab) {
-        return ViaHandler(false, {0, 1});
+        return ViaHandler(Modes::Kept, {0, 1});
     }
     bool push(Abe) {
-        return ViaHandler(false, {-1});
+        return ViaHandler(Modes::Kept, {-1});
     }
     bool push_r6() {
-        return ViaHandler(false, {-1});
+        return ViaHandler(Modes::Kept, {-1});
     }
     bool pop_r6() {
-        return ViaHandler(false, {0});
+        return ViaHandler(Modes::Kept, {0});
     }
     bool mov(Imm16, ArArp) {
-        return ViaHandler(true);
+        return ViaHandler(Modes::MayChange);
     }
     bool alb(Alb, Imm16, SttMod) {
-        return ViaHandler(true);
+        return ViaHandler(Modes::MayChange);
     }
     bool load_stepi(Imm7s) {
-        return ViaHandler(true);
+        return ViaHandler(Modes::MayChange);
     }
     bool load_stepj(Imm7s) {
-        return ViaHandler(true);
+        return ViaHandler(Modes::MayChange);
     }
     bool mov_stepi0_a0h() {
-        return ViaHandler(false);
+        return ViaHandler(Modes::Kept);
     }
     bool mov_stepj0_a0h() {
-        return ViaHandler(false);
+        return ViaHandler(Modes::Kept);
     }
     bool mov_a0h_stepi0() {
-        return ViaHandler(true);
+        return ViaHandler(Modes::MayChange);
     }
     bool mov_a0h_stepj0() {
-        return ViaHandler(true);
+        return ViaHandler(Modes::MayChange);
     }
 
     // ------------------------------------------------------------------ Translated instructions
@@ -451,7 +468,7 @@ public:
             SatAndSetAccAndFlag(b_name, Reg::rax);
             return true;
         }
-        if (!CanReadBus16(a.GetName(), true) || !CanWriteBus16(b.GetName())) {
+        if (!CanReadBus16(a.GetName()) || !CanWriteBus16(b.GetName())) {
             return Refuse();
         }
         RegToBus16(Reg::rsi, a.GetName(), true);
@@ -461,12 +478,12 @@ public:
 
     // mov: register to [Rn].
     bool mov(Register a, Rn b, StepZIDS bs) {
-        if (!CanReadBus16(a.GetName(), true)) {
+        if (!CanReadBus16(a.GetName())) {
             return Refuse();
         }
         const unsigned unit = b.Index();
         RegToBus16(Reg::rsi, a.GetName(), true); // before the step, which can change the register
-        RnAndModify(Reg::rax, Reg::rcx, unit, bs.GetName(), false);
+        RnAddressAndModify(Reg::rax, Reg::rcx, unit, bs.GetName(), false);
         CheckData(Reg::rax);
         StoreData(Reg::rax, Reg::rsi);
         e.Mov(R(modes.r[unit]), Reg::rcx, 16);
@@ -478,32 +495,25 @@ public:
         if (!CanWriteBus16(b.GetName())) {
             return Refuse();
         }
-        const unsigned unit = a.Index();
-        RnAndModify(Reg::rax, Reg::rcx, unit, as.GetName(), false);
-        CheckData(Reg::rax);
-        LoadData(Reg::rsi, Reg::rax);
-        e.Mov(R(modes.r[unit]), Reg::rcx, 16); // before the destination, which may be the same
+        // Rn is stepped before b is written. b may be Rn.
+        LoadFromRn(Reg::rsi, a.Index(), as.GetName(), Reg::rax, Reg::rcx);
         RegFromBus16(b.GetName(), Reg::rsi);
         return true;
     }
 
     // mov: register to [page:imm8].
     bool mov(Ablh a, MemImm8 b) {
-        if (!CanReadBus16(a.GetName(), true)) {
+        if (!CanReadBus16(a.GetName())) {
             return Refuse();
         }
         RegToBus16(Reg::rsi, a.GetName(), true);
-        PageAddress(Reg::rax, b);
-        CheckData(Reg::rax);
-        StoreData(Reg::rax, Reg::rsi);
+        StoreToMemory(b, Reg::rsi, Reg::rax);
         return true;
     }
 
     // mov: [page:imm8] to an accumulator.
     bool mov(MemImm8 a, Ab b) {
-        PageAddress(Reg::rax, a);
-        CheckData(Reg::rax);
-        LoadData(Reg::rsi, Reg::rax);
+        LoadFromMemory(Reg::rsi, a, Reg::rax);
         RegFromBus16(b.GetName(), Reg::rsi);
         return true;
     }
@@ -519,14 +529,14 @@ public:
 
     // mova: an accumulator's low 32 bits to two words at [arrn], the low one at the offset address.
     bool mova(Ab a, ArRn2 b, ArStep2 bs) {
-        const unsigned unit = Mode(modes.arrn[b.Index()]);
-        const StepValue step = ArStep(Mode(modes.arstep[bs.Index()]));
-        const OffsetValue offset = static_cast<OffsetValue>(Mode(modes.aroffset[bs.Index()]));
+        const unsigned unit = GetArRnUnit(b);
+        const StepValue step = GetArStep(bs);
+        const OffsetValue offset = GetArOffset(bs);
         if (!OffsetSupported(unit, offset, false)) {
             return RefuseMode();
         }
         GetAndSatAcc(Reg::rsi, a.GetName());
-        RnAndModify(Reg::rax, Reg::rcx, unit, step, false);
+        RnAddressAndModify(Reg::rax, Reg::rcx, unit, step, false);
         OffsetAddress(Reg::rdx, Reg::rax, unit, offset, false);
         CheckData(Reg::rdx);
         CheckData(Reg::rax);
@@ -539,13 +549,13 @@ public:
 
     // mova: two words at [arrn] to an accumulator.
     bool mova(ArRn2 a, ArStep2 as, Ab b) {
-        const unsigned unit = Mode(modes.arrn[a.Index()]);
-        const StepValue step = ArStep(Mode(modes.arstep[as.Index()]));
-        const OffsetValue offset = static_cast<OffsetValue>(Mode(modes.aroffset[as.Index()]));
+        const unsigned unit = GetArRnUnit(a);
+        const StepValue step = GetArStep(as);
+        const OffsetValue offset = GetArOffset(as);
         if (!OffsetSupported(unit, offset, false)) {
             return RefuseMode();
         }
-        RnAndModify(Reg::rax, Reg::rcx, unit, step, false);
+        RnAddressAndModify(Reg::rax, Reg::rcx, unit, step, false);
         OffsetAddress(Reg::rdx, Reg::rax, unit, offset, false);
         CheckData(Reg::rdx);
         CheckData(Reg::rax);
@@ -563,9 +573,7 @@ public:
         if (!AlmSupported(op.GetName())) {
             return Refuse();
         }
-        PageAddress(Reg::rax, a);
-        CheckData(Reg::rax);
-        LoadData(Reg::rsi, Reg::rax);
+        LoadFromMemory(Reg::rsi, a, Reg::rax);
         ExtendOperandForAlm(Reg::rsi, op.GetName());
         AlmGeneric(op.GetName(), Reg::rsi, b.GetName());
         return true;
@@ -575,23 +583,15 @@ public:
         if (!AlmSupported(op.GetName())) {
             return Refuse();
         }
-        const unsigned unit = a.Index();
-        RnAndModify(Reg::rax, Reg::rcx, unit, as.GetName(), false);
-        CheckData(Reg::rax);
-        LoadData(Reg::rsi, Reg::rax);
-        e.Mov(R(modes.r[unit]), Reg::rcx, 16);
+        LoadFromRn(Reg::rsi, a.Index(), as.GetName(), Reg::rax, Reg::rcx);
         ExtendOperandForAlm(Reg::rsi, op.GetName());
         AlmGeneric(op.GetName(), Reg::rsi, b.GetName());
         return true;
     }
 
     bool tstb(Rn a, StepZIDS as, Imm4 b) {
-        const unsigned unit = a.Index();
         ComputeFlags(); // it sets fz
-        RnAndModify(Reg::rax, Reg::rcx, unit, as.GetName(), false);
-        CheckData(Reg::rax);
-        LoadData(Reg::rsi, Reg::rax);
-        e.Mov(R(modes.r[unit]), Reg::rcx, 16);
+        LoadFromRn(Reg::rsi, a.Index(), as.GetName(), Reg::rax, Reg::rcx);
         // fz = (value >> b) & 1
         if (b.Unsigned16() != 0) {
             e.ShiftImm(Shift::shr, Reg::rsi, static_cast<u8>(b.Unsigned16()), 32);
@@ -635,7 +635,7 @@ public:
         default:
             break;
         }
-        if (!CanReadBus16(source, false)) {
+        if (!CanReadBus16(source)) {
             return Refuse();
         }
         RegToBus16(Reg::rsi, source, false);
@@ -707,7 +707,7 @@ public:
     }
 
     bool movs(Register a, Ab b) {
-        if (!CanReadBus16(a.GetName(), false)) {
+        if (!CanReadBus16(a.GetName())) {
             return Refuse();
         }
         RegToBus16(Reg::rax, a.GetName(), false);
@@ -717,20 +717,14 @@ public:
     }
 
     bool movs(Rn a, StepZIDS as, Ab b) {
-        const unsigned unit = a.Index();
-        RnAndModify(Reg::rsi, Reg::rcx, unit, as.GetName(), false);
-        CheckData(Reg::rsi);
-        LoadData(Reg::rax, Reg::rsi);
-        e.Mov(R(modes.r[unit]), Reg::rcx, 16);
+        LoadFromRn(Reg::rax, a.Index(), as.GetName(), Reg::rsi, Reg::rcx);
         e.Movsx(Reg::rax, Reg::rax, 16, 64);
         ShiftBus40Variable(Reg::rax, b.GetName());
         return true;
     }
 
     bool movs(MemImm8 a, Ab b) {
-        PageAddress(Reg::rsi, a);
-        CheckData(Reg::rsi);
-        LoadData(Reg::rax, Reg::rsi);
+        LoadFromMemory(Reg::rax, a, Reg::rsi);
         e.Movsx(Reg::rax, Reg::rax, 16, 64);
         ShiftBus40Variable(Reg::rax, b.GetName());
         return true;
@@ -740,18 +734,15 @@ public:
     bool mma(ArpRnX xy, ArpStepX i, ArpStepX j, bool dmodi, bool dmodj, RegName a, bool x0_sign,
              bool y0_sign, bool x1_sign, bool y1_sign, SumBase base, bool sub_p0, bool p0_align,
              bool sub_p1, bool p1_align) {
-        const unsigned ui = Mode(modes.arprni[xy.Index()]);
-        const unsigned uj = Mode(modes.arprnj[xy.Index()]) + 4u;
-        const StepValue si = ArStep(Mode(modes.arpstepi[i.Index()]));
-        const StepValue sj = ArStep(Mode(modes.arpstepj[j.Index()]));
-        const OffsetValue oi = static_cast<OffsetValue>(Mode(modes.arpoffseti[i.Index()]));
-        const OffsetValue oj = static_cast<OffsetValue>(Mode(modes.arpoffsetj[j.Index()]));
+        const auto [ui, uj] = GetArpRnUnit(xy);
+        const auto [si, sj] = GetArpStep(i, j);
+        const auto [oi, oj] = GetArpOffset(i, j);
         if (!OffsetSupported(ui, oi, dmodi) || !OffsetSupported(uj, oj, dmodj)) {
             return RefuseMode();
         }
         // The four addresses: x and y at the two units, and the offset one after each.
-        RnAndModify(Reg::r8, Reg::r10, ui, si, dmodi);
-        RnAndModify(Reg::r9, Reg::r11, uj, sj, dmodj);
+        RnAddressAndModify(Reg::r8, Reg::r10, ui, si, dmodi);
+        RnAddressAndModify(Reg::r9, Reg::r11, uj, sj, dmodj);
         OffsetAddress(Reg::rsi, Reg::r8, ui, oi, dmodi);
         OffsetAddress(Reg::rdi, Reg::r9, uj, oj, dmodj);
         CheckData(Reg::r8);
@@ -791,34 +782,25 @@ public:
     }
 
     bool push(Register a) {
-        if (!CanReadBus16(a.GetName(), true)) {
+        if (!CanReadBus16(a.GetName())) {
             // At the end of a block repeat's body, the interpreter steps the loop before the
             // instruction runs. The step counts lc down, or ends the loop on the last pass. A
             // handler run from a block would push lc from before the step.
             if (a.GetName() == RegName::lc && next == loop_end) {
                 return Refuse();
             }
-            return ViaHandler(false, {-1});
+            return ViaHandler(Modes::Kept, {-1});
         }
         RegToBus16(Reg::rsi, a.GetName(), true);
-        e.Movzx(Reg::rax, R(modes.sp), 16);
-        e.OpImm(Arith::sub, Reg::rax, 1, 32);
-        e.Movzx(Reg::rax, Reg::rax, 16);
-        CheckData(Reg::rax);
-        e.Mov(R(modes.sp), Reg::rax, 16);
-        StoreData(Reg::rax, Reg::rsi);
+        PushStack(Reg::rsi);
         return true;
     }
 
     bool pop(Register a) {
         if (!CanWriteBus16(a.GetName())) {
-            return ViaHandler(true, {0});
+            return ViaHandler(Modes::MayChange, {0});
         }
-        e.Movzx(Reg::rax, R(modes.sp), 16);
-        CheckData(Reg::rax);
-        LoadData(Reg::rsi, Reg::rax);
-        e.OpImm(Arith::add, Reg::rax, 1, 32);
-        e.Mov(R(modes.sp), Reg::rax, 16); // before the destination, which may be sp
+        PopStack(Reg::rsi); // sp moves first. The destination may be sp.
         RegFromBus16(a.GetName(), Reg::rsi);
         return true;
     }
@@ -858,9 +840,9 @@ public:
     // mov2_abh_m: the high halves of two accumulators (saturated, without flm) to two words at
     // [arrn], ay's at the offset address.
     bool mov2_abh_m(Abh ax, Abh ay, ArRn1 b, ArStep1 bs) {
-        const unsigned unit = Mode(modes.arrn[b.Index()]);
-        const StepValue step = ArStep(Mode(modes.arstep[bs.Index()]));
-        const OffsetValue offset = static_cast<OffsetValue>(Mode(modes.aroffset[bs.Index()]));
+        const unsigned unit = GetArRnUnit(b);
+        const StepValue step = GetArStep(bs);
+        const OffsetValue offset = GetArOffset(bs);
         if (!OffsetSupported(unit, offset, false)) {
             return RefuseMode();
         }
@@ -868,7 +850,7 @@ public:
         GetAndSatAccNoFlag(Reg::rdi, ay.GetName());
         e.ShiftImm(Shift::shr, Reg::rsi, 16, 64);
         e.ShiftImm(Shift::shr, Reg::rdi, 16, 64);
-        RnAndModify(Reg::rax, Reg::rcx, unit, step, false);
+        RnAddressAndModify(Reg::rax, Reg::rcx, unit, step, false);
         OffsetAddress(Reg::r8, Reg::rax, unit, offset, false);
         CheckData(Reg::r8);
         CheckData(Reg::rax);
@@ -880,14 +862,14 @@ public:
 
     // mov2: a product (unshifted) to two words at [arrn], the low one at the offset address.
     bool mov2(Px a, ArRn2 b, ArStep2 bs) {
-        const unsigned unit = Mode(modes.arrn[b.Index()]);
-        const StepValue step = ArStep(Mode(modes.arstep[bs.Index()]));
-        const OffsetValue offset = static_cast<OffsetValue>(Mode(modes.aroffset[bs.Index()]));
+        const unsigned unit = GetArRnUnit(b);
+        const StepValue step = GetArStep(bs);
+        const OffsetValue offset = GetArOffset(bs);
         if (!OffsetSupported(unit, offset, false)) {
             return RefuseMode();
         }
         e.Mov(Reg::rsi, R(modes.p[a.Index()]), 32);
-        RnAndModify(Reg::rax, Reg::rcx, unit, step, false);
+        RnAddressAndModify(Reg::rax, Reg::rcx, unit, step, false);
         OffsetAddress(Reg::r8, Reg::rax, unit, offset, false);
         CheckData(Reg::r8);
         CheckData(Reg::rax);
@@ -900,13 +882,13 @@ public:
 
     // mov2: two words at [arrn] to a product.
     bool mov2(ArRn2 a, ArStep2 as, Px b) {
-        const unsigned unit = Mode(modes.arrn[a.Index()]);
-        const StepValue step = ArStep(Mode(modes.arstep[as.Index()]));
-        const OffsetValue offset = static_cast<OffsetValue>(Mode(modes.aroffset[as.Index()]));
+        const unsigned unit = GetArRnUnit(a);
+        const StepValue step = GetArStep(as);
+        const OffsetValue offset = GetArOffset(as);
         if (!OffsetSupported(unit, offset, false)) {
             return RefuseMode();
         }
-        RnAndModify(Reg::rax, Reg::rcx, unit, step, false);
+        RnAddressAndModify(Reg::rax, Reg::rcx, unit, step, false);
         OffsetAddress(Reg::r8, Reg::rax, unit, offset, false);
         CheckData(Reg::r8);
         CheckData(Reg::rax);
@@ -920,25 +902,19 @@ public:
     }
 
     bool mov(MemImm16 a, Ax b) {
-        e.MovImm(Reg::rax, a.Unsigned16());
-        CheckData(Reg::rax);
-        LoadData(Reg::rsi, Reg::rax);
+        LoadFromMemory(Reg::rsi, a, Reg::rax);
         RegFromBus16(b.GetName(), Reg::rsi);
         return true;
     }
 
     bool mov(MemR7Imm7s a, Ax b) {
-        R7Address(Reg::rax, a.Signed16());
-        CheckData(Reg::rax);
-        LoadData(Reg::rsi, Reg::rax);
+        LoadFromMemory(Reg::rsi, a, Reg::rax);
         RegFromBus16(b.GetName(), Reg::rsi);
         return true;
     }
 
     bool mov(MemImm8 a, Ablh b) {
-        PageAddress(Reg::rax, a);
-        CheckData(Reg::rax);
-        LoadData(Reg::rsi, Reg::rax);
+        LoadFromMemory(Reg::rsi, a, Reg::rax);
         RegFromBus16(b.GetName(), Reg::rsi);
         return true;
     }
@@ -960,7 +936,7 @@ public:
             SatAndSetAccAndFlag(b.GetName(), Reg::rax);
             return true;
         }
-        if (!CanReadBus16(a.GetName(), true)) {
+        if (!CanReadBus16(a.GetName())) {
             return Refuse();
         }
         RegToBus16(Reg::rsi, a.GetName(), true);
@@ -983,9 +959,7 @@ public:
         if (!AluSupported(op.GetName())) {
             return Refuse();
         }
-        e.MovImm(Reg::rax, a.Unsigned16());
-        CheckData(Reg::rax);
-        LoadData(Reg::rsi, Reg::rax);
+        LoadFromMemory(Reg::rsi, a, Reg::rax);
         ExtendOperandForAlm(Reg::rsi, op.GetName());
         AlmGeneric(op.GetName(), Reg::rsi, b.GetName());
         return true;
@@ -995,9 +969,7 @@ public:
         if (!AluSupported(op.GetName())) {
             return Refuse();
         }
-        R7Address(Reg::rax, a.Unsigned16());
-        CheckData(Reg::rax);
-        LoadData(Reg::rsi, Reg::rax);
+        LoadFromMemory(Reg::rsi, a, Reg::rax);
         ExtendOperandForAlm(Reg::rsi, op.GetName());
         AlmGeneric(op.GetName(), Reg::rsi, b.GetName());
         return true;
@@ -1007,9 +979,7 @@ public:
         if (!AluSupported(op.GetName())) {
             return Refuse();
         }
-        R7Address(Reg::rax, a.Signed16());
-        CheckData(Reg::rax);
-        LoadData(Reg::rsi, Reg::rax);
+        LoadFromMemory(Reg::rsi, a, Reg::rax);
         ExtendOperandForAlm(Reg::rsi, op.GetName());
         AlmGeneric(op.GetName(), Reg::rsi, b.GetName());
         return true;
@@ -1051,7 +1021,7 @@ public:
     }
 
     bool mul_y0(Mul3 op, Register x, Ax a) {
-        if (!CanReadBus16(x.GetName(), false)) {
+        if (!CanReadBus16(x.GetName())) {
             return Refuse();
         }
         RegToBus16(Reg::rsi, x.GetName(), false);
@@ -1061,20 +1031,14 @@ public:
     }
 
     bool mul_y0(Mul3 op, Rn x, StepZIDS xs, Ax a) {
-        const unsigned unit = x.Index();
-        RnAndModify(Reg::rax, Reg::rcx, unit, xs.GetName(), false);
-        CheckData(Reg::rax);
-        LoadData(Reg::rsi, Reg::rax);
-        e.Mov(R(modes.r[unit]), Reg::rcx, 16);
+        LoadFromRn(Reg::rsi, x.Index(), xs.GetName(), Reg::rax, Reg::rcx);
         e.Mov(R(modes.x[0]), Reg::rsi, 16);
         MulGeneric(op.GetName(), a.GetName());
         return true;
     }
 
     bool mul_y0(Mul2 op, MemImm8 x, Ax a) {
-        PageAddress(Reg::rax, x);
-        CheckData(Reg::rax);
-        LoadData(Reg::rsi, Reg::rax);
+        LoadFromMemory(Reg::rsi, x, Reg::rax);
         e.Mov(R(modes.x[0]), Reg::rsi, 16);
         MulGeneric(op.GetName(), a.GetName());
         return true;
@@ -1117,7 +1081,7 @@ public:
     }
 
     bool Modr(unsigned unit, StepValue step, bool dmod) {
-        RnAndModifyRaw(Reg::rax, Reg::rcx, unit, step, dmod);
+        RnAndModify(Reg::rax, Reg::rcx, unit, step, dmod);
         e.Mov(R(modes.r[unit]), Reg::rcx, 16);
         // fr = r[unit] == 0, after the step
         e.Op(Arith::xor_, Reg::rax, Reg::rax, 32);
@@ -1128,13 +1092,11 @@ public:
     }
 
     bool ModrPair(ArpRn2 a, ArpStep2 asi, ArpStep2 asj, bool dmodi, bool dmodj) {
-        const unsigned ui = Mode(modes.arprni[a.Index()]);
-        const unsigned uj = Mode(modes.arprnj[a.Index()]) + 4u;
-        const StepValue si = ArStep(Mode(modes.arpstepi[asi.Index()]));
-        const StepValue sj = ArStep(Mode(modes.arpstepj[asj.Index()]));
-        RnAndModifyRaw(Reg::rax, Reg::rcx, ui, si, dmodi);
+        const auto [ui, uj] = GetArpRnUnit(a);
+        const auto [si, sj] = GetArpStep(asi, asj);
+        RnAndModify(Reg::rax, Reg::rcx, ui, si, dmodi);
         e.Mov(R(modes.r[ui]), Reg::rcx, 16);
-        RnAndModifyRaw(Reg::rax, Reg::rcx, uj, sj, dmodj);
+        RnAndModify(Reg::rax, Reg::rcx, uj, sj, dmodj);
         e.Mov(R(modes.r[uj]), Reg::rcx, 16);
         return true;
     }
@@ -1165,8 +1127,8 @@ public:
         if (name == RegName::a0 || name == RegName::a1) {
             return Refuse(); // the interpreter throws
         }
-        if (name != RegName::p && !CanReadBus16(name, false)) {
-            return ViaHandler(true);
+        if (name != RegName::p && !CanReadBus16(name)) {
+            return ViaHandler(Modes::MayChange);
         }
         if (name == RegName::p) {
             ProductToBus40(Reg::rsi, 0);
@@ -1210,9 +1172,7 @@ public:
 
     bool alb(Alb op, Imm16 a, MemImm8 b) {
         ComputeFlags(); // it sets fz and fm
-        PageAddress(Reg::rdi, b);
-        CheckData(Reg::rdi);
-        LoadData(Reg::rsi, Reg::rdi);
+        LoadFromMemory(Reg::rsi, b, Reg::rdi);
         GenericAlb(op.GetName(), a.Unsigned16(), Reg::rsi);
         if (IsAlbModifying(op.GetName())) {
             StoreData(Reg::rdi, Reg::rsi);
@@ -1222,11 +1182,7 @@ public:
 
     bool alb(Alb op, Imm16 a, Rn b, StepZIDS bs) {
         ComputeFlags(); // it sets fz and fm
-        const unsigned unit = b.Index();
-        RnAndModify(Reg::rdi, Reg::r8, unit, bs.GetName(), false);
-        CheckData(Reg::rdi);
-        LoadData(Reg::rsi, Reg::rdi);
-        e.Mov(R(modes.r[unit]), Reg::r8, 16);
+        LoadFromRn(Reg::rsi, b.Index(), bs.GetName(), Reg::rdi, Reg::r8);
         GenericAlb(op.GetName(), a.Unsigned16(), Reg::rsi);
         if (IsAlbModifying(op.GetName())) {
             StoreData(Reg::rdi, Reg::rsi);
@@ -1237,13 +1193,13 @@ public:
     bool mma_my_my(ArRn1 x, ArStep1 xs, RegName a, bool x0_sign, bool y0_sign, bool x1_sign,
                    bool y1_sign, SumBase base, bool sub_p0, bool p0_align, bool sub_p1,
                    bool p1_align) {
-        const unsigned unit = Mode(modes.arrn[x.Index()]);
-        const StepValue step = ArStep(Mode(modes.arstep[xs.Index()]));
-        const OffsetValue offset = static_cast<OffsetValue>(Mode(modes.aroffset[xs.Index()]));
+        const unsigned unit = GetArRnUnit(x);
+        const StepValue step = GetArStep(xs);
+        const OffsetValue offset = GetArOffset(xs);
         if (!OffsetSupported(unit, offset, false)) {
             return RefuseMode();
         }
-        RnAndModify(Reg::r8, Reg::r10, unit, step, false);
+        RnAddressAndModify(Reg::r8, Reg::r10, unit, step, false);
         OffsetAddress(Reg::rsi, Reg::r8, unit, offset, false);
         CheckData(Reg::r8);
         CheckData(Reg::rsi);
@@ -1265,20 +1221,27 @@ public:
     // one that ends a loop), and after one, it checks for an interrupt, which none of these can
     // make due (they don't change ie, im or ip, and a block only runs when none is due).
 
-    bool br(Address18_16 addr_low, Address18_2 addr_high, Cond cond) {
-        if (next == loop_end) {
-            return Refuse();
-        }
-        Label skip, done;
-        if (!JumpUnlessCondition(cond, skip)) {
-            return Refuse();
-        }
-        e.MovImm(R(modes.pc), static_cast<s32>(Address32(addr_low, addr_high)), 32);
+    // Where a jump's code ends. On the way past its condition (JumpUnlessCondition), pc is
+    // `next`. The block ends either way.
+    void EndJump(Label& skip) {
+        Label done;
         e.Jmp(done);
         e.Bind(skip);
         e.MovImm(R(modes.pc), static_cast<s32>(next), 32);
         e.Bind(done);
         sets_pc = true;
+    }
+
+    bool br(Address18_16 addr_low, Address18_2 addr_high, Cond cond) {
+        if (next == loop_end) {
+            return Refuse();
+        }
+        Label skip;
+        if (!JumpUnlessCondition(cond, skip)) {
+            return Refuse();
+        }
+        e.MovImm(R(modes.pc), static_cast<s32>(Address32(addr_low, addr_high)), 32);
+        EndJump(skip);
         return true;
     }
 
@@ -1287,16 +1250,12 @@ public:
         if (next == loop_end || relative == 0xFFFFFFFF) {
             return Refuse(); // a jump to itself idles, which the interpreter handles
         }
-        Label skip, done;
+        Label skip;
         if (!JumpUnlessCondition(cond, skip)) {
             return Refuse();
         }
         e.MovImm(R(modes.pc), static_cast<s32>(next + relative), 32);
-        e.Jmp(done);
-        e.Bind(skip);
-        e.MovImm(R(modes.pc), static_cast<s32>(next), 32);
-        e.Bind(done);
-        sets_pc = true;
+        EndJump(skip);
         return true;
     }
 
@@ -1304,7 +1263,7 @@ public:
         if (next == loop_end) {
             return Refuse();
         }
-        Label skip, done;
+        Label skip;
         if (!JumpUnlessCondition(cond, skip)) {
             return Refuse();
         }
@@ -1323,11 +1282,7 @@ public:
         StoreData(Reg::rax, Reg::rsi);
         e.Mov(R(modes.sp), Reg::rax, 16);
         e.MovImm(R(modes.pc), static_cast<s32>(Address32(addr_low, addr_high)), 32);
-        e.Jmp(done);
-        e.Bind(skip);
-        e.MovImm(R(modes.pc), static_cast<s32>(next), 32);
-        e.Bind(done);
-        sets_pc = true;
+        EndJump(skip);
         return true;
     }
 
@@ -1335,34 +1290,12 @@ public:
         if (next == loop_end) {
             return Refuse();
         }
-        Label skip, done;
+        Label skip;
         if (!JumpUnlessCondition(c, skip)) {
             return Refuse();
         }
-        // PopPC: from sp and sp + 1, the low half first if cpc.
-        const bool cpc = Mode(modes.cpc) == 1;
-        e.Movzx(Reg::rax, R(modes.sp), 16);
-        e.Lea(Reg::rcx, Ptr(Reg::rax, 1), 32);
-        e.Movzx(Reg::rcx, Reg::rcx, 16);
-        CheckData(Reg::rax);
-        CheckData(Reg::rcx);
-        LoadData(Reg::rsi, Reg::rax);
-        LoadData(Reg::rdi, Reg::rcx);
-        // rsi and rdi are the low and high halves if cpc, else the high and low
-        const Reg high = cpc ? Reg::rdi : Reg::rsi;
-        const Reg low = cpc ? Reg::rsi : Reg::rdi;
-        e.OpImm(Arith::cmp, high, 4, 32); // SetPC asserts the address is below 0x40000
-        e.J(CC::ae, *bail);
-        e.ShiftImm(Shift::shl, high, 16, 32);
-        e.Op(Arith::or_, high, low, 32);
-        e.Mov(R(modes.pc), high, 32);
-        e.Lea(Reg::rcx, Ptr(Reg::rcx, 1), 32);
-        e.Mov(R(modes.sp), Reg::rcx, 16);
-        e.Jmp(done);
-        e.Bind(skip);
-        e.MovImm(R(modes.pc), static_cast<s32>(next), 32);
-        e.Bind(done);
-        sets_pc = true;
+        PopPc(0);
+        EndJump(skip);
         return true;
     }
 
@@ -1376,7 +1309,7 @@ public:
     }
 
     bool bkrep(Register a, Address18_16 addr_low, Address18_2 addr_high) {
-        if (next == loop_end || !CanReadBus16(a.GetName(), false)) {
+        if (next == loop_end || !CanReadBus16(a.GetName())) {
             return Refuse();
         }
         RegToBus16(Reg::rsi, a.GetName(), false);
@@ -1419,9 +1352,7 @@ public:
     }
 
     bool mov_sv(MemImm8 a) {
-        PageAddress(Reg::rax, a);
-        CheckData(Reg::rax);
-        LoadData(Reg::rsi, Reg::rax);
+        LoadFromMemory(Reg::rsi, a, Reg::rax);
         e.Mov(R(modes.sv), Reg::rsi, 16);
         return true;
     }
@@ -1432,7 +1363,7 @@ public:
     }
 
     bool mov_sv_to(MemImm8 b) {
-        PageAddress(Reg::rax, b);
+        MemoryAddress(Reg::rax, b);
         CheckData(Reg::rax);
         e.Movzx(Reg::rsi, R(modes.sv), 16);
         StoreData(Reg::rax, Reg::rsi);
@@ -1486,8 +1417,8 @@ public:
     bool mul(Mul3 op, R45 y, StepZIDS ys, R0123 x, StepZIDS xs, Ax a) {
         const unsigned uy = y.Index();
         const unsigned ux = x.Index();
-        RnAndModify(Reg::r8, Reg::r10, uy, ys.GetName(), false);
-        RnAndModify(Reg::r9, Reg::r11, ux, xs.GetName(), false);
+        RnAddressAndModify(Reg::r8, Reg::r10, uy, ys.GetName(), false);
+        RnAddressAndModify(Reg::r9, Reg::r11, ux, xs.GetName(), false);
         CheckData(Reg::r8);
         CheckData(Reg::r9);
         LoadData(Reg::rax, Reg::r8);
@@ -1502,59 +1433,42 @@ public:
 
     bool push(Imm16 a) {
         e.MovImm(Reg::rsi, a.Unsigned16());
-        e.Movzx(Reg::rax, R(modes.sp), 16);
-        e.OpImm(Arith::sub, Reg::rax, 1, 32);
-        e.Movzx(Reg::rax, Reg::rax, 16);
-        CheckData(Reg::rax);
-        e.Mov(R(modes.sp), Reg::rax, 16);
-        StoreData(Reg::rax, Reg::rsi);
+        PushStack(Reg::rsi);
         return true;
     }
 
     bool mov(MemImm8 a, RnOld b) {
-        PageAddress(Reg::rax, a);
-        CheckData(Reg::rax);
-        LoadData(Reg::rsi, Reg::rax);
+        LoadFromMemory(Reg::rsi, a, Reg::rax);
         RegFromBus16(b.GetName(), Reg::rsi);
         return true;
     }
 
     bool mov(RnOld a, MemImm8 b) {
         RegToBus16(Reg::rsi, a.GetName(), false);
-        PageAddress(Reg::rax, b);
-        CheckData(Reg::rax);
-        StoreData(Reg::rax, Reg::rsi);
+        StoreToMemory(b, Reg::rsi, Reg::rax);
         return true;
     }
 
     bool mov(Axl a, MemImm16 b) {
         RegToBus16(Reg::rsi, a.GetName(), true);
-        e.MovImm(Reg::rax, b.Unsigned16());
-        CheckData(Reg::rax);
-        StoreData(Reg::rax, Reg::rsi);
+        StoreToMemory(b, Reg::rsi, Reg::rax);
         return true;
     }
 
     bool mov(Axl a, MemR7Imm7s b) {
         RegToBus16(Reg::rsi, a.GetName(), true);
-        R7Address(Reg::rax, b.Signed16());
-        CheckData(Reg::rax);
-        StoreData(Reg::rax, Reg::rsi);
+        StoreToMemory(b, Reg::rsi, Reg::rax);
         return true;
     }
 
     bool mov(Axl a, MemR7Imm16 b) {
         RegToBus16(Reg::rsi, a.GetName(), true);
-        R7Address(Reg::rax, b.Unsigned16());
-        CheckData(Reg::rax);
-        StoreData(Reg::rax, Reg::rsi);
+        StoreToMemory(b, Reg::rsi, Reg::rax);
         return true;
     }
 
     bool mov(MemR7Imm16 a, Ax b) {
-        R7Address(Reg::rax, a.Unsigned16());
-        CheckData(Reg::rax);
-        LoadData(Reg::rsi, Reg::rax);
+        LoadFromMemory(Reg::rsi, a, Reg::rax);
         RegFromBus16(b.GetName(), Reg::rsi);
         return true;
     }
@@ -1657,24 +1571,7 @@ public:
         if (next == loop_end) {
             return Refuse();
         }
-        // PopPC, then sp += a
-        const bool cpc = Mode(modes.cpc) == 1;
-        e.Movzx(Reg::rax, R(modes.sp), 16);
-        e.Lea(Reg::rcx, Ptr(Reg::rax, 1), 32);
-        e.Movzx(Reg::rcx, Reg::rcx, 16);
-        CheckData(Reg::rax);
-        CheckData(Reg::rcx);
-        LoadData(Reg::rsi, Reg::rax);
-        LoadData(Reg::rdi, Reg::rcx);
-        const Reg high = cpc ? Reg::rdi : Reg::rsi;
-        const Reg low = cpc ? Reg::rsi : Reg::rdi;
-        e.OpImm(Arith::cmp, high, 4, 32);
-        e.J(CC::ae, *bail);
-        e.ShiftImm(Shift::shl, high, 16, 32);
-        e.Op(Arith::or_, high, low, 32);
-        e.Mov(R(modes.pc), high, 32);
-        e.Lea(Reg::rcx, Ptr(Reg::rcx, 1 + static_cast<s32>(a.Unsigned16())), 32);
-        e.Mov(R(modes.sp), Reg::rcx, 16);
+        PopPc(static_cast<s32>(a.Unsigned16())); // then sp += a
         sets_pc = true;
         return true;
     }
@@ -1684,11 +1581,10 @@ public:
             return Refuse();
         }
         // StoreBlockRepeat(sp): frame 0 at sp - 1 to sp - 4, then the frames move down.
-        const s32 frame_size = static_cast<s32>(sizeof(RegisterState::BlockRepeatFrame));
         const s32 f0 = Offset(modes.bkrep_stack[0]);
-        const s32 start = f0 + static_cast<s32>(offsetof(RegisterState::BlockRepeatFrame, start));
-        const s32 end = f0 + static_cast<s32>(offsetof(RegisterState::BlockRepeatFrame, end));
-        const s32 lc = f0 + static_cast<s32>(offsetof(RegisterState::BlockRepeatFrame, lc));
+        const s32 start = f0 + FrameStart;
+        const s32 end = f0 + FrameEnd;
+        const s32 lc = f0 + FrameLc;
         e.Movzx(Reg::r8, R(modes.sp), 16);
         const Reg addr[4] = {Reg::r9, Reg::r10, Reg::r11, Reg::rdi};
         for (int k = 0; k < 4; ++k) {
@@ -1722,10 +1618,7 @@ public:
         for (int k = 1; k <= 3; ++k) {
             e.OpImm(Arith::cmp, Reg::rax, k + 1, 32); // frame k moves if k < bcn
             e.J(CC::b, moved);
-            e.Mov(Reg::rcx, Ptr(RegsBase, f0 + k * frame_size), 64);
-            e.Mov(Ptr(RegsBase, f0 + (k - 1) * frame_size), Reg::rcx, 64);
-            e.Mov(Reg::rcx, Ptr(RegsBase, f0 + k * frame_size + 8), 32);
-            e.Mov(Ptr(RegsBase, f0 + (k - 1) * frame_size + 8), Reg::rcx, 32);
+            CopyFrame(k, k - 1);
         }
         e.Bind(moved);
         e.OpImm(Arith::sub, R(modes.bcn), 1, 16);
@@ -1744,11 +1637,10 @@ public:
             return Refuse();
         }
         // RestoreBlockRepeat(sp): read four words, check the asserts, then change anything.
-        const s32 frame_size = static_cast<s32>(sizeof(RegisterState::BlockRepeatFrame));
         const s32 f0 = Offset(modes.bkrep_stack[0]);
-        const s32 start = f0 + static_cast<s32>(offsetof(RegisterState::BlockRepeatFrame, start));
-        const s32 end = f0 + static_cast<s32>(offsetof(RegisterState::BlockRepeatFrame, end));
-        const s32 lc = f0 + static_cast<s32>(offsetof(RegisterState::BlockRepeatFrame, lc));
+        const s32 start = f0 + FrameStart;
+        const s32 end = f0 + FrameEnd;
+        const s32 lc = f0 + FrameLc;
         e.Movzx(Reg::r8, R(modes.sp), 16);
         const Reg addr[4] = {Reg::r9, Reg::r10, Reg::r11, Reg::rdi};
         for (int k = 0; k < 4; ++k) {
@@ -1775,10 +1667,7 @@ public:
             Label skip;
             e.OpImm(Arith::cmp, Reg::rax, k + 1, 32); // frame k moves if k < bcn
             e.J(CC::b, skip);
-            e.Mov(Reg::rcx, Ptr(RegsBase, f0 + k * frame_size), 64);
-            e.Mov(Ptr(RegsBase, f0 + (k + 1) * frame_size), Reg::rcx, 64);
-            e.Mov(Reg::rcx, Ptr(RegsBase, f0 + k * frame_size + 8), 32);
-            e.Mov(Ptr(RegsBase, f0 + (k + 1) * frame_size + 8), Reg::rcx, 32);
+            CopyFrame(k, k + 1);
             e.Bind(skip);
         }
         e.OpImm(Arith::add, R(modes.bcn), 1, 16);
@@ -1817,8 +1706,8 @@ private:
     // sign-extended word at [r0]), and takes the other value if it's greater (or less, or equal as
     // well), setting fm and mixp; r0 steps.
     bool MinMax(RegName a, StepValue step, MinMaxOp op, bool from_memory) {
-        ComputeFlags();                                    // it sets fm
-        RnAndModifyRaw(Reg::rdi, Reg::r8, 0, step, false); // rdi = the old r0, r8 = the new one
+        ComputeFlags();                                 // it sets fm
+        RnAndModify(Reg::rdi, Reg::r8, 0, step, false); // rdi = the old r0, r8 = the new one
         if (from_memory) {
             e.Mov(Reg::rax, Reg::rdi, 32);
             RnAddress(Reg::rax, 0);
@@ -1878,47 +1767,87 @@ private:
     // push: a register's word to --sp.
     bool PushWord(const u16& field) {
         e.Movzx(Reg::rsi, R(field), 16);
-        e.Movzx(Reg::rax, R(modes.sp), 16);
-        e.OpImm(Arith::sub, Reg::rax, 1, 32);
-        e.Movzx(Reg::rax, Reg::rax, 16);
-        CheckData(Reg::rax);
-        e.Mov(R(modes.sp), Reg::rax, 16);
-        StoreData(Reg::rax, Reg::rsi);
+        PushStack(Reg::rsi);
         return true;
     }
 
     // pop: the word at sp++ to a register.
     bool PopWord(const u16& field) {
-        e.Movzx(Reg::rax, R(modes.sp), 16);
-        CheckData(Reg::rax);
-        LoadData(Reg::rsi, Reg::rax);
-        e.OpImm(Arith::add, Reg::rax, 1, 32);
-        e.Mov(R(modes.sp), Reg::rax, 16);
+        PopStack(Reg::rsi);
         e.Mov(R(field), Reg::rsi, 16);
         return true;
+    }
+
+    // The word in `value` (a register other than rax) to --sp. Clobbers rax.
+    void PushStack(Reg value) {
+        e.Movzx(Reg::rax, R(modes.sp), 16);
+        e.OpImm(Arith::sub, Reg::rax, 1, 32);
+        e.Movzx(Reg::rax, Reg::rax, 16);
+        CheckData(Reg::rax);
+        e.Mov(R(modes.sp), Reg::rax, 16);
+        StoreData(Reg::rax, value);
+    }
+
+    // The word at sp++ into `dst` (a register other than rax), zero-extended. Clobbers rax.
+    void PopStack(Reg dst) {
+        e.Movzx(Reg::rax, R(modes.sp), 16);
+        CheckData(Reg::rax);
+        LoadData(dst, Reg::rax);
+        e.OpImm(Arith::add, Reg::rax, 1, 32);
+        e.Mov(R(modes.sp), Reg::rax, 16);
+    }
+
+    // PopPC: pc from the words at sp and sp + 1, the low half first if cpc. sp then moves past
+    // them and `extra` words more.
+    void PopPc(s32 extra) {
+        const bool cpc = Mode(modes.cpc) == 1;
+        e.Movzx(Reg::rax, R(modes.sp), 16);
+        e.Lea(Reg::rcx, Ptr(Reg::rax, 1), 32);
+        e.Movzx(Reg::rcx, Reg::rcx, 16);
+        CheckData(Reg::rax);
+        CheckData(Reg::rcx);
+        LoadData(Reg::rsi, Reg::rax);
+        LoadData(Reg::rdi, Reg::rcx);
+        // rsi and rdi are the low and high halves if cpc, else the high and low
+        const Reg high = cpc ? Reg::rdi : Reg::rsi;
+        const Reg low = cpc ? Reg::rsi : Reg::rdi;
+        e.OpImm(Arith::cmp, high, 4, 32); // SetPC asserts the address is below 0x40000
+        e.J(CC::ae, *bail);
+        e.ShiftImm(Shift::shl, high, 16, 32);
+        e.Op(Arith::or_, high, low, 32);
+        e.Mov(R(modes.pc), high, 32);
+        e.Lea(Reg::rcx, Ptr(Reg::rcx, 1 + extra), 32);
+        e.Mov(R(modes.sp), Reg::rcx, 16);
     }
 
     // BlockRepeat(lc, address): a new innermost loop from the next instruction to `end`, with
     // the count in `lc`. Ends the block, since the loop changes where blocks end.
     void BlockRepeat(Reg lc, u32 end) {
         const s32 stack = Offset(modes.bkrep_stack[0]);
-        const s32 frame_size = static_cast<s32>(sizeof(RegisterState::BlockRepeatFrame));
         e.Movzx(Reg::rax, R(modes.bcn), 16);
         e.OpImm(Arith::cmp, Reg::rax, 3, 32); // the interpreter asserts bcn <= 3
         e.J(CC::a, *bail);
-        e.MovImm(Reg::rcx, static_cast<u64>(frame_size));
+        e.MovImm(Reg::rcx, static_cast<u64>(FrameSize));
         e.Imul(Reg::rcx, Reg::rax, 64);
         e.Lea(Reg::rcx, Ptr(RegsBase, Reg::rcx, 1, stack), 64);
-        e.MovImm(Ptr(Reg::rcx, static_cast<s32>(offsetof(RegisterState::BlockRepeatFrame, start))),
-                 static_cast<s32>(next), 32);
-        e.MovImm(Ptr(Reg::rcx, static_cast<s32>(offsetof(RegisterState::BlockRepeatFrame, end))),
-                 static_cast<s32>(end), 32);
-        e.Mov(Ptr(Reg::rcx, static_cast<s32>(offsetof(RegisterState::BlockRepeatFrame, lc))), lc,
-              16);
+        e.MovImm(Ptr(Reg::rcx, FrameStart), static_cast<s32>(next), 32);
+        e.MovImm(Ptr(Reg::rcx, FrameEnd), static_cast<s32>(end), 32);
+        e.Mov(Ptr(Reg::rcx, FrameLc), lc, 16);
         e.MovImm(R(modes.lp), 1, 16);
         e.OpImm(Arith::add, R(modes.bcn), 1, 16);
         e.MovImm(R(modes.pc), static_cast<s32>(next), 32);
         sets_pc = true;
+    }
+
+    // Copies block-repeat frame `from` over frame `to`, through rcx: start and end as 8 bytes,
+    // then lc and the frame's padding as 4.
+    void CopyFrame(int from, int to) {
+        static_assert(FrameSize == 12);
+        const s32 f0 = Offset(modes.bkrep_stack[0]);
+        e.Mov(Reg::rcx, Ptr(RegsBase, f0 + from * FrameSize), 64);
+        e.Mov(Ptr(RegsBase, f0 + to * FrameSize), Reg::rcx, 64);
+        e.Mov(Reg::rcx, Ptr(RegsBase, f0 + from * FrameSize + 8), 32);
+        e.Mov(Ptr(RegsBase, f0 + to * FrameSize + 8), Reg::rcx, 32);
     }
 
     enum class OffsetValue : u16 {
@@ -1942,8 +1871,7 @@ private:
 
     template <typename T>
     s32 Offset(const T& field) const {
-        return static_cast<s32>(reinterpret_cast<const u8*>(&field) -
-                                reinterpret_cast<const u8*>(&modes));
+        return OffsetIn(modes, field);
     }
 
     // The field of the registers, in the block's memory operand form.
@@ -1979,8 +1907,49 @@ private:
         guards.push_back(guard);
     }
 
-    static StepValue ArStep(u16 value) {
+    // The step that a step register's value stands for. The interpreter's ConvertArStep gives the
+    // same steps for the values up to 7. A value above 7 gives Zero here.
+    static StepValue ConvertArStep(u16 value) {
         return value <= 7 ? static_cast<StepValue>(value) : StepValue::Zero;
+    }
+
+    // The interpreter's GetArRnUnit, GetArStep and GetArOffset, and the pairs for the ArpRn and
+    // ArpStep operands. They read the modes at translation time, through Mode. Each pair reads i
+    // before j. The block's guards come in the order of the reads.
+    template <typename ArRnX>
+    unsigned GetArRnUnit(ArRnX arrn) {
+        return Mode(modes.arrn[arrn.Index()]);
+    }
+
+    template <typename ArStepX>
+    StepValue GetArStep(ArStepX arstep) {
+        return ConvertArStep(Mode(modes.arstep[arstep.Index()]));
+    }
+
+    template <typename ArStepX>
+    OffsetValue GetArOffset(ArStepX arstep) {
+        return static_cast<OffsetValue>(Mode(modes.aroffset[arstep.Index()]));
+    }
+
+    template <typename ArpRnX>
+    std::pair<unsigned, unsigned> GetArpRnUnit(ArpRnX arprn) {
+        const unsigned i = Mode(modes.arprni[arprn.Index()]);
+        const unsigned j = Mode(modes.arprnj[arprn.Index()]) + 4u;
+        return {i, j};
+    }
+
+    template <typename ArpStepX>
+    std::pair<StepValue, StepValue> GetArpStep(ArpStepX arpstepi, ArpStepX arpstepj) {
+        const StepValue i = ConvertArStep(Mode(modes.arpstepi[arpstepi.Index()]));
+        const StepValue j = ConvertArStep(Mode(modes.arpstepj[arpstepj.Index()]));
+        return {i, j};
+    }
+
+    template <typename ArpStepX>
+    std::pair<OffsetValue, OffsetValue> GetArpOffset(ArpStepX arpstepi, ArpStepX arpstepj) {
+        const OffsetValue i = static_cast<OffsetValue>(Mode(modes.arpoffseti[arpstepi.Index()]));
+        const OffsetValue j = static_cast<OffsetValue>(Mode(modes.arpoffsetj[arpstepj.Index()]));
+        return {i, j};
     }
 
     Mem Acc(RegName name) const {
@@ -2066,7 +2035,7 @@ private:
     }
 
     // The registers RegToBus16 and RegFromBus16 handle here; the rest are refused.
-    static bool CanReadBus16(RegName name, bool /*enable_sat_for_mov*/) {
+    static bool CanReadBus16(RegName name) {
         if (IsAcc(name)) {
             return name != RegName::a0e && name != RegName::a1e && name != RegName::b0e &&
                    name != RegName::b1e;
@@ -2076,7 +2045,7 @@ private:
     }
 
     static bool CanWriteBus16(RegName name) {
-        return CanReadBus16(name, false);
+        return CanReadBus16(name);
     }
 
     // RegToBus16: the register's value on the 16-bit bus, zero-extended into dst. Clobbers rcx and
@@ -2205,12 +2174,23 @@ private:
     // SaturateAcc on the value in `value`: to 32 bits, to the sign of bit 39, if it doesn't fit,
     // which sets flm. Clobbers rcx and rdx.
     void SaturateAcc(Reg value) {
+        Saturate(value, true);
+    }
+
+    // SaturateAccNoFlag: SaturateAcc without setting flm. Clobbers rcx and rdx.
+    void SaturateAccNoFlag(Reg value) {
+        Saturate(value, false);
+    }
+
+    void Saturate(Reg value, bool set_flm) {
         ASSERT(value != Reg::rcx && value != Reg::rdx);
         Label done;
         e.Movsx(Reg::rcx, value, 32, 64);
         e.Op(Arith::cmp, Reg::rcx, value, 64);
         e.J(CC::e, done);
-        e.MovImm(R(modes.flm), 1, 16);
+        if (set_flm) {
+            e.MovImm(R(modes.flm), 1, 16);
+        }
         e.Mov(Reg::rdx, value, 64);
         e.ShiftImm(Shift::shr, Reg::rdx, 39, 64);
         e.MovImm(value, 0x7FFF'FFFF);
@@ -2238,48 +2218,17 @@ private:
     // instruction instead, sets it again, and nothing it does depends on it. Clobbers rcx, rdx.
     void GetAndSatAcc(Reg dst, RegName name) {
         LoadAcc(dst, name);
-        if (Mode(modes.sat)) {
-            return;
+        if (!Mode(modes.sat)) {
+            SaturateAcc(dst);
         }
-        // value != SignExtend<32>(value): saturate to the sign of bit 39
-        Label done;
-        e.Movsx(Reg::rcx, dst, 32, 64);
-        e.Op(Arith::cmp, Reg::rcx, dst, 64);
-        e.J(CC::e, done);
-        e.MovImm(R(modes.flm), 1, 16);
-        e.Mov(Reg::rdx, dst, 64);
-        e.ShiftImm(Shift::shr, Reg::rdx, 39, 64);
-        e.MovImm(dst, 0x7FFF'FFFF);
-        e.MovImm(Reg::rcx, 0xFFFF'FFFF'8000'0000);
-        e.Test(Reg::rdx, Reg::rdx, 64);
-        e.Cmov(CC::ne, dst, Reg::rcx, 64);
-        e.Bind(done);
     }
 
     // GetAndSatAccNoFlag: GetAndSatAcc without setting flm. Clobbers rcx, rdx.
     void GetAndSatAccNoFlag(Reg dst, RegName name) {
         LoadAcc(dst, name);
-        if (Mode(modes.sat)) {
-            return;
+        if (!Mode(modes.sat)) {
+            SaturateAccNoFlag(dst);
         }
-        Label done;
-        e.Movsx(Reg::rcx, dst, 32, 64);
-        e.Op(Arith::cmp, Reg::rcx, dst, 64);
-        e.J(CC::e, done);
-        e.Mov(Reg::rdx, dst, 64);
-        e.ShiftImm(Shift::shr, Reg::rdx, 39, 64);
-        e.MovImm(dst, 0x7FFF'FFFF);
-        e.MovImm(Reg::rcx, 0xFFFF'FFFF'8000'0000);
-        e.Test(Reg::rdx, Reg::rdx, 64);
-        e.Cmov(CC::ne, dst, Reg::rcx, 64);
-        e.Bind(done);
-    }
-
-    // The address of an [r7 + imm] operand into dst.
-    void R7Address(Reg dst, u16 imm) {
-        e.Movzx(dst, R(modes.r[7]), 16);
-        e.OpImm(Arith::add, dst, imm, 32);
-        e.Movzx(dst, dst, 16);
     }
 
     static bool AluSupported(AlmOp op) {
@@ -3095,7 +3044,7 @@ private:
     // RnAndModify: the unit register's value into `old_value` and its stepped value into
     // `new_value`, both zero-extended 16 bits. The register itself isn't written: the caller
     // stores `new_value` once the instruction can't stop. The modes are baked in. Clobbers rdx.
-    void RnAndModifyRaw(Reg old_value, Reg new_value, unsigned unit, StepValue step, bool dmod) {
+    void RnAndModify(Reg old_value, Reg new_value, unsigned unit, StepValue step, bool dmod) {
         e.Movzx(old_value, R(modes.r[unit]), 16);
         const bool ep = (unit == 3 && Mode(modes.epi)) || (unit == 7 && Mode(modes.epj));
         if (ep && step != StepValue::Increase2Mode1 && step != StepValue::Decrease2Mode1 &&
@@ -3113,10 +3062,10 @@ private:
         }
     }
 
-    // RnAddressAndModify: as RnAndModifyRaw, with the address the old value gives (RnAddress) in
+    // RnAddressAndModify: as RnAndModify, with the address the old value gives (RnAddress) in
     // `address`.
-    void RnAndModify(Reg address, Reg new_value, unsigned unit, StepValue step, bool dmod) {
-        RnAndModifyRaw(address, new_value, unit, step, dmod);
+    void RnAddressAndModify(Reg address, Reg new_value, unsigned unit, StepValue step, bool dmod) {
+        RnAndModify(address, new_value, unit, step, dmod);
         RnAddress(address, unit);
     }
 
@@ -3327,11 +3276,31 @@ private:
         e.Bind(done);
     }
 
-    // The address of a [page:imm8] operand into dst.
-    void PageAddress(Reg dst, MemImm8 a) {
+    // The address of a memory operand into dst: [page:imm8], [imm16], [r7 + imm16] or
+    // [r7 + imm7s]. The interpreter's LoadFromMemory and StoreToMemory form the same addresses.
+    void MemoryAddress(Reg dst, MemImm8 a) {
         e.Movzx(dst, R(modes.page), 16);
         e.ShiftImm(Shift::shl, dst, 8, 32);
         e.OpImm(Arith::add, dst, a.Unsigned16(), 32);
+        e.Movzx(dst, dst, 16);
+    }
+
+    void MemoryAddress(Reg dst, MemImm16 a) {
+        e.MovImm(dst, a.Unsigned16());
+    }
+
+    void MemoryAddress(Reg dst, MemR7Imm16 a) {
+        R7Address(dst, a.Unsigned16());
+    }
+
+    void MemoryAddress(Reg dst, MemR7Imm7s a) {
+        R7Address(dst, a.Signed16());
+    }
+
+    // The address of an [r7 + imm] operand into dst.
+    void R7Address(Reg dst, u16 imm) {
+        e.Movzx(dst, R(modes.r[7]), 16);
+        e.OpImm(Arith::add, dst, imm, 32);
         e.Movzx(dst, dst, 16);
     }
 
@@ -3382,6 +3351,33 @@ private:
         ForDataPage(address, [&](Reg base) { e.Mov(Ptr(base, address, 2), value, 16); });
     }
 
+    // LoadFromMemory: the word at the memory operand `a` into dst. The operand's address goes
+    // into `address`.
+    template <typename Memory>
+    void LoadFromMemory(Reg dst, Memory a, Reg address) {
+        MemoryAddress(address, a);
+        CheckData(address);
+        LoadData(dst, address);
+    }
+
+    // StoreToMemory: `value` into the word at the memory operand `a`. The operand's address goes
+    // into `address`.
+    template <typename Memory>
+    void StoreToMemory(Memory a, Reg value, Reg address) {
+        MemoryAddress(address, a);
+        CheckData(address);
+        StoreData(address, value);
+    }
+
+    // Loads the word at [Rn] into dst and steps Rn. The address goes into `address` and the
+    // stepped value into `stepped`. Rn is written once the instruction can't stop.
+    void LoadFromRn(Reg dst, unsigned unit, StepValue step, Reg address, Reg stepped) {
+        RnAddressAndModify(address, stepped, unit, step, false);
+        CheckData(address);
+        LoadData(dst, address);
+        e.Mov(R(modes.r[unit]), stepped, 16);
+    }
+
     Emitter& e;
     const RegisterState& modes;
     const MemoryInterfaceUnit& miu;
@@ -3401,14 +3397,334 @@ private:
     Label* epilogue = nullptr;
 };
 
+// The registers that a block uses and that a function has to keep for its caller, on Win64 or
+// System V. A block's prologue pushes them and its epilogue pops them.
+constexpr Reg SavedRegisters[] = {Reg::rbx, Reg::rbp, Reg::r12, Reg::r13,
+                                  Reg::r14, Reg::r15, Reg::rsi, Reg::rdi};
+
+// The translation of one block, and the code around its translated instructions. A block's code
+// is, in order: the prologue, the translated instructions from the top, the end of a pass, the
+// bails, the guards, the data pages and the epilogue. The prologue jumps to the guards. The data
+// pages jump back to the top.
+struct Compilation {
+    using Flags = Translator::Flags;
+
+    // The way out of the block before instruction `index`, at `address`, when the interpreter has
+    // to run that instruction.
+    struct Bail {
+        std::unique_ptr<Label> label;
+        u32 index;
+        u32 address;
+        Flags flags; // before the instruction
+    };
+
+    Compilation(u32 pc, u32 loop_end, const RegisterState& regs, const MemoryInterface& mem,
+                Jit::Handler handler)
+        : pc(pc), loop_end(loop_end), modes(regs), miu(mem.Unit()), program(mem.ProgramMemory()),
+          t(e, modes, miu, &mem.Unit(), loop_end, handler) {
+        t.SetEpilogue(&epilogue);
+    }
+    Compilation(const Compilation&) = delete;
+    Compilation& operator=(const Compilation&) = delete;
+
+    // The prologue: pushes SavedRegisters, loads the fixed registers and jumps to the guards.
+    void EmitPrologue() {
+        for (Reg r : SavedRegisters) {
+            e.Push(r);
+        }
+        // Calls to handlers need the stack 16-byte aligned, and Win64 32 bytes above the return
+        // address: eight pushes after the return address leave it 8 off.
+        e.OpImm(Arith::sub, Reg::rsp, 40, 64);
+#ifdef _WIN32
+        e.Mov(ContextReg, Reg::rcx, 64);
+#else
+        e.Mov(ContextReg, Reg::rdi, 64);
+#endif
+        e.Mov(RegsBase, Ptr(ContextReg, offsetof(Context, regs)), 64);
+        e.Mov(MemoryBase, Ptr(ContextReg, offsetof(Context, memory)), 64);
+        e.Op(Arith::xor_, Executed, Executed, 32);
+        // In a loop, the code may jump back to the top with flags pending (Translator::Flags).
+        const Flags top_flags = loop_end != NoLoopEnd ? Flags::Either : Flags::Computed;
+        t.SetFlagState(top_flags);
+        if (top_flags == Flags::Either) {
+            e.MovImm(Ptr(ContextReg, offsetof(Context, flags_pending)), 0, 32);
+        }
+        e.Jmp(guards_label);
+        e.Bind(top);
+    }
+
+    // The end of a pass through the translated instructions: the next pass of a loop that ends
+    // with the block, or the way out of the block.
+    void EmitPassEnd() {
+        e.OpImm(Arith::add, Executed, static_cast<s32>(count), 64);
+        const Flags end_flags = t.FlagState();
+        if (loop_back) {
+            // Into the next pass with the flags as they are, which the top reads from
+            // flags_pending; out of the block with them computed.
+            if (end_flags == Flags::Pending || end_flags == Flags::Computed) {
+                e.MovImm(Ptr(ContextReg, offsetof(Context, flags_pending)),
+                         end_flags == Flags::Pending ? 1 : 0, 32);
+            }
+            // The block ends where the innermost loop does: its last instruction was run, so
+            // do what the interpreter does after it (RunOrdinary).
+            // rcx = &regs.bkrep_stack[bcn - 1]
+            const s32 stack = OffsetIn(modes, modes.bkrep_stack[0]);
+            const s32 bcn = OffsetIn(modes, modes.bcn);
+            const s32 lp = OffsetIn(modes, modes.lp);
+            const s32 pc_off = OffsetIn(modes, modes.pc);
+            Label finished, to_start;
+            e.Movzx(Reg::rax, Ptr(RegsBase, bcn), 16);
+            e.OpImm(Arith::sub, Reg::rax, 1, 32);
+            e.MovImm(Reg::rcx, static_cast<u64>(FrameSize));
+            e.Imul(Reg::rax, Reg::rcx, 64);
+            e.Lea(Reg::rcx, Ptr(RegsBase, Reg::rax, 1, stack), 64);
+            e.OpImm(Arith::cmp, Ptr(Reg::rcx, FrameLc), 0, 16);
+            e.J(CC::e, finished);
+            e.OpImm(Arith::sub, Ptr(Reg::rcx, FrameLc), 1, 16);
+            e.Mov(Reg::rax, Ptr(Reg::rcx, FrameStart), 32);
+            e.Mov(Ptr(RegsBase, pc_off), Reg::rax, 32);
+            e.OpImm(Arith::cmp, Reg::rax, static_cast<s32>(pc), 32);
+            e.J(CC::ne, to_start);
+            // Another pass, if it fits in the limit.
+            e.Lea(Reg::rax, Ptr(Executed, static_cast<s32>(count)), 64);
+            e.Op(Arith::cmp, Reg::rax, Ptr(ContextReg, offsetof(Context, limit)), 64);
+            e.J(CC::be, top);
+            e.Bind(to_start);
+            t.EmitComputeFlags(end_flags == Flags::Computed ? Flags::Computed : Flags::Either);
+            ExitWith(Exit::Done);
+            e.Bind(finished);
+            t.EmitComputeFlags(end_flags == Flags::Computed ? Flags::Computed : Flags::Either);
+            // --bcn; lp = bcn != 0
+            e.OpImm(Arith::sub, Ptr(RegsBase, bcn), 1, 16);
+            e.Op(Arith::xor_, Reg::rax, Reg::rax, 32);
+            e.OpImm(Arith::cmp, Ptr(RegsBase, bcn), 0, 16);
+            e.Set(CC::ne, Reg::rax);
+            e.Mov(Ptr(RegsBase, lp), Reg::rax, 16);
+            e.MovImm(Ptr(RegsBase, pc_off), static_cast<s32>(address), 32);
+            ExitWith(Exit::Done);
+        } else if (jumped) {
+            t.EmitComputeFlags(end_flags);
+            ExitWith(Exit::Done);
+        } else {
+            const s32 pc_off = OffsetIn(modes, modes.pc);
+            t.EmitComputeFlags(end_flags);
+            e.MovImm(Ptr(RegsBase, pc_off), static_cast<s32>(address), 32);
+            ExitWith(Exit::Done);
+        }
+    }
+
+    // The code at each bail that a translated instruction jumps to.
+    void EmitBails() {
+        // Stops before instruction `index`: the ones before it have run.
+        const s32 pc_off = OffsetIn(modes, modes.pc);
+        // Exits with pending or possibly pending flags share the code that computes them.
+        Label bail_pending, bail_either;
+        for (Bail& b : bails) {
+            if (!b.label->Used()) {
+                continue;
+            }
+            e.Bind(*b.label);
+            e.OpImm(Arith::add, Executed, static_cast<s32>(b.index), 64);
+            e.MovImm(Ptr(RegsBase, pc_off), static_cast<s32>(b.address), 32);
+            switch (b.flags) {
+            case Flags::Computed:
+                ExitWith(Exit::Bailed);
+                break;
+            case Flags::Pending:
+                e.Jmp(bail_pending);
+                break;
+            case Flags::Either:
+                e.Jmp(bail_either);
+                break;
+            }
+        }
+        if (bail_pending.Used()) {
+            e.Bind(bail_pending);
+            t.EmitComputeFlags(Flags::Pending);
+            ExitWith(Exit::Bailed);
+        }
+        if (bail_either.Used()) {
+            e.Bind(bail_either);
+            t.EmitComputeFlags(Flags::Either);
+            ExitWith(Exit::Bailed);
+        }
+    }
+
+    // The mode checks, run once when the block is entered: register fields next to each other
+    // are compared together, and the memory interface's fields through Context::miu.
+    void EmitGuards() {
+        e.Bind(guards_label);
+        std::vector<Guard> fields, miu_fields;
+        for (const Guard& g : t.Guards()) {
+            (g.absolute ? miu_fields : fields).push_back(g);
+        }
+        std::sort(fields.begin(), fields.end(),
+                  [](const Guard& a, const Guard& b) { return a.offset < b.offset; });
+        const auto compare = [&](Reg base, s32 offset, u64 value, u32 bytes) {
+            switch (bytes) {
+            case 2:
+                e.OpImm(Arith::cmp, Ptr(base, offset), static_cast<s16>(value), 16);
+                break;
+            case 4:
+                e.OpImm(Arith::cmp, Ptr(base, offset), static_cast<s32>(value), 32);
+                break;
+            default:
+                ASSERT(bytes == 8);
+                e.MovImm(Reg::rcx, value);
+                e.Op(Arith::cmp, Ptr(base, offset), Reg::rcx, 64);
+                break;
+            }
+            e.J(CC::ne, guard_failed);
+        };
+        for (std::size_t i = 0; i < fields.size();) {
+            // A run of fields that follow each other, of up to 8 bytes.
+            const s32 start = fields[i].offset;
+            u64 value = 0;
+            u32 bytes = 0;
+            while (i < fields.size() && fields[i].offset == start + static_cast<s32>(bytes) &&
+                   bytes + fields[i].size <= 8) {
+                value |= u64{fields[i].value} << (8 * bytes);
+                bytes += fields[i].size;
+                ++i;
+            }
+            if (bytes == 6) {
+                compare(RegsBase, start, value & 0xFFFF'FFFF, 4);
+                compare(RegsBase, start + 4, value >> 32, 2);
+            } else {
+                compare(RegsBase, start, value, bytes);
+            }
+        }
+        if (!miu_fields.empty()) {
+            e.Mov(Reg::rax, Ptr(ContextReg, offsetof(Context, miu)), 64);
+            for (const Guard& g : miu_fields) {
+                compare(Reg::rax, g.offset, g.value, g.size);
+            }
+        }
+    }
+
+    // The data pages (ConvertDataAddress), which the firmware switches: the bases of the X and
+    // Y pages, or of the Z page twice. A page of 2 or more, which the interpreter asserts for,
+    // leaves the block to the interpreter.
+    void EmitDataPages() {
+        Label refused;
+        const s32 x_page = static_cast<s32>(offsetof(MemoryInterfaceUnit, x_page));
+        const s32 y_page = static_cast<s32>(offsetof(MemoryInterfaceUnit, y_page));
+        const s32 z_page = static_cast<s32>(offsetof(MemoryInterfaceUnit, z_page));
+        const s32 data = static_cast<s32>(MemoryInterfaceUnit::DataMemoryOffset * 2);
+        e.Mov(Reg::rax, Ptr(ContextReg, offsetof(Context, miu)), 64);
+        if (miu.page_mode == 0) {
+            e.Movzx(Reg::rcx, Ptr(Reg::rax, z_page), 16);
+            e.OpImm(Arith::cmp, Reg::rcx, 2, 32);
+            e.J(CC::ae, refused);
+            e.ShiftImm(Shift::shl, Reg::rcx, 17, 32); // a page is 0x10000 words, 0x20000 bytes
+            e.Lea(XPage, Ptr(MemoryBase, Reg::rcx, 1, data), 64);
+            e.Mov(YPage, XPage, 64);
+        } else {
+            e.Movzx(Reg::rcx, Ptr(Reg::rax, x_page), 16);
+            e.Movzx(Reg::rdx, Ptr(Reg::rax, y_page), 16);
+            e.OpImm(Arith::cmp, Reg::rcx, 2, 32);
+            e.J(CC::ae, refused);
+            e.OpImm(Arith::cmp, Reg::rdx, 2, 32);
+            e.J(CC::ae, refused);
+            e.ShiftImm(Shift::shl, Reg::rcx, 17, 32);
+            e.ShiftImm(Shift::shl, Reg::rdx, 17, 32);
+            e.Lea(XPage, Ptr(MemoryBase, Reg::rcx, 1, data), 64);
+            e.Lea(YPage, Ptr(MemoryBase, Reg::rdx, 1, data), 64);
+        }
+        e.Jmp(top);
+        e.Bind(refused);
+        e.MovImm(Ptr(ContextReg, offsetof(Context, exit)), static_cast<s32>(Exit::Refused), 32);
+        e.Jmp(epilogue);
+    }
+
+    // The exit for a failed guard, and the epilogue that ends every exit. The epilogue pops
+    // SavedRegisters and returns the number of instructions run.
+    void EmitEpilogue() {
+        e.Bind(guard_failed);
+        e.MovImm(Ptr(ContextReg, offsetof(Context, exit)), static_cast<s32>(Exit::GuardFailed), 32);
+
+        e.Bind(epilogue);
+        e.Mov(Reg::rax, Executed, 64);
+        e.OpImm(Arith::add, Reg::rsp, 40, 64);
+        for (auto it = std::rbegin(SavedRegisters); it != std::rend(SavedRegisters); ++it) {
+            e.Pop(*it);
+        }
+        e.Ret();
+    }
+
+    // Leaves the block: sets Context::exit, unless the exit is Done, and jumps to the epilogue.
+    void ExitWith(u32 exit) {
+        if (exit != Exit::Done) {
+            e.MovImm(Ptr(ContextReg, offsetof(Context, exit)), static_cast<s32>(exit), 32);
+        }
+        e.Jmp(epilogue);
+    }
+
+    const u32 pc;
+    const u32 loop_end;
+    const RegisterState modes; // the registers when the translation started
+    const MemoryInterfaceUnit miu;
+    const u8* const program;
+    Emitter e;
+    Translator t; // after the members it refers to
+    std::vector<Bail> bails;
+    Label guards_label, top, epilogue, guard_failed;
+    u32 address = 0;        // after the translated instructions
+    u32 count = 0;          // the instructions translated
+    bool loop_back = false; // the block ends where the innermost loop does
+    bool jumped = false;    // the last instruction set regs.pc itself
+};
+
+// Why the last Run stopped. The interpreter asks whether it was the budget (StoppedForBudget).
+// The statistics count the instructions that the interpreter runs next under the reason.
+enum class Stop { Limit, NoBlock, Budget, Guard, Refused, Bailed, Empty, Count };
+
+// The figures that TEAKRA_JIT_STATS prints when the JIT is destroyed.
+struct Statistics {
+    u64 runs = 0;        // calls of Run
+    u64 calls = 0;       // blocks that Run called, without those that RunAnother ran after them
+    u64 validations = 0; // checks of a block against program memory
+    // The instructions that the translator refused, by name.
+    std::unordered_map<std::string, u64> refused;
+    // By a block's start: its calls from Run and the instructions they ran.
+    std::unordered_map<u32, std::pair<u64, u64>> per_block;
+    // The bails, by the address that the block stopped at.
+    std::unordered_map<u32, u64> bails_at;
+    // The first guard that failed, by (start << 32) | the field's offset, with bit 31 set for a
+    // field of the memory interface.
+    std::unordered_map<u64, u64> guard_failures;
+    // The instructions that the interpreter ran between blocks (Jit::Interpreted): by the opcode
+    // where they started, by (that opcode << 8) | Stop, and by Stop.
+    std::unordered_map<u16, u64> interpreted_opcodes;
+    std::unordered_map<u32, u64> interpreted_by_stop;
+    u64 stops[static_cast<int>(Stop::Count)] = {};
+};
+
+// The entries of a table of counts, the largest `count` of a value first.
+template <typename Key, typename Value, typename Count>
+std::vector<std::pair<Key, Value>> ByCount(const std::unordered_map<Key, Value>& table,
+                                           Count count) {
+    std::vector<std::pair<Key, Value>> sorted(table.begin(), table.end());
+    std::sort(sorted.begin(), sorted.end(),
+              [&](const auto& a, const auto& b) { return count(a.second) > count(b.second); });
+    return sorted;
+}
+
+template <typename Key>
+std::vector<std::pair<Key, u64>> ByCount(const std::unordered_map<Key, u64>& table) {
+    return ByCount(table, [](u64 n) { return n; });
+}
+
 } // namespace
 
 struct Jit::Impl {
     Impl(RegisterState& regs, MemoryInterface& mem)
-        : regs(regs), mem(mem), code(CodeSize), table(ProgramWords) {
+        : regs(regs), mem(mem), code(CodeSize), table(SharedMemory::ProgramWords) {
         const char* setting = std::getenv("TEAKRA_JIT");
         enabled = code.Usable() && !(setting && std::string(setting) == "0");
-        stats = std::getenv("TEAKRA_JIT_STATS") != nullptr;
+        if (std::getenv("TEAKRA_JIT_STATS")) {
+            stats = std::make_unique<Statistics>();
+        }
         if (const char* dir = std::getenv("TEAKRA_JIT_DUMP")) {
             dump = dir;
         }
@@ -3417,93 +3733,81 @@ struct Jit::Impl {
 
     ~Impl() {
         if (stats) {
-            std::fprintf(
-                stderr,
-                "teakra jit: %llu instructions run, %llu blocks, %llu refused, %llu runs, "
-                "%llu calls, %llu validations\n",
-                static_cast<unsigned long long>(run), static_cast<unsigned long long>(blocks_made),
-                static_cast<unsigned long long>(refused.size()),
-                static_cast<unsigned long long>(runs), static_cast<unsigned long long>(calls),
-                static_cast<unsigned long long>(validations));
-            std::vector<std::pair<std::string, u64>> sorted(refused.begin(), refused.end());
-            std::sort(sorted.begin(), sorted.end(),
-                      [](const auto& a, const auto& b) { return a.second > b.second; });
-            for (std::size_t i = 0; i < sorted.size() && i < 40; ++i) {
-                std::fprintf(stderr, "  %8llu  %s\n",
-                             static_cast<unsigned long long>(sorted[i].second),
-                             sorted[i].first.c_str());
-            }
-            std::vector<std::pair<u32, std::pair<u64, u64>>> blocks(per_block.begin(),
-                                                                    per_block.end());
-            std::sort(blocks.begin(), blocks.end(),
-                      [](const auto& a, const auto& b) { return a.second.first > b.second.first; });
-            std::fprintf(stderr, "busiest blocks (calls, instructions per call, length):\n");
-            for (std::size_t i = 0; i < blocks.size() && i < 25; ++i) {
-                const Block* b = table[blocks[i].first].get();
-                std::fprintf(stderr, "  %05x %10llu %6.1f %3u\n", blocks[i].first,
-                             static_cast<unsigned long long>(blocks[i].second.first),
-                             double(blocks[i].second.second) / double(blocks[i].second.first),
-                             b ? b->length : 0);
-            }
-            std::vector<std::pair<u64, u64>> failures(guard_failures.begin(), guard_failures.end());
-            std::sort(failures.begin(), failures.end(),
-                      [](const auto& a, const auto& b) { return a.second > b.second; });
-            std::fprintf(stderr, "most guard failures (address, field offset, count):\n");
-            for (std::size_t i = 0; i < failures.size() && i < 10; ++i) {
-                std::fprintf(stderr, "  %05llx %8x %10llu\n",
-                             static_cast<unsigned long long>(failures[i].first >> 32),
-                             static_cast<unsigned>(failures[i].first & 0xFFFFFFFF),
-                             static_cast<unsigned long long>(failures[i].second));
-            }
-            {
-                std::vector<std::pair<u16, u64>> ops(interpreted_opcodes.begin(),
-                                                     interpreted_opcodes.end());
-                std::sort(ops.begin(), ops.end(),
-                          [](const auto& a, const auto& b) { return a.second > b.second; });
-                u64 total = 0;
-                for (const auto& o : ops) {
-                    total += o.second;
-                }
-                std::fprintf(stderr,
-                             "interpreted between blocks: %llu; after limit %llu, no block "
-                             "%llu, budget %llu, guard %llu, refused %llu, bailed %llu, empty "
-                             "%llu; by opcode:\n",
-                             static_cast<unsigned long long>(total),
-                             static_cast<unsigned long long>(stops[0]),
-                             static_cast<unsigned long long>(stops[1]),
-                             static_cast<unsigned long long>(stops[2]),
-                             static_cast<unsigned long long>(stops[3]),
-                             static_cast<unsigned long long>(stops[4]),
-                             static_cast<unsigned long long>(stops[5]),
-                             static_cast<unsigned long long>(stops[6]));
-                for (std::size_t i = 0; i < ops.size() && i < 40; ++i) {
-                    std::fprintf(stderr, "  %04x %10llu %s\n", ops[i].first,
-                                 static_cast<unsigned long long>(ops[i].second),
-                                 Decode(ops[i].first).GetName());
-                }
-            }
-            {
-                std::vector<std::pair<u32, u64>> ops(interpreted_by_stop.begin(),
-                                                     interpreted_by_stop.end());
-                std::sort(ops.begin(), ops.end(),
-                          [](const auto& a, const auto& b) { return a.second > b.second; });
-                static const char* const names[] = {"limit",   "no block", "budget", "guard",
-                                                    "refused", "bailed",   "empty"};
-                std::fprintf(stderr, "interpreted by opcode and stop:\n");
-                for (std::size_t i = 0; i < ops.size() && i < 60; ++i) {
-                    std::fprintf(stderr, "  %04x %10llu %-8s %s\n", ops[i].first >> 8,
-                                 static_cast<unsigned long long>(ops[i].second),
-                                 names[ops[i].first & 0xFF], Decode(ops[i].first >> 8).GetName());
-                }
-            }
-            std::vector<std::pair<u32, u64>> bails(bails_at.begin(), bails_at.end());
-            std::sort(bails.begin(), bails.end(),
-                      [](const auto& a, const auto& b) { return a.second > b.second; });
-            std::fprintf(stderr, "most bails (address, count):\n");
-            for (std::size_t i = 0; i < bails.size() && i < 10; ++i) {
-                std::fprintf(stderr, "  %05x %10llu\n", bails[i].first,
-                             static_cast<unsigned long long>(bails[i].second));
-            }
+            PrintStatistics();
+        }
+    }
+
+    // Prints the figures of TEAKRA_JIT_STATS on stderr.
+    void PrintStatistics() {
+        const Statistics& s = *stats;
+        std::fprintf(stderr,
+                     "teakra jit: %llu instructions run, %llu blocks, %llu refused, %llu runs, "
+                     "%llu calls, %llu validations\n",
+                     static_cast<unsigned long long>(instructions),
+                     static_cast<unsigned long long>(blocks_made),
+                     static_cast<unsigned long long>(s.refused.size()),
+                     static_cast<unsigned long long>(s.runs),
+                     static_cast<unsigned long long>(s.calls),
+                     static_cast<unsigned long long>(s.validations));
+        const auto refused = ByCount(s.refused);
+        for (std::size_t i = 0; i < refused.size() && i < 40; ++i) {
+            std::fprintf(stderr, "  %8llu  %s\n",
+                         static_cast<unsigned long long>(refused[i].second),
+                         refused[i].first.c_str());
+        }
+        const auto blocks =
+            ByCount(s.per_block, [](const std::pair<u64, u64>& calls) { return calls.first; });
+        std::fprintf(stderr, "busiest blocks (calls, instructions per call, length):\n");
+        for (std::size_t i = 0; i < blocks.size() && i < 25; ++i) {
+            const Block* b = table[blocks[i].first].get();
+            std::fprintf(stderr, "  %05x %10llu %6.1f %3u\n", blocks[i].first,
+                         static_cast<unsigned long long>(blocks[i].second.first),
+                         double(blocks[i].second.second) / double(blocks[i].second.first),
+                         b ? b->length : 0);
+        }
+        const auto failures = ByCount(s.guard_failures);
+        std::fprintf(stderr, "most guard failures (address, field offset, count):\n");
+        for (std::size_t i = 0; i < failures.size() && i < 10; ++i) {
+            std::fprintf(stderr, "  %05llx %8x %10llu\n",
+                         static_cast<unsigned long long>(failures[i].first >> 32),
+                         static_cast<unsigned>(failures[i].first & 0xFFFFFFFF),
+                         static_cast<unsigned long long>(failures[i].second));
+        }
+        const auto opcodes = ByCount(s.interpreted_opcodes);
+        u64 total = 0;
+        for (const auto& o : opcodes) {
+            total += o.second;
+        }
+        std::fprintf(stderr,
+                     "interpreted between blocks: %llu; after limit %llu, no block %llu, budget "
+                     "%llu, guard %llu, refused %llu, bailed %llu, empty %llu; by opcode:\n",
+                     static_cast<unsigned long long>(total),
+                     static_cast<unsigned long long>(s.stops[0]),
+                     static_cast<unsigned long long>(s.stops[1]),
+                     static_cast<unsigned long long>(s.stops[2]),
+                     static_cast<unsigned long long>(s.stops[3]),
+                     static_cast<unsigned long long>(s.stops[4]),
+                     static_cast<unsigned long long>(s.stops[5]),
+                     static_cast<unsigned long long>(s.stops[6]));
+        for (std::size_t i = 0; i < opcodes.size() && i < 40; ++i) {
+            std::fprintf(stderr, "  %04x %10llu %s\n", opcodes[i].first,
+                         static_cast<unsigned long long>(opcodes[i].second),
+                         Decode(opcodes[i].first).GetName());
+        }
+        const auto by_stop = ByCount(s.interpreted_by_stop);
+        static const char* const names[] = {"limit",   "no block", "budget", "guard",
+                                            "refused", "bailed",   "empty"};
+        std::fprintf(stderr, "interpreted by opcode and stop:\n");
+        for (std::size_t i = 0; i < by_stop.size() && i < 60; ++i) {
+            std::fprintf(stderr, "  %04x %10llu %-8s %s\n", by_stop[i].first >> 8,
+                         static_cast<unsigned long long>(by_stop[i].second),
+                         names[by_stop[i].first & 0xFF], Decode(by_stop[i].first >> 8).GetName());
+        }
+        const auto bails = ByCount(s.bails_at);
+        std::fprintf(stderr, "most bails (address, count):\n");
+        for (std::size_t i = 0; i < bails.size() && i < 10; ++i) {
+            std::fprintf(stderr, "  %05x %10llu\n", bails[i].first,
+                         static_cast<unsigned long long>(bails[i].second));
         }
     }
 
@@ -3511,7 +3815,7 @@ struct Jit::Impl {
         u64 done = 0;
         stop = Stop::Limit;
         if (stats) {
-            ++runs;
+            ++stats->runs;
         }
         if (regs.prpage != 0 || (regs.lp && static_cast<u32>(regs.bcn) - 1 >= 4)) {
             // Blocks come from program page 0, which is the one the firmware uses, and are for a
@@ -3521,7 +3825,7 @@ struct Jit::Impl {
         }
         while (done < limit) {
             const u32 pc = regs.pc;
-            if (pc >= ProgramWords) {
+            if (pc >= SharedMemory::ProgramWords) {
                 stop = Stop::NoBlock;
                 break;
             }
@@ -3542,7 +3846,6 @@ struct Jit::Impl {
             context.limit = limit - done;
             context.exit = Exit::Done;
             u64 ran = block->code(&context);
-            ++calls;
             if (trace) {
                 std::fprintf(stderr,
                              "block %05x (length %u, loop end %05x): ran %llu, exit %u, pc %05x\n",
@@ -3550,69 +3853,21 @@ struct Jit::Impl {
                              context.exit, regs.pc);
             }
             if (stats) {
-                auto& s = per_block[pc];
+                ++stats->calls;
+                auto& s = stats->per_block[pc];
                 ++s.first;
                 s.second += ran;
                 if (context.exit == Exit::Bailed) {
-                    ++bails_at[regs.pc];
+                    ++stats->bails_at[regs.pc];
                 }
             }
             if (context.exit == Exit::GuardFailed) {
                 if (stats) {
-                    for (const Guard& g : block->guards) {
-                        const u8* field = g.absolute
-                                              ? static_cast<const u8*>(g.absolute)
-                                              : reinterpret_cast<const u8*>(&regs) + g.offset;
-                        u32 value = 0;
-                        std::memcpy(&value, field, g.size);
-                        if (value != g.value) {
-                            ++guard_failures[(u64{pc} << 32) | static_cast<u32>(g.offset) |
-                                             (g.absolute ? 0x80000000u : 0)];
-                            break;
-                        }
-                    }
+                    CountGuardFailure(*block, pc);
                 }
-                // Another block from here that suits the modes as they are now, or a new one. Find
-                // stopped checking blocks against program memory at this one, so the rest are
-                // checked here, and stale ones dropped as there.
-                Block* other = nullptr;
-                const u64 current = Generation();
-                std::unique_ptr<Block>* slot = &block->next;
-                while (*slot) {
-                    Block* b = slot->get();
-                    if (b->checked != current) {
-                        ++validations;
-                        if (!SourceMatches(*b)) {
-                            *slot = std::move(b->next);
-                            continue;
-                        }
-                        b->checked = current;
-                    }
-                    slot = &b->next;
-                    if (b->loop_end != loop_end || !b->code || b->length > limit - done) {
-                        continue;
-                    }
-                    context.exit = Exit::Done;
-                    ran = b->code(&context);
-                    if (context.exit != Exit::GuardFailed) {
-                        other = b;
-                        break;
-                    }
-                }
-                if (!other) {
-                    other = Compile(pc, loop_end);
-                    if (!other || !other->code || other->length > limit - done) {
-                        stop = Stop::Guard;
-                        break;
-                    }
-                    context.exit = Exit::Done;
-                    ran = other->code(&context);
-                    if (context.exit == Exit::GuardFailed) {
-                        stop = Stop::Guard;
-                        break;
-                    }
-                } else {
-                    MoveToFront(other);
+                if (!RunAnother(*block, pc, loop_end, limit - done, ran)) {
+                    stop = Stop::Guard;
+                    break;
                 }
             }
             if (context.exit == Exit::Refused) {
@@ -3625,14 +3880,62 @@ struct Jit::Impl {
                 break;
             }
         }
-        run += done;
+        instructions += done;
         return done;
     }
 
-    // Why the last Run stopped, for the statistics.
-    enum class Stop { Limit, NoBlock, Budget, Guard, Refused, Bailed, Empty, Count };
-    Stop stop = Stop::Limit;
-    u64 stops[static_cast<int>(Stop::Count)] = {};
+    // For TEAKRA_JIT_STATS: counts the first guard of `block` that fails with the registers as they
+    // are now.
+    void CountGuardFailure(const Block& block, u32 pc) {
+        for (const Guard& g : block.guards) {
+            const u8* field = g.absolute ? static_cast<const u8*>(g.absolute)
+                                         : reinterpret_cast<const u8*>(&regs) + g.offset;
+            u32 value = 0;
+            std::memcpy(&value, field, g.size);
+            if (value != g.value) {
+                ++stats->guard_failures[(u64{pc} << 32) | static_cast<u32>(g.offset) |
+                                        (g.absolute ? 0x80000000u : 0)];
+                break;
+            }
+        }
+    }
+
+    // Runs another block from pc that suits the modes as they are now, or a new one, after the
+    // guards of `block` failed. Sets `ran` to the instructions it ran. Returns false if no block
+    // suits the modes and fits in `room` instructions.
+    bool RunAnother(Block& block, u32 pc, u32 loop_end, u64 room, u64& ran) {
+        // Find stopped checking blocks against program memory at this one. The rest are checked
+        // here.
+        Block* other = nullptr;
+        const u64 current = Generation();
+        std::unique_ptr<Block>* slot = &block.next;
+        while (Block* b = DropStale(*slot, current)) {
+            slot = &b->next;
+            if (b->loop_end != loop_end || !b->code || b->length > room) {
+                continue;
+            }
+            context.exit = Exit::Done;
+            ran = b->code(&context);
+            if (context.exit != Exit::GuardFailed) {
+                other = b;
+                break;
+            }
+        }
+        if (!other) {
+            other = Compile(pc, loop_end);
+            if (!other || !other->code || other->length > room) {
+                return false;
+            }
+            context.exit = Exit::Done;
+            ran = other->code(&context);
+            if (context.exit == Exit::GuardFailed) {
+                return false;
+            }
+        } else {
+            MoveToFront(other);
+        }
+        return true;
+    }
 
     // The generation: it changes whenever program memory has changed, other than by a reset.
     u64 Generation() const {
@@ -3643,23 +3946,31 @@ struct Jit::Impl {
     Block* Find(u32 pc, u32 loop_end) {
         const u64 current = Generation();
         std::unique_ptr<Block>* slot = &table[pc];
-        while (*slot) {
-            Block* block = slot->get();
-            if (block->checked != current) {
-                ++validations;
-                if (!SourceMatches(*block)) {
-                    // Stale: drop it and look further.
-                    *slot = std::move(block->next);
-                    continue;
-                }
-                block->checked = current;
-            }
+        while (Block* block = DropStale(*slot, current)) {
             if (block->loop_end == loop_end) {
                 return block;
             }
             slot = &block->next;
         }
         return Compile(pc, loop_end);
+    }
+
+    // Drops stale blocks from the front of `slot`'s list. Returns the first block that matches
+    // program memory, or nullptr at the end of the list. A block is checked at most once a
+    // generation (`current` is this one).
+    Block* DropStale(std::unique_ptr<Block>& slot, u64 current) {
+        while (slot && slot->checked != current) {
+            if (stats) {
+                ++stats->validations;
+            }
+            if (SourceMatches(*slot)) {
+                slot->checked = current;
+                break;
+            }
+            std::unique_ptr<Block> stale = std::move(slot);
+            slot = std::move(stale->next);
+        }
+        return slot.get();
     }
 
     // Puts a block first among the blocks from its address, where Find looks first.
@@ -3709,57 +4020,36 @@ struct Jit::Impl {
         block->loop_end = loop_end;
         block->checked = Generation();
 
-        const RegisterState modes = regs;
-        const MemoryInterfaceUnit miu = mem.Unit();
-        const u8* program = mem.ProgramMemory();
-
-        Emitter e;
-        Translator t(e, modes, miu, &mem.Unit(), loop_end, handler);
-        Label guards_label, top, epilogue;
-        t.SetEpilogue(&epilogue);
-
-        // Prologue: save the registers the block uses that callers expect kept, and load the
-        // fixed ones.
-        const Reg saved[] = {Reg::rbx, Reg::rbp, Reg::r12, Reg::r13,
-                             Reg::r14, Reg::r15, Reg::rsi, Reg::rdi};
-        for (Reg r : saved) {
-            e.Push(r);
+        Compilation c(pc, loop_end, regs, mem, handler);
+        c.EmitPrologue();
+        Translate(c, *block);
+        if (c.count == 0 && c.bails.empty()) {
+            // The first instruction can't be translated whatever the modes.
+            block->source.push_back(SharedMemory::ReadWord(c.program, pc));
+            block->length = 0;
+            return Insert(std::move(block));
         }
-        // Calls to handlers need the stack 16-byte aligned, and Win64 32 bytes above the return
-        // address: eight pushes after the return address leave it 8 off.
-        e.OpImm(Arith::sub, Reg::rsp, 40, 64);
-#ifdef _WIN32
-        e.Mov(ContextReg, Reg::rcx, 64);
-#else
-        e.Mov(ContextReg, Reg::rdi, 64);
-#endif
-        e.Mov(RegsBase, Ptr(ContextReg, offsetof(Context, regs)), 64);
-        e.Mov(MemoryBase, Ptr(ContextReg, offsetof(Context, memory)), 64);
-        e.Op(Arith::xor_, Executed, Executed, 32);
-        // In a loop, the code may jump back to the top with flags pending (Translator::Flags).
+        block->length = c.count;
+        if (c.count > 0) {
+            c.EmitPassEnd();
+        }
+        c.EmitBails();
+        c.EmitGuards();
+        c.EmitDataPages();
+        c.EmitEpilogue();
+        return Place(std::move(block), c);
+    }
+
+    // Translates instructions from c.pc and adds them to the block's source. Stops at an
+    // instruction that the translator refuses, after one that ends the block, or at the limit.
+    void Translate(Compilation& c, Block& block) {
         using Flags = Translator::Flags;
-        const Flags top_flags = loop_end != NoLoopEnd ? Flags::Either : Flags::Computed;
-        t.SetFlagState(top_flags);
-        if (top_flags == Flags::Either) {
-            e.MovImm(Ptr(ContextReg, offsetof(Context, flags_pending)), 0, 32);
-        }
-        e.Jmp(guards_label);
-        e.Bind(top);
-
-        struct Bail {
-            std::unique_ptr<Label> label;
-            u32 index;
-            u32 address;
-            Flags flags; // before the instruction
-        };
-        std::vector<Bail> bails;
-
-        u32 address = pc;
+        Emitter& e = c.e;
+        Translator& t = c.t;
+        u32 address = c.pc;
         u32 count = 0;
-        bool loop_back = false;
-        bool jumped = false; // the last instruction set regs.pc itself
-        while (count < MaxBlockInstructions && address < ProgramWords) {
-            const u16 opcode = SharedMemory::ReadWord(program, address);
+        while (count < MaxBlockInstructions && address < SharedMemory::ProgramWords) {
+            const u16 opcode = SharedMemory::ReadWord(c.program, address);
             const Matcher<Translator>& matcher = Decode(opcode);
             // Instructions that change the flow through a register operand stay with the
             // interpreter; jumps (the translator knows which) end the block.
@@ -3768,282 +4058,73 @@ struct Jit::Impl {
             }
             const bool flow = ChangesFlow(matcher.GetName());
             const bool expanded = matcher.NeedExpansion();
-            const u16 expansion = expanded ? SharedMemory::ReadWord(program, address + 1) : 0;
+            const u16 expansion = expanded ? SharedMemory::ReadWord(c.program, address + 1) : 0;
             const u32 next = address + (expanded ? 2 : 1);
 
             auto bail = std::make_unique<Label>();
             const std::size_t code_size = e.Size();
             const std::size_t guard_count = t.Guards().size();
             const Flags flags_before = t.FlagState();
+            // Adds the instruction to the block: its way out, and its words to the source.
+            const auto add = [&] {
+                c.bails.push_back({std::move(bail), count, address, flags_before});
+                block.source.push_back(opcode);
+                if (expanded) {
+                    block.source.push_back(expansion);
+                }
+            };
             t.Begin(bail.get(), address, next, opcode, expansion, count);
             if (!matcher.call(t, opcode, expansion)) {
                 if (stats) {
-                    ++refused[matcher.GetName()];
+                    ++stats->refused[matcher.GetName()];
                 }
                 t.SetFlagState(flags_before);
                 if (count == 0 && t.GetRefusal() == Refusal::Mode) {
                     // Keep the guards and stop at once: under other modes it may translate.
                     e.code.resize(code_size);
                     e.Jmp(*bail);
-                    bails.push_back({std::move(bail), count, address, flags_before});
-                    block->source.push_back(opcode);
-                    if (expanded) {
-                        block->source.push_back(expansion);
-                    }
-                    count = 0;
+                    add();
                     break;
                 }
                 e.code.resize(code_size);
                 t.TruncateGuards(guard_count);
                 break;
             }
-            bails.push_back({std::move(bail), count, address, flags_before});
-            block->source.push_back(opcode);
-            if (expanded) {
-                block->source.push_back(expansion);
-            }
+            add();
             ++count;
             address = next;
             if (flow || t.SetsPc()) {
                 ASSERT(t.SetsPc());
-                jumped = true;
+                c.jumped = true;
                 break;
             }
-            if (next == loop_end) {
-                loop_back = true;
-                break;
-            }
-        }
-
-        if (count == 0 && bails.empty()) {
-            // The first instruction can't be translated whatever the modes.
-            block->source.clear();
-            block->source.push_back(SharedMemory::ReadWord(program, pc));
-            block->length = 0;
-            return Insert(std::move(block));
-        }
-        block->length = count;
-
-        // The end of a pass.
-        const auto exit_with = [&](u32 exit) {
-            if (exit != Exit::Done) {
-                e.MovImm(Ptr(ContextReg, offsetof(Context, exit)), static_cast<s32>(exit), 32);
-            }
-            e.Jmp(epilogue);
-        };
-        if (count > 0) {
-            e.OpImm(Arith::add, Executed, static_cast<s32>(count), 64);
-            const Flags end_flags = t.FlagState();
-            if (loop_back) {
-                // Into the next pass with the flags as they are, which the top reads from
-                // flags_pending; out of the block with them computed.
-                if (end_flags == Flags::Pending || end_flags == Flags::Computed) {
-                    e.MovImm(Ptr(ContextReg, offsetof(Context, flags_pending)),
-                             end_flags == Flags::Pending ? 1 : 0, 32);
-                }
-                // The block ends where the innermost loop does: its last instruction was run, so
-                // do what the interpreter does after it (RunOrdinary).
-                // rcx = &regs.bkrep_stack[bcn - 1]
-                const RegisterState& m = modes;
-                const s32 stack = static_cast<s32>(reinterpret_cast<const u8*>(&m.bkrep_stack[0]) -
-                                                   reinterpret_cast<const u8*>(&m));
-                const s32 frame_size = static_cast<s32>(sizeof(RegisterState::BlockRepeatFrame));
-                const s32 start_off =
-                    static_cast<s32>(offsetof(RegisterState::BlockRepeatFrame, start));
-                const s32 lc_off = static_cast<s32>(offsetof(RegisterState::BlockRepeatFrame, lc));
-                const s32 bcn = static_cast<s32>(reinterpret_cast<const u8*>(&m.bcn) -
-                                                 reinterpret_cast<const u8*>(&m));
-                const s32 lp = static_cast<s32>(reinterpret_cast<const u8*>(&m.lp) -
-                                                reinterpret_cast<const u8*>(&m));
-                const s32 pc_off = static_cast<s32>(reinterpret_cast<const u8*>(&m.pc) -
-                                                    reinterpret_cast<const u8*>(&m));
-                Label finished, to_start;
-                e.Movzx(Reg::rax, Ptr(RegsBase, bcn), 16);
-                e.OpImm(Arith::sub, Reg::rax, 1, 32);
-                e.MovImm(Reg::rcx, static_cast<u64>(frame_size));
-                e.Imul(Reg::rax, Reg::rcx, 64);
-                e.Lea(Reg::rcx, Ptr(RegsBase, Reg::rax, 1, stack), 64);
-                e.OpImm(Arith::cmp, Ptr(Reg::rcx, lc_off), 0, 16);
-                e.J(CC::e, finished);
-                e.OpImm(Arith::sub, Ptr(Reg::rcx, lc_off), 1, 16);
-                e.Mov(Reg::rax, Ptr(Reg::rcx, start_off), 32);
-                e.Mov(Ptr(RegsBase, pc_off), Reg::rax, 32);
-                e.OpImm(Arith::cmp, Reg::rax, static_cast<s32>(pc), 32);
-                e.J(CC::ne, to_start);
-                // Another pass, if it fits in the limit.
-                e.Lea(Reg::rax, Ptr(Executed, static_cast<s32>(count)), 64);
-                e.Op(Arith::cmp, Reg::rax, Ptr(ContextReg, offsetof(Context, limit)), 64);
-                e.J(CC::be, top);
-                e.Bind(to_start);
-                t.EmitComputeFlags(end_flags == Flags::Computed ? Flags::Computed : Flags::Either);
-                exit_with(Exit::Done);
-                e.Bind(finished);
-                t.EmitComputeFlags(end_flags == Flags::Computed ? Flags::Computed : Flags::Either);
-                // --bcn; lp = bcn != 0
-                e.OpImm(Arith::sub, Ptr(RegsBase, bcn), 1, 16);
-                e.Op(Arith::xor_, Reg::rax, Reg::rax, 32);
-                e.OpImm(Arith::cmp, Ptr(RegsBase, bcn), 0, 16);
-                e.Set(CC::ne, Reg::rax);
-                e.Mov(Ptr(RegsBase, lp), Reg::rax, 16);
-                e.MovImm(Ptr(RegsBase, pc_off), static_cast<s32>(address), 32);
-                exit_with(Exit::Done);
-            } else if (jumped) {
-                t.EmitComputeFlags(end_flags);
-                exit_with(Exit::Done);
-            } else {
-                const s32 pc_off = static_cast<s32>(reinterpret_cast<const u8*>(&modes.pc) -
-                                                    reinterpret_cast<const u8*>(&modes));
-                t.EmitComputeFlags(end_flags);
-                e.MovImm(Ptr(RegsBase, pc_off), static_cast<s32>(address), 32);
-                exit_with(Exit::Done);
-            }
-        }
-
-        // Stops before instruction `index`: the ones before it have run.
-        const s32 pc_off = static_cast<s32>(reinterpret_cast<const u8*>(&modes.pc) -
-                                            reinterpret_cast<const u8*>(&modes));
-        // Exits with pending or possibly pending flags share the code that computes them.
-        Label bail_pending, bail_either;
-        for (Bail& b : bails) {
-            if (!b.label->Used()) {
-                continue;
-            }
-            e.Bind(*b.label);
-            e.OpImm(Arith::add, Executed, static_cast<s32>(b.index), 64);
-            e.MovImm(Ptr(RegsBase, pc_off), static_cast<s32>(b.address), 32);
-            switch (b.flags) {
-            case Flags::Computed:
-                exit_with(Exit::Bailed);
-                break;
-            case Flags::Pending:
-                e.Jmp(bail_pending);
-                break;
-            case Flags::Either:
-                e.Jmp(bail_either);
+            if (next == c.loop_end) {
+                c.loop_back = true;
                 break;
             }
         }
-        if (bail_pending.Used()) {
-            e.Bind(bail_pending);
-            t.EmitComputeFlags(Flags::Pending);
-            exit_with(Exit::Bailed);
-        }
-        if (bail_either.Used()) {
-            e.Bind(bail_either);
-            t.EmitComputeFlags(Flags::Either);
-            exit_with(Exit::Bailed);
-        }
+        c.address = address;
+        c.count = count;
+    }
 
-        // The mode checks, run once when the block is entered: register fields next to each other
-        // are compared together, and the memory interface's fields through Context::miu.
-        e.Bind(guards_label);
-        Label guard_failed;
-        {
-            std::vector<Guard> fields, miu_fields;
-            for (const Guard& g : t.Guards()) {
-                (g.absolute ? miu_fields : fields).push_back(g);
-            }
-            std::sort(fields.begin(), fields.end(),
-                      [](const Guard& a, const Guard& b) { return a.offset < b.offset; });
-            const auto compare = [&](Reg base, s32 offset, u64 value, u32 bytes) {
-                switch (bytes) {
-                case 2:
-                    e.OpImm(Arith::cmp, Ptr(base, offset), static_cast<s16>(value), 16);
-                    break;
-                case 4:
-                    e.OpImm(Arith::cmp, Ptr(base, offset), static_cast<s32>(value), 32);
-                    break;
-                default:
-                    ASSERT(bytes == 8);
-                    e.MovImm(Reg::rcx, value);
-                    e.Op(Arith::cmp, Ptr(base, offset), Reg::rcx, 64);
-                    break;
-                }
-                e.J(CC::ne, guard_failed);
-            };
-            for (std::size_t i = 0; i < fields.size();) {
-                // A run of fields that follow each other, of up to 8 bytes.
-                const s32 start = fields[i].offset;
-                u64 value = 0;
-                u32 bytes = 0;
-                while (i < fields.size() && fields[i].offset == start + static_cast<s32>(bytes) &&
-                       bytes + fields[i].size <= 8) {
-                    value |= u64{fields[i].value} << (8 * bytes);
-                    bytes += fields[i].size;
-                    ++i;
-                }
-                if (bytes == 6) {
-                    compare(RegsBase, start, value & 0xFFFF'FFFF, 4);
-                    compare(RegsBase, start + 4, value >> 32, 2);
-                } else {
-                    compare(RegsBase, start, value, bytes);
-                }
-            }
-            if (!miu_fields.empty()) {
-                e.Mov(Reg::rax, Ptr(ContextReg, offsetof(Context, miu)), 64);
-                for (const Guard& g : miu_fields) {
-                    compare(Reg::rax, g.offset, g.value, g.size);
-                }
-            }
-        }
-        // The data pages (ConvertDataAddress), which the firmware switches: the bases of the X and
-        // Y pages, or of the Z page twice. A page of 2 or more, which the interpreter asserts for,
-        // leaves the block to the interpreter.
-        Label refused;
-        const s32 x_page = static_cast<s32>(offsetof(MemoryInterfaceUnit, x_page));
-        const s32 y_page = static_cast<s32>(offsetof(MemoryInterfaceUnit, y_page));
-        const s32 z_page = static_cast<s32>(offsetof(MemoryInterfaceUnit, z_page));
-        const s32 data = static_cast<s32>(MemoryInterfaceUnit::DataMemoryOffset * 2);
-        e.Mov(Reg::rax, Ptr(ContextReg, offsetof(Context, miu)), 64);
-        if (miu.page_mode == 0) {
-            e.Movzx(Reg::rcx, Ptr(Reg::rax, z_page), 16);
-            e.OpImm(Arith::cmp, Reg::rcx, 2, 32);
-            e.J(CC::ae, refused);
-            e.ShiftImm(Shift::shl, Reg::rcx, 17, 32); // a page is 0x10000 words, 0x20000 bytes
-            e.Lea(XPage, Ptr(MemoryBase, Reg::rcx, 1, data), 64);
-            e.Mov(YPage, XPage, 64);
-        } else {
-            e.Movzx(Reg::rcx, Ptr(Reg::rax, x_page), 16);
-            e.Movzx(Reg::rdx, Ptr(Reg::rax, y_page), 16);
-            e.OpImm(Arith::cmp, Reg::rcx, 2, 32);
-            e.J(CC::ae, refused);
-            e.OpImm(Arith::cmp, Reg::rdx, 2, 32);
-            e.J(CC::ae, refused);
-            e.ShiftImm(Shift::shl, Reg::rcx, 17, 32);
-            e.ShiftImm(Shift::shl, Reg::rdx, 17, 32);
-            e.Lea(XPage, Ptr(MemoryBase, Reg::rcx, 1, data), 64);
-            e.Lea(YPage, Ptr(MemoryBase, Reg::rdx, 1, data), 64);
-        }
-        e.Jmp(top);
-        e.Bind(refused);
-        e.MovImm(Ptr(ContextReg, offsetof(Context, exit)), static_cast<s32>(Exit::Refused), 32);
-        e.Jmp(epilogue);
-        e.Bind(guard_failed);
-        e.MovImm(Ptr(ContextReg, offsetof(Context, exit)), static_cast<s32>(Exit::GuardFailed), 32);
-
-        e.Bind(epilogue);
-        e.Mov(Reg::rax, Executed, 64);
-        e.OpImm(Arith::add, Reg::rsp, 40, 64);
-        for (auto it = std::rbegin(saved); it != std::rend(saved); ++it) {
-            e.Pop(*it);
-        }
-        e.Ret();
-
-        const u8* placed = code.Add(e.code);
+    // Copies a block's code into executable memory and puts the block first among the blocks
+    // from its address. Returns it, or nullptr if the code doesn't fit even in empty memory.
+    Block* Place(std::unique_ptr<Block> block, const Compilation& c) {
+        const u8* placed = code.Add(c.e.code);
         if (!placed) {
             // Full: start again with no blocks.
             Reset();
-            placed = code.Add(e.code);
+            placed = code.Add(c.e.code);
             if (!placed) {
                 return nullptr;
             }
         }
         block->code = reinterpret_cast<BlockCode>(const_cast<u8*>(placed));
         if (stats) {
-            block->guards = t.Guards();
+            block->guards = c.t.Guards();
         }
         if (!dump.empty()) {
-            Dump(*block, e.code, t.Guards());
+            Dump(*block, c.e.code, c.t.Guards());
         }
         ++blocks_made;
         return Insert(std::move(block));
@@ -4106,20 +4187,12 @@ struct Jit::Impl {
     void* interpreter = nullptr;
     Jit::Handler handler = nullptr;
     bool enabled = false;
-    bool stats = false;
     bool trace = false;
     std::string dump;
-    u64 run = 0;
+    Stop stop = Stop::Limit;
+    u64 instructions = 0; // run by translated code
     u64 blocks_made = 0;
-    u64 runs = 0;
-    u64 calls = 0;
-    u64 validations = 0;
-    std::unordered_map<u32, std::pair<u64, u64>> per_block;
-    std::unordered_map<u32, u64> bails_at;
-    std::unordered_map<u64, u64> guard_failures;
-    std::unordered_map<u16, u64> interpreted_opcodes;
-    std::unordered_map<u32, u64> interpreted_by_stop;
-    std::unordered_map<std::string, u64> refused;
+    std::unique_ptr<Statistics> stats; // with TEAKRA_JIT_STATS
 };
 
 Jit::Jit(RegisterState& regs, MemoryInterface& mem) : impl(new Impl(regs, mem)) {}
@@ -4137,22 +4210,25 @@ void Jit::Reset() {
     impl->Reset();
 }
 
-bool Jit::Stats() const {
-    return impl->stats;
+bool Jit::StatsEnabled() const {
+    return impl->stats != nullptr;
 }
 
 bool Jit::StoppedForBudget() const {
-    return impl->stop == Impl::Stop::Budget;
+    return impl->stop == Stop::Budget;
 }
 
 void Jit::Interpreted(u32 pc, u64 count, bool no_budget) {
-    if (no_budget) {
-        impl->stop = Impl::Stop::Budget;
+    if (!impl->stats) {
+        return;
     }
+    // Run isn't called when there's no budget for a block. The budget is then the reason.
+    const Stop stop = no_budget ? Stop::Budget : impl->stop;
+    Statistics& s = *impl->stats;
     const u16 opcode = SharedMemory::ReadWord(impl->mem.ProgramMemory(), pc);
-    impl->interpreted_opcodes[opcode] += count;
-    impl->interpreted_by_stop[(u32{opcode} << 8) | static_cast<u32>(impl->stop)] += count;
-    impl->stops[static_cast<int>(impl->stop)] += count;
+    s.interpreted_opcodes[opcode] += count;
+    s.interpreted_by_stop[(u32{opcode} << 8) | static_cast<u32>(stop)] += count;
+    s.stops[static_cast<int>(stop)] += count;
 }
 
 void Jit::SetInterpreter(void* interpreter, Handler handler) {
@@ -4161,7 +4237,7 @@ void Jit::SetInterpreter(void* interpreter, Handler handler) {
 }
 
 u64 Jit::Instructions() const {
-    return impl->run;
+    return impl->instructions;
 }
 
 #else // !TEAKRA_JIT_X64
@@ -4180,7 +4256,7 @@ u64 Jit::Run(u64) {
 }
 
 void Jit::Reset() {}
-bool Jit::Stats() const {
+bool Jit::StatsEnabled() const {
     return false;
 }
 bool Jit::StoppedForBudget() const {

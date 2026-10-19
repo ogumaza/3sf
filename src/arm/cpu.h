@@ -52,7 +52,14 @@ public:
 
     Memory();
 
-    // Maps [vaddr, vaddr + size) to host memory. vaddr and size must be page aligned.
+    // A size rounded up to a whole number of pages, in u32 arithmetic. A size above 0xFFFFF000 rounds to 0.
+    static constexpr uint32_t RoundUpToPage(uint32_t size)
+    {
+        return (size + kPageMask) & ~kPageMask;
+    }
+
+    // Map maps [vaddr, vaddr + size) to the host memory at `host`. Unmap removes the mapping of that range. size must
+    // be page aligned. An address inside a page stands for the start of that page.
     void Map(uint32_t vaddr, uint8_t* host, uint32_t size);
     void Unmap(uint32_t vaddr, uint32_t size);
 
@@ -150,6 +157,9 @@ public:
     void WriteBlock(uint32_t vaddr, const void* src, std::size_t size);
     void ZeroBlock(uint32_t vaddr, std::size_t size);
     std::string ReadCString(uint32_t vaddr, std::size_t max) const;
+
+    // The bytes of [vaddr, vaddr + size) that a block copy reaches: those before the first unmapped page.
+    std::size_t MappedLength(uint32_t vaddr, std::size_t size) const;
 
     // Takes a snapshot, reusing `previous`'s runs if nothing has been mapped or unmapped since.
     Snapshot Save(const Snapshot* previous) const;
@@ -294,6 +304,24 @@ private:
     bool ArmMsrImmediate(uint32_t op);
     bool Media(uint32_t op);
     bool Vfp(uint32_t op);
+
+    // The groups of the media instructions. `r` holds the registers, with PC as the instruction's address + 8.
+    bool MediaParallelAddSubtract(uint32_t op, const std::array<uint32_t, 16>& r);
+    bool MediaPackSaturateReverse(uint32_t op, const std::array<uint32_t, 16>& r); // also extend and select
+    bool MediaSignedMultiply(uint32_t op, const std::array<uint32_t, 16>& r);      // dual 16-bit and high-word ones
+    bool MediaSumOfAbsoluteDifferences(uint32_t op, const std::array<uint32_t, 16>& r);
+
+    // Instructions that MediaPackSaturateReverse decodes and runs: PKHBT and PKHTB, SSAT and USAT, SSAT16 and USAT16,
+    // and the extends.
+    void MediaPack(uint32_t op, const std::array<uint32_t, 16>& r);
+    void MediaSaturate(uint32_t op, const std::array<uint32_t, 16>& r);
+    void MediaSaturate16(uint32_t op, const std::array<uint32_t, 16>& r);
+    void MediaExtend(uint32_t op, const std::array<uint32_t, 16>& r);
+
+    // The VFP's arithmetic instructions with three operands. T is float for S registers and double for D registers.
+    template <typename T>
+    bool VfpArithmetic(uint32_t op, uint32_t opc, uint32_t d, uint32_t n, uint32_t m);
+
     bool VfpLoadStore(uint32_t op);
     bool VfpTransfer(uint32_t op);
     bool VfpTransfer64(uint32_t op);
@@ -341,6 +369,56 @@ private:
     static uint32_t ShiftImm(uint32_t value, uint32_t type, uint32_t amount, bool& carry);
     static uint32_t ShiftReg(uint32_t value, uint32_t type, uint32_t amount, bool& carry);
 
+    // SatSigned and SatUnsigned: `value` clamped to a signed or an unsigned integer of `bits` bits. Each sets
+    // `saturated` when it clamps.
+    static int32_t SatSigned(int64_t value, uint32_t bits, bool& saturated)
+    {
+        const int64_t max = (int64_t{1} << (bits - 1)) - 1;
+        const int64_t min = -(int64_t{1} << (bits - 1));
+        if (value > max)
+        {
+            saturated = true;
+            return static_cast<int32_t>(max);
+        }
+
+        if (value < min)
+        {
+            saturated = true;
+            return static_cast<int32_t>(min);
+        }
+
+        return static_cast<int32_t>(value);
+    }
+
+    static uint32_t SatUnsigned(int64_t value, uint32_t bits, bool& saturated)
+    {
+        const int64_t max = (int64_t{1} << bits) - 1;
+        if (value > max)
+        {
+            saturated = true;
+            return static_cast<uint32_t>(max);
+        }
+
+        if (value < 0)
+        {
+            saturated = true;
+            return 0;
+        }
+
+        return static_cast<uint32_t>(value);
+    }
+
+    // REV16 reverses the bytes of each halfword. REVSH reverses the bytes of the low halfword and sign-extends it.
+    static uint32_t Rev16(uint32_t value)
+    {
+        return ((value >> 8) & 0x00ff00ff) | ((value << 8) & 0xff00ff00);
+    }
+
+    static uint32_t Revsh(uint32_t value)
+    {
+        return static_cast<uint32_t>(static_cast<int16_t>(((value >> 8) & 0xff) | ((value & 0xff) << 8)));
+    }
+
     // Writes PC with interworking: bit 0 selects Thumb (BX, BLX, LDR/LDM/POP to PC).
     void BxWritePc(uint32_t value)
     {
@@ -364,6 +442,25 @@ private:
     {
         state_.n = (v >> 31) != 0;
         state_.z = v == 0;
+    }
+
+    // MSR's write to the CPSR in user mode. Mask bit 3 writes N, Z, C, V and Q from bits 31 to 27. Mask bit 2 writes
+    // GE[3:0] from bits 19 to 16.
+    void WriteCpsrFlags(uint32_t value, uint32_t mask)
+    {
+        if (mask & 8)
+        {
+            state_.n = (value >> 31) & 1;
+            state_.z = (value >> 30) & 1;
+            state_.c = (value >> 29) & 1;
+            state_.v = (value >> 28) & 1;
+            state_.q = (value >> 27) & 1;
+        }
+
+        if (mask & 4)
+        {
+            state_.ge = static_cast<uint8_t>((value >> 16) & 0xf);
+        }
     }
 
     uint32_t AddWithCarry(uint32_t a, uint32_t b, bool carry_in, bool set_flags)
@@ -391,8 +488,7 @@ private:
 
     double D(uint32_t i) const
     {
-        const uint64_t bits = state_.vfp[2 * i] | (static_cast<uint64_t>(state_.vfp[2 * i + 1]) << 32);
-        return std::bit_cast<double>(bits);
+        return std::bit_cast<double>(DBits(i));
     }
 
     void SetD(uint32_t i, double d);
@@ -409,6 +505,13 @@ private:
     {
         return state_.vfp[2 * i] | (static_cast<uint64_t>(state_.vfp[2 * i + 1]) << 32);
     }
+
+    // For a float, Fp and SetFp are S and SetS. For a double, they're D and SetD.
+    template <typename T>
+    T Fp(uint32_t i) const;
+
+    template <typename T>
+    void SetFp(uint32_t i, T value);
 
     void FpCompare(double a, double b);
     void UpdateHostFpu();

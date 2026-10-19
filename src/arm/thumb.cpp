@@ -17,18 +17,10 @@ bool Cpu::StepThumb(uint32_t op)
     switch (op >> 11)
     {
     case 0x00: // LSL Rd, Rm, #imm
-        {
-            const uint32_t rd = op & 7, rm = (op >> 3) & 7, imm = (op >> 6) & 0x1f;
-            bool carry = state_.c;
-            r[rd] = ShiftImm(r[rm], 0, imm, carry);
-            SetNZ(r[rd]);
-            state_.c = carry;
-            return true;
-        }
-
     case 0x01: // LSR Rd, Rm, #imm
     case 0x02: // ASR Rd, Rm, #imm
         {
+            // Bits 11 to 15 hold 0, 1 or 2 here: ShiftImm's types for LSL, LSR and ASR.
             const uint32_t rd = op & 7, rm = (op >> 3) & 7, imm = (op >> 6) & 0x1f;
             bool carry = state_.c;
             r[rd] = ShiftImm(r[rm], op >> 11, imm, carry);
@@ -372,11 +364,11 @@ bool Cpu::StepThumb(uint32_t op)
                     return true;
 
                 case 1:
-                    r[rd] = ((value >> 8) & 0x00ff00ff) | ((value << 8) & 0xff00ff00);
+                    r[rd] = Rev16(value);
                     return true;
 
                 case 3:
-                    r[rd] = static_cast<uint32_t>(static_cast<int16_t>(((value >> 8) & 0xff) | ((value & 0xff) << 8)));
+                    r[rd] = Revsh(value);
                     return true;
 
                 default:

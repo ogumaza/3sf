@@ -52,26 +52,11 @@ struct Outcome
     std::vector<Sample> samples;
 };
 
-// Runs `dsp` for `cycles` cycles.
-std::string Run(Teakra::Teakra& dsp, uint32_t cycles)
-{
-    try
-    {
-        dsp.Run(cycles);
-    }
-    catch (const std::exception& e)
-    {
-        return std::string("threw: ") + e.what();
-    }
-
-    return {};
-}
-
 Outcome Finish(Teakra::Teakra& dsp, uint32_t cycles, std::vector<Sample>& samples)
 {
     samples.clear();
     Outcome o;
-    o.threw = Run(dsp, cycles);
+    o.threw = RunCatching(dsp, cycles);
     const auto* regs = reinterpret_cast<const uint8_t*>(&dsp.GetRegisterState());
     o.registers.assign(regs, regs + sizeof(RegisterState));
     o.memory.assign(dsp.GetDspMemory(), dsp.GetDspMemory() + kMemoryBytes);
@@ -336,7 +321,7 @@ bool Trial(uint64_t seed, bool idle)
     // An idle program and its handlers are valid code, so it mustn't throw. A random program may.
     const uint32_t before = 1 + static_cast<uint32_t>(rng() % (cycles - 1));
     const uint32_t after = cycles - before;
-    if (const std::string threw = Run(*first, before); !threw.empty())
+    if (const std::string threw = RunCatching(*first, before); !threw.empty())
     {
         ++threw_before;
         if (idle)
@@ -435,7 +420,6 @@ int main(int argc, char** argv)
     const uint64_t first = argc > 2 ? std::strtoull(argv[2], nullptr, 10) : 1;
 
     threesf::SilenceStdout(); // Teakra reports MMIO it doesn't model there
-    FindThrowing(*MakeDsp(false), Kinds());
 
     int failed = 0;
     for (int i = 0; i < trials; ++i)

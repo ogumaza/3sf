@@ -7,16 +7,12 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <memory>
 #include <optional>
-#include <span>
 #include <string>
-#include <string_view>
 #include <vector>
 
 #include "ntdlib/sar/formats.h"
 #include "xsflib/rip/file_names.h"
-#include "xsflib/rip/length.h"
 
 #include "rip/game.h"
 #include "threesf/format.h"
@@ -95,52 +91,5 @@ std::vector<std::string> MissingData(const ntdlib::sar::SoundArchive& archive, u
 // Filenames for one rip, valid on Windows, macOS and Linux and unique even on case-insensitive filesystems
 // (xsflib::rip). 3SF names them "<base>.3sflib" and "<index, four digits> <label>.mini3sf".
 using FileNames = xsflib::rip::FileNames;
-
-// A sequence's length and fade in milliseconds, and whether the sequence never makes a sound. A silent sequence gets
-// the tail alone.
-using Timing = xsflib::rip::Timing;
-
-// Works out how long sequences play by running them on the nw::snd model and the DSP firmware. Analyze can be called
-// from several threads at once.
-class LengthAnalyzer
-{
-public:
-    // Analyzes sequences of `archive_bytes` on `dsp_component`, with `variables` set before each sequence starts (see
-    // the 3sf_var tag in docs/3sf.md).
-    LengthAnalyzer(const std::vector<uint8_t>& archive_bytes, const std::vector<uint8_t>& dsp_component,
-                   const Variables& variables = {});
-
-    ~LengthAnalyzer();
-
-    // A looping sequence gets two loops and a 10 s fade, and any other sequence runs to its last sound and a tail of
-    // 0.5 s, for at most 600 s. docs/3sf.md, "Lengths", has the rules. Returns nullopt when the length can't be worked
-    // out (and then no length tag is written), and throws std::bad_alloc when memory runs out.
-    std::optional<Timing> Analyze(uint32_t sound_index) const;
-
-private:
-    struct Impl;
-
-    std::unique_ptr<Impl> impl_;
-};
-
-// What a walk through a sequence's commands reaches from where the sequence starts: every track it opens and every
-// branch, without playing it.
-struct SequenceShape
-{
-    int tracks = 1; // the track it starts on, and one for each track it opens
-    int notes = 0;  // note commands, each counted once
-};
-
-// Walks `data`, a sequence's commands (the payload of its CSEQ's DATA block), from `start`.
-SequenceShape WalkSequence(std::span<const uint8_t> data, uint32_t start);
-
-// Whether a sound's label marks it as music: its first two words (the runs of ASCII letters and digits in it, in any
-// case) are SEQ and M, or one of its words starts with BGM, or is JIN, JINGLE or FANFARE with or without a number.
-bool LabelMarksMusic(std::string_view label);
-
-// Whether a sound is music, as 3sfrip's --bgm picks: its label marks it as music, or it's a sequence that opens at
-// least two tracks besides the one it starts on and has at least 50 notes. The second rule finds the music that a label
-// doesn't mark, and the music in archives without labels.
-bool IsMusic(const ntdlib::sar::SoundArchive& archive, const ntdlib::sar::SoundInfo& sound);
 
 } // namespace threesf::rip

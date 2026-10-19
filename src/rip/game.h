@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <optional>
@@ -14,9 +15,26 @@
 namespace threesf::rip
 {
 
+// The offsets of the fields of a program's extended header that 3SF reads (3dbrew, "NCCH/Extended Header"). The text,
+// the rodata and the data each have an address, a size in pages and a size in bytes.
+constexpr std::size_t kExheaderFlags = 0x0d; // bit 0: the ExeFS's .code is compressed
+constexpr std::size_t kExheaderTextAddress = 0x10;
+constexpr std::size_t kExheaderTextPages = 0x14;
+constexpr std::size_t kExheaderStackSize = 0x1c;
+constexpr std::size_t kExheaderRodataPages = 0x24;
+constexpr std::size_t kExheaderDataAddress = 0x30;
+constexpr std::size_t kExheaderDataPages = 0x34;
+constexpr std::size_t kExheaderDataSize = 0x38;
+constexpr std::size_t kExheaderBssSize = 0x3c;
+constexpr std::size_t kExheaderProgramId = 0x200;
+constexpr std::size_t kExheaderPriority = 0x20f; // the main thread's
+
 struct GameFiles
 {
     uint64_t ProgramId() const;
+
+    // The CRC-32 of code.bin. A GameProfile identifies the code of its game by this value.
+    uint32_t CodeCrc32() const;
 
     // RomFS paths of the sound archives (.bcsar).
     std::vector<std::string> SoundArchives() const;

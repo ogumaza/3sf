@@ -28,6 +28,15 @@ using ntdlib::nwsnd::kNoVoice;
 using ntdlib::nwsnd::VoiceCallbackStatus;
 using ntdlib::nwsnd::VoiceId;
 
+// nw::snd's sample formats (SampleFormat), named as in ntdlib's models of the other consoles. The enum leaves out
+// IMA-ADPCM. The DSP can't play it.
+enum class SampleFormat : uint8_t
+{
+    kPcm8 = 0,
+    kPcm16 = 1,
+    kDspAdpcm = 3,
+};
+
 // nw::snd internal WaveInfo (filled by WaveFileReader).
 struct WaveInfo
 {
@@ -39,7 +48,7 @@ struct WaveInfo
         nnsnd::AdpcmContext loop_context;
     };
 
-    uint8_t format = 3; // nw::snd SampleFormat: 0 PCM8, 1 PCM16, 3 DSP ADPCM
+    SampleFormat format = SampleFormat::kDspAdpcm;
     bool loop = false;
     int channel_count = 1;
     uint32_t sample_rate = 32728;
@@ -70,16 +79,9 @@ public:
     // Dirty bits (+0x20).
     static constexpr uint16_t kStart = 0x1, kPitch = 0x4, kMix = 0x8, kLpf = 0x10, kBiquad = 0x20, kVolume = 0x40;
 
-    // 0x18b9ec: takes a DSP voice for each channel (one or two). Returns false if there aren't enough.
-    bool Alloc(int channel_count, int priority, Callback callback);
-
-    void Stop(); // 0x18b990
-
-    void SetPriority(int p); // 0x31c3c8
-
     // The calls of the core's channel (ntdlib/nwsnd/channel.h). The voice doesn't store the sample format and rate. The
     // wave gives them again. The interpolation type is recorded, and AppendWave applies it.
-    void SetSampleFormat(uint8_t)
+    void SetSampleFormat(SampleFormat)
     {
     }
 
@@ -133,20 +135,15 @@ public:
         dirty_ |= kStart;
     }
 
-    void SetVolume(float v);                                              // 0x17fb40
-    void SetPitch(float p);                                               // 0x17fae0
-    void SetPan(float p);                                                 // 0x17f9f4
-    void SetSurroundPan(float p);                                         // 0x17f968
-    void SetLpfFreq(float f);                                             // 0x17f900
-    void SetBiquadFilter(int type, float value);                          // 0x17f98c
-    void SetFrontBypass(bool bypass);                                     // 0x186c04
-    void SetMainSend(float s);                                            // 0x17f924
-    void SetFxSend(int bus, float s);                                     // 0x17fb04
-    void AppendWaveBuffer(int channel, nnsnd::WaveBuffer* wb, bool last); // 0x18b900
-    void CheckFinish();                                                   // 0x17aa70
-    void SyncParams();                                                    // 0x17aadc
-    void UpdateState();                                                   // 0x17ad10
+    void SetVolume(float v);                     // 0x17fb40
+    void SetPitch(float p);                      // 0x17fae0
+    void SetLpfFreq(float f);                    // 0x17f900
+    void SetBiquadFilter(int type, float value); // 0x17f98c
 
+    // The sequence policy's call for a track's front bypass (Policy::SetFrontBypass).
+    void SetFrontBypass(bool bypass); // 0x186c04
+
+    // The voice's state, which tests read too.
     Engine* engine_ = nullptr;
     VoiceId place_ = kNoVoice; // its place in the pool
     std::array<nnsnd::Voice*, 2> nn_{};
@@ -181,9 +178,47 @@ public:
 private:
     friend class VoiceManager;
 
+    // The voice manager's calls. Alloc (0x18b9ec) takes a DSP voice for each channel (one or two). It returns false if
+    // there aren't enough. Stop stops a voice that the manager drops. The other three run in each sound frame.
+    bool Alloc(int channel_count, int priority, Callback callback);
+    void Stop();        // 0x18b990
+    void CheckFinish(); // 0x17aa70
+    void SyncParams();  // 0x17aadc
+    void UpdateState(); // 0x17ad10
+
+    void SetPriority(int p); // 0x31c3c8
+
+    // The parts of SetOutputs.
+    void SetPan(float p);             // 0x17f9f4
+    void SetSurroundPan(float p);     // 0x17f968
+    void SetMainSend(float s);        // 0x17f924
+    void SetFxSend(int bus, float s); // 0x17fb04
+
+    // Queues a wave buffer on a channel's DSP voice. With `last`, CheckFinish reports the wave's end once that buffer
+    // is done.
+    void AppendWaveBuffer(int channel, nnsnd::WaveBuffer* wb, bool last); // 0x18b900
+
     void Initialize(const WaveInfo& info);                      // 0x31c2b4
     void ApplyInterpolationType();                              // 0x31c474
     void CalcMixParam(int channel, nnsnd::MixParam& out) const; // 0x1868f4
+
+    // Give the DSP voices the voice's pitch, mix and volume.
+    void ApplyPitch();
+    void ApplyMix();
+    void ApplyVolume();
+
+    // Calls `fn` with each DSP voice that the voice holds, and the index of its channel, in the order of the channels.
+    template <typename Fn>
+    void ForEachDspVoice(Fn fn)
+    {
+        for (int i = 0; i < channel_count_; i++)
+        {
+            if (nn_[i])
+            {
+                fn(nn_[i], i);
+            }
+        }
+    }
 
     // Handles nn::snd dropping a DSP voice (0x18dc1c for mono, 0x18dc6c for stereo). Releases any second DSP voice,
     // returns this voice to the pool and notifies its owner.
@@ -244,6 +279,8 @@ private:
 
     // 0x18ddc4: takes a voice out of the priority list and returns its place to the pool.
     void Release(VoiceId place);
+
+    void InsertByPriority(VoiceId place);
 
     Engine& engine_;
 

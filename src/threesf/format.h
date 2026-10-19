@@ -57,7 +57,7 @@ struct ProcessDescriptor
 
     std::vector<uint8_t> Serialize() const;
 
-    uint32_t version = 1;
+    uint32_t version = kVersion;
     uint32_t entry = 0x100000;
     uint32_t stack_size = 0x4000;
     uint32_t priority = 0x30;
@@ -71,6 +71,7 @@ struct ProcessDescriptor
 struct ArchiveDescriptor
 {
     static constexpr uint32_t kMagic = 0x41465333; // "3SFA"
+    static constexpr uint32_t kVersion = 1;
 
     static std::optional<ArchiveDescriptor> Parse(const std::vector<uint8_t>& data);
 
@@ -79,7 +80,7 @@ struct ArchiveDescriptor
 
     std::vector<uint8_t> Serialize() const;
 
-    uint32_t version = 1;
+    uint32_t version = kVersion;
     uint32_t flags = kFlagDspRequired;
     uint32_t output_mode = kOutputStereo;
     std::string archive_path;  // FILE chunk holding the sound archive (.bcsar)
@@ -96,6 +97,8 @@ struct DriverBlock
     static constexpr uint32_t kMagic = 0x44465333; // "3SFD"
     static constexpr uint32_t kVersion = 1;
     static constexpr uint32_t kVersionOffset = 0x04;
+    static constexpr uint32_t kStatusOffset = 0x08;
+    static constexpr uint32_t kSoundIdOffset = 0x0C;
     static constexpr uint32_t kOutputModeOffset = 0x10;
 };
 

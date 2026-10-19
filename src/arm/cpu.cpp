@@ -212,6 +212,23 @@ std::string Memory::ReadCString(uint32_t vaddr, std::size_t max) const
     return s;
 }
 
+std::size_t Memory::MappedLength(uint32_t vaddr, std::size_t size) const
+{
+    uint64_t mapped = 0;
+    while (mapped < size)
+    {
+        const uint32_t at = vaddr + static_cast<uint32_t>(mapped);
+        if (!HostPtr(at))
+        {
+            break;
+        }
+
+        mapped += kPageSize - (at & kPageMask);
+    }
+
+    return static_cast<std::size_t>(std::min<uint64_t>(mapped, size));
+}
+
 // --------------------------------------------------------------------------------------------- State
 uint32_t CpuState::Cpsr() const
 {
@@ -692,23 +709,6 @@ bool Cpu::ArmDataProcessing(uint32_t op)
 namespace
 {
 
-int32_t SignedSat32(int64_t value, bool& saturated)
-{
-    if (value > INT32_MAX)
-    {
-        saturated = true;
-        return INT32_MAX;
-    }
-
-    if (value < INT32_MIN)
-    {
-        saturated = true;
-        return INT32_MIN;
-    }
-
-    return static_cast<int32_t>(value);
-}
-
 int32_t Half(uint32_t value, bool top)
 {
     return top ? static_cast<int16_t>(value >> 16) : static_cast<int16_t>(value);
@@ -799,22 +799,7 @@ bool Cpu::ArmMisc(uint32_t op)
 
         if (op1 == 1) // MSR CPSR, Rm
         {
-            const uint32_t value = state_.r[rm];
-            const uint32_t mask = (op >> 16) & 0xf;
-            if (mask & 8)
-            {
-                state_.n = (value >> 31) & 1;
-                state_.z = (value >> 30) & 1;
-                state_.c = (value >> 29) & 1;
-                state_.v = (value >> 28) & 1;
-                state_.q = (value >> 27) & 1;
-            }
-
-            if (mask & 4)
-            {
-                state_.ge = static_cast<uint8_t>((value >> 16) & 0xf);
-            }
-
+            WriteCpsrFlags(state_.r[rm], (op >> 16) & 0xf);
             return true;
         }
         break;
@@ -858,11 +843,11 @@ bool Cpu::ArmMisc(uint32_t op)
             int64_t n = static_cast<int32_t>(state_.r[rn]);
             if (op1 & 2)
             {
-                n = SignedSat32(2 * n, sat);
+                n = SatSigned(2 * n, 32, sat);
             }
 
             const int64_t m = static_cast<int32_t>(state_.r[rm]);
-            const int32_t result = SignedSat32((op1 & 1) ? m - n : m + n, sat);
+            const int32_t result = SatSigned((op1 & 1) ? m - n : m + n, 32, sat);
             if (sat)
             {
                 state_.q = true;
@@ -908,20 +893,7 @@ bool Cpu::ArmMsrImmediate(uint32_t op)
     }
 
     const uint32_t rot = ((op >> 8) & 0xf) * 2;
-    const uint32_t value = std::rotr(op & 0xff, static_cast<int>(rot));
-    if (mask & 8)
-    {
-        state_.n = (value >> 31) & 1;
-        state_.z = (value >> 30) & 1;
-        state_.c = (value >> 29) & 1;
-        state_.v = (value >> 28) & 1;
-        state_.q = (value >> 27) & 1;
-    }
-
-    if (mask & 4)
-    {
-        state_.ge = static_cast<uint8_t>((value >> 16) & 0xf);
-    }
+    WriteCpsrFlags(std::rotr(op & 0xff, static_cast<int>(rot)), mask);
 
     return true;
 }

@@ -24,8 +24,6 @@ jobs:
       - uses: ./externals/xsflib/ci/foobar2000-windows
         with:
           component: foo_input_3sf
-          foobar2000-version: "2026-09-17"
-          foobar2000-sha256: 24fa95ed66b42624f593fd4b94c5efb08ae81dfebb92b79fe69c8cd170961e48
 
   # This job puts the package together, because zip keeps the bundle's file permissions and an artifact wouldn't.
   macos:
@@ -39,5 +37,3 @@ jobs:
       - uses: ./externals/xsflib/ci/foobar2000-macos
         with:
           component: foo_input_3sf
-          foobar2000-version: "2026-09-17"
-          foobar2000-sha256: 24fa95ed66b42624f593fd4b94c5efb08ae81dfebb92b79fe69c8cd170961e48

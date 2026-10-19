@@ -88,6 +88,10 @@ private:
         }
     }
 
+    // Runs the DSP in slices of `slice` cycles until it raises the audio pipe's interrupt, and clears the interrupt.
+    // The slice in which the interrupt comes runs to its end. Returns false if `limit` cycles pass first.
+    bool RunUntilAudioInterrupt(uint64_t limit, uint64_t slice);
+
     void BeforeDspRuns();
     void AfterDspRuns();
 

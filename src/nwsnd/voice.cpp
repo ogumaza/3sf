@@ -23,12 +23,19 @@ namespace
 using ntdlib::nwsnd::CalcPanRatio;
 using ntdlib::nwsnd::CalcSurroundPanRatio;
 using ntdlib::nwsnd::CtrPolicy;
+using ntdlib::nwsnd::OutputMode;
 
-nnsnd::SampleFormat ToNnFormat(uint8_t nw_format)
+nnsnd::SampleFormat ToNnFormat(SampleFormat format)
 {
-    return nw_format == 0   ? nnsnd::SampleFormat::kPcm8
-           : nw_format == 3 ? nnsnd::SampleFormat::kAdpcm
-                            : nnsnd::SampleFormat::kPcm16;
+    switch (format)
+    {
+    case SampleFormat::kPcm8:
+        return nnsnd::SampleFormat::kPcm8;
+    case SampleFormat::kDspAdpcm:
+        return nnsnd::SampleFormat::kAdpcm;
+    default:
+        return nnsnd::SampleFormat::kPcm16;
+    }
 }
 
 float Clamp01(float v)
@@ -47,14 +54,14 @@ float Clamp01(float v)
 
 // Sample offset -> byte offset (code.bin 0x186888). DSP-ADPCM counts in nibbles: 16 for each frame of 14 samples, and
 // for a partial frame its header's two and one for each sample. Half the count is the byte that holds the sample.
-uint32_t SamplesToBytes(uint32_t samples, uint8_t nw_format)
+uint32_t SamplesToBytes(uint32_t samples, SampleFormat format)
 {
-    switch (nw_format)
+    switch (format)
     {
-    case 0:
+    case SampleFormat::kPcm8:
         return samples;
 
-    case 3:
+    case SampleFormat::kDspAdpcm:
         {
             const uint32_t rest = samples % 14;
             return (samples / 14 * 16 + (rest ? rest + 2 : 0)) / 2;
@@ -135,14 +142,7 @@ void Voice::Stop()
     // 0x18b990
     if (playing_)
     {
-        for (int i = 0; i < channel_count_; i++)
-        {
-            if (nn_[i])
-            {
-                nn_[i]->SetState(nnsnd::VoiceState::kStop);
-            }
-        }
-
+        ForEachDspVoice([](nnsnd::Voice* v, int) { v->SetState(nnsnd::VoiceState::kStop); });
         playing_ = false;
     }
 
@@ -197,19 +197,14 @@ void Voice::OnDspVoiceDropped(nnsnd::Voice* dropped, bool stereo)
 
 void Voice::Initialize(const WaveInfo& info)
 {
-    for (int i = 0; i < channel_count_; i++)
+    const auto initialize = [&info](nnsnd::Voice* v, int)
     {
-        nnsnd::Voice* v = nn_[i];
-        if (!v)
-        {
-            continue;
-        }
-
         v->SetChannelCount(1);
         v->SetSampleFormat(ToNnFormat(info.format));
         v->SetSampleRate(info.sample_rate);
         v->SetInterpolationType(nnsnd::InterpolationType::kPolyphase); // HardwareManager's default SRC type, 4-tap
-    }
+    };
+    ForEachDspVoice(initialize);
 
     started_ = false;
     playing_ = false;
@@ -222,26 +217,15 @@ void Voice::SetPriority(int p)
 
     if (p == 1)
     {
-        for (int i = 0; i < channel_count_; i++)
-        {
-            if (nn_[i])
-            {
-                engine_->Snd().ChangePriority(nn_[i], 1);
-            }
-        }
+        ForEachDspVoice([this](nnsnd::Voice* v, int) { engine_->Snd().ChangePriority(v, 1); });
     }
 }
 
 void Voice::ApplyInterpolationType()
 {
     const int type = interpolation_;
-    for (int i = 0; i < channel_count_; i++)
-    {
-        if (nn_[i])
-        {
-            nn_[i]->SetInterpolationType(static_cast<nnsnd::InterpolationType>(type == 1 ? 1 : type == 2 ? 2 : 0));
-        }
-    }
+    const auto dsp_type = static_cast<nnsnd::InterpolationType>(type == 1 ? 1 : type == 2 ? 2 : 0);
+    ForEachDspVoice([dsp_type](nnsnd::Voice* v, int) { v->SetInterpolationType(dsp_type); });
 }
 
 void Voice::Free(Engine& engine)
@@ -335,14 +319,7 @@ void Voice::SetBiquadFilter(int type, float value)
 void Voice::SetFrontBypass(bool bypass)
 {
     // It changes no dirty bit: the DSP gets the flag with its voices' first buffers, and the mix with its next update.
-    for (int i = 0; i < channel_count_; i++)
-    {
-        if (nn_[i])
-        {
-            nn_[i]->SetFrontBypass(bypass);
-        }
-    }
-
+    ForEachDspVoice([bypass](nnsnd::Voice* v, int) { v->SetFrontBypass(bypass); });
     front_bypass_ = bypass;
 }
 
@@ -413,10 +390,9 @@ void Voice::CalcMixParam(int channel, nnsnd::MixParam& out) const
     ntdlib::nwsnd::PanInfo info = ntdlib::nwsnd::PanInfoOf(pan_curve_);
     info.front_bypass = front_bypass_;
 
-    const uint8_t mode = engine_->OutputMode();
-    const auto output = static_cast<ntdlib::nwsnd::OutputMode>(mode);
+    const auto output = static_cast<OutputMode>(engine_->OutputMode());
     float hi = 0.0f, lo = 0.0f, front = 0.0f, rear = 0.0f;
-    if (mode == 0)
+    if (output == OutputMode::kMono)
     {
         hi = lo = CalcPanRatio<CtrPolicy>(0.0f, info, output);
     }
@@ -452,7 +428,7 @@ void Voice::CalcMixParam(int channel, nnsnd::MixParam& out) const
         }
     }
 
-    if (mode == 2)
+    if (output == OutputMode::kSurround)
     {
         front = CalcSurroundPanRatio<CtrPolicy>(span_, info);
         rear = CalcSurroundPanRatio<CtrPolicy>(2.0f - span_, info);
@@ -488,66 +464,40 @@ void Voice::SyncParams()
 
     if (dirty_ & kPitch)
     {
-        for (int i = 0; i < channel_count_; i++)
-        {
-            if (nn_[i])
-            {
-                nn_[i]->SetPitch(pitch_);
-            }
-        }
+        ApplyPitch();
         dirty_ &= static_cast<uint16_t>(~kPitch);
     }
 
     if (dirty_ & kVolume)
     {
-        for (int i = 0; i < channel_count_; i++)
-        {
-            if (nn_[i])
-            {
-                nn_[i]->SetVolume(volume_);
-            }
-        }
+        ApplyVolume();
         dirty_ &= static_cast<uint16_t>(~kVolume);
     }
 
     if (dirty_ & kMix)
     {
-        for (int i = 0; i < channel_count_; i++)
-        {
-            if (!nn_[i])
-            {
-                continue;
-            }
-
-            nnsnd::MixParam mix{};
-            CalcMixParam(i, mix);
-            nn_[i]->SetMixParam(mix);
-        }
+        ApplyMix();
         dirty_ &= static_cast<uint16_t>(~kMix);
     }
 
     if (dirty_ & kLpf)
     {
         const uint16_t freq = util::CalcLpfFreq(lpf_);
-        for (int i = 0; i < channel_count_; i++)
+        const auto set_filter = [freq](nnsnd::Voice* v, int)
         {
-            if (!nn_[i])
-            {
-                continue;
-            }
-
             if (freq < 16000)
             {
-                nn_[i]->EnableMonoFilter(true);
+                v->EnableMonoFilter(true);
                 int16_t b0, a1;
                 util::CalcMonoFilterCoefficients(freq, b0, a1);
-                nn_[i]->SetMonoFilterCoefficients(b0, a1);
+                v->SetMonoFilterCoefficients(b0, a1);
             }
             else
             {
-                nn_[i]->EnableMonoFilter(false);
+                v->EnableMonoFilter(false);
             }
-        }
+        };
+        ForEachDspVoice(set_filter);
         dirty_ &= static_cast<uint16_t>(~kLpf);
     }
 
@@ -557,19 +507,15 @@ void Voice::SyncParams()
         // turns the filter off.
         const int16_t* coefs =
             biquad_value_ > 0.0f ? util::BiquadPresetCoefficients(biquad_type_, biquad_value_) : nullptr;
-        for (int i = 0; i < channel_count_; i++)
+        const auto set_filter = [coefs](nnsnd::Voice* v, int)
         {
-            if (!nn_[i])
-            {
-                continue;
-            }
-
-            nn_[i]->EnableBiquadFilter(coefs != nullptr);
+            v->EnableBiquadFilter(coefs != nullptr);
             if (coefs)
             {
-                nn_[i]->SetBiquadFilterCoefficients(coefs);
+                v->SetBiquadFilterCoefficients(coefs);
             }
-        }
+        };
+        ForEachDspVoice(set_filter);
         dirty_ &= static_cast<uint16_t>(~kBiquad);
     }
 }
@@ -582,44 +528,34 @@ void Voice::UpdateState()
         return;
     }
 
-    for (int i = 0; i < channel_count_; i++)
-    {
-        if (nn_[i])
-        {
-            nn_[i]->SetPitch(pitch_);
-        }
-    }
-
-    for (int i = 0; i < channel_count_; i++)
-    {
-        if (!nn_[i])
-        {
-            continue;
-        }
-
-        nnsnd::MixParam mix{};
-        CalcMixParam(i, mix);
-        nn_[i]->SetMixParam(mix);
-    }
-
-    for (int i = 0; i < channel_count_; i++)
-    {
-        if (nn_[i])
-        {
-            nn_[i]->SetVolume(volume_);
-        }
-    }
-
+    ApplyPitch();
+    ApplyMix();
+    ApplyVolume();
     playing_ = true;
     dirty_ &= static_cast<uint16_t>(~(kStart | kPitch | kMix));
 
-    for (int i = 0; i < channel_count_; i++)
+    ForEachDspVoice([](nnsnd::Voice* v, int) { v->SetState(nnsnd::VoiceState::kPlay); });
+}
+
+void Voice::ApplyPitch()
+{
+    ForEachDspVoice([this](nnsnd::Voice* v, int) { v->SetPitch(pitch_); });
+}
+
+void Voice::ApplyMix()
+{
+    const auto set_mix = [this](nnsnd::Voice* v, int channel)
     {
-        if (nn_[i])
-        {
-            nn_[i]->SetState(nnsnd::VoiceState::kPlay);
-        }
-    }
+        nnsnd::MixParam mix{};
+        CalcMixParam(channel, mix);
+        v->SetMixParam(mix);
+    };
+    ForEachDspVoice(set_mix);
+}
+
+void Voice::ApplyVolume()
+{
+    ForEachDspVoice([this](nnsnd::Voice* v, int) { v->SetVolume(volume_); });
 }
 
 void Voice::AppendWave(Engine&, const WaveInfo& info)
@@ -628,10 +564,11 @@ void Voice::AppendWave(Engine&, const WaveInfo& info)
 
     // 0x320914, for a wave that plays from its start (a note always does).
     const uint32_t loop_start_bytes = SamplesToBytes(info.loop_start, info.format);
+    const bool adpcm = info.format == SampleFormat::kDspAdpcm;
     for (int ch = 0; ch < channel_count_; ch++)
     {
         const auto& c = info.channels[ch];
-        if (info.format == 3)
+        if (adpcm)
         {
             contexts_[ch] = c.context;
             if (info.loop)
@@ -647,7 +584,7 @@ void Voice::AppendWave(Engine&, const WaveInfo& info)
         wb0.buffer_address = c.data;
         wb0.sample_length = info.loop_end;
         wb0.loop = false;
-        if (info.format == 3)
+        if (adpcm)
         {
             wb0.adpcm_context = &contexts_[ch];
         }
@@ -660,7 +597,7 @@ void Voice::AppendWave(Engine&, const WaveInfo& info)
             wb1.buffer_address = c.data + loop_start_bytes;
             wb1.sample_length = info.loop_end - info.loop_start;
             wb1.loop = true;
-            if (info.format == 3)
+            if (adpcm)
             {
                 wb1.adpcm_context = &loop_contexts_[ch];
             }
@@ -714,10 +651,7 @@ VoiceId VoiceManager::AllocVoice(Engine&, int channel_count, int priority, Voice
     }
 
     v.priority_ = priority & 0xff; // 0x187130
-
-    // Insert after every voice with lower or equal priority.
-    auto it = std::find_if(list_.begin(), list_.end(), [&](VoiceId o) { return At(o).priority_ > v.priority_; });
-    list_.insert(it, place);
+    InsertByPriority(place);
 
     return place;
 }
@@ -787,12 +721,18 @@ void VoiceManager::Release(VoiceId place)
     free_.push_back(place);
 }
 
-void VoiceManager::ChangePriority(VoiceId place)
+void VoiceManager::InsertByPriority(VoiceId place)
 {
-    list_.remove(place);
+    // Insert after every voice with lower or equal priority.
     const int priority = At(place).priority_;
     auto it = std::find_if(list_.begin(), list_.end(), [&](VoiceId o) { return At(o).priority_ > priority; });
     list_.insert(it, place);
+}
+
+void VoiceManager::ChangePriority(VoiceId place)
+{
+    list_.remove(place);
+    InsertByPriority(place);
 }
 
 VoiceManager::Snapshot VoiceManager::Save() const
@@ -809,20 +749,21 @@ void VoiceManager::Restore(const Snapshot& snapshot)
 
 void VoiceManager::UpdateAllVoices()
 {
-    // 0x174540
-    std::vector<VoiceId> snapshot(list_.begin(), list_.end());
-    for (VoiceId v : snapshot)
+    // 0x174540. CheckFinish calls the callback of each finished voice. The callback can free voices. Freeing a voice
+    // takes it out of list_. Each pass therefore runs over a copy of list_. The copy is made again after CheckFinish.
+    std::vector<VoiceId> voices(list_.begin(), list_.end());
+    for (VoiceId v : voices)
     {
         At(v).CheckFinish();
     }
 
-    snapshot.assign(list_.begin(), list_.end());
-    for (VoiceId v : snapshot)
+    voices.assign(list_.begin(), list_.end());
+    for (VoiceId v : voices)
     {
         At(v).SyncParams();
     }
 
-    for (VoiceId v : snapshot)
+    for (VoiceId v : voices)
     {
         At(v).UpdateState();
     }

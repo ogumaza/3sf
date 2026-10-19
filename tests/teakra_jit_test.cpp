@@ -11,7 +11,6 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <exception>
 #include <memory>
 #include <random>
 #include <string>
@@ -33,21 +32,6 @@ using namespace threesf::teakra_test;
 
 uint32_t cycles = 3000; // per program
 
-// Runs a DSP, and returns what it threw, if anything.
-std::string Run(Teakra::Teakra& dsp)
-{
-    try
-    {
-        dsp.Run(cycles);
-    }
-    catch (const std::exception& e)
-    {
-        return std::string("threw: ") + e.what();
-    }
-
-    return {};
-}
-
 int threw = 0; // trials that ended in an exception, in both DSPs
 
 // The instructions that translated code ran, on the DSPs with the JIT and without.
@@ -64,8 +48,8 @@ constexpr bool kHostHasJit = false;
 // false, after a report under `label`, if they differ.
 bool RunBoth(const std::string& label, Teakra::Teakra& jit, Teakra::Teakra& reference)
 {
-    const std::string jit_result = Run(jit);
-    const std::string reference_result = Run(reference);
+    const std::string jit_result = RunCatching(jit, cycles);
+    const std::string reference_result = RunCatching(reference, cycles);
     translated += jit.JitInstructions();
     translated_without += reference.JitInstructions();
     if (std::getenv("JIT_TEST_VERBOSE"))
@@ -266,7 +250,6 @@ int main(int argc, char** argv)
     }
 
     threesf::SilenceStdout(); // Teakra reports MMIO it doesn't model there
-    FindThrowing(*MakeDsp(false), Kinds());
 
     int failed = 0;
     for (int i = 0; i < trials; ++i)

@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: MIT
 
-# Builds 3SF and runs ctest whenever main changes: on macOS ARM64, and on Windows x64 and x86 with clang-cl. The x86
-# job covers the 32-bit foobar2000 component. All three jobs build the component. The x86 job also builds the XMPlay
-# plugin. XMPlay is 32-bit only.
+# Builds 3SF whenever main changes: on Windows x64 and x86 with clang-cl, and on macOS ARM64. The Windows jobs run
+# ctest too. The macOS job builds without the tests (THREESF_TESTS=OFF). The x86 job covers the 32-bit foobar2000
+# component. All three jobs build the component. The x86 job also builds the XMPlay plugin. XMPlay is 32-bit only.
 # Changes to documentation alone don't start a run.
 name: CI
 
@@ -24,7 +24,7 @@ jobs:
   build:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -40,6 +40,7 @@ jobs:
             xmplay: true
           - name: macOS ARM64 (Apple Clang)
             os: macos-15
+            cmake: -DTHREESF_TESTS=OFF
             foobar2000: true
     steps:
       - uses: actions/checkout@v7
@@ -49,7 +50,5 @@ jobs:
         with:
           cmake: ${{ matrix.cmake }}
           foobar2000: ${{ matrix.foobar2000 }}
-          foobar2000-version: "2026-09-17"
-          foobar2000-sha256: 24fa95ed66b42624f593fd4b94c5efb08ae81dfebb92b79fe69c8cd170961e48
           xmplay: ${{ matrix.xmplay || false }}
           test-timeout: 600

@@ -13,6 +13,7 @@
 #include <cfenv>
 #include <cmath>
 #include <cstdint>
+#include <type_traits>
 
 #include "arm/cpu.h"
 
@@ -29,6 +30,38 @@ constexpr uint32_t kFpexcEn = 0x40000000;
 
 // NZCV, DN, FZ, RMode, STRIDE, LEN, the trap enables and the cumulative flags.
 constexpr uint32_t kFpscrWritable = 0xf3f79f9f;
+
+// The register fields of an instruction. A single-precision register's number is Vx:X, and a double-precision one's
+// is X:Vx. VFPv2 has D0 to D15, so a double-precision number of 16 or more is undefined.
+constexpr uint32_t Sd(uint32_t op)
+{
+    return ((op >> 11) & 0x1e) | ((op >> 22) & 1);
+}
+
+constexpr uint32_t Sn(uint32_t op)
+{
+    return ((op >> 15) & 0x1e) | ((op >> 7) & 1);
+}
+
+constexpr uint32_t Sm(uint32_t op)
+{
+    return ((op << 1) & 0x1e) | ((op >> 5) & 1);
+}
+
+constexpr uint32_t Dd(uint32_t op)
+{
+    return ((op >> 18) & 0x10) | ((op >> 12) & 0xf);
+}
+
+constexpr uint32_t Dn(uint32_t op)
+{
+    return ((op >> 3) & 0x10) | ((op >> 16) & 0xf);
+}
+
+constexpr uint32_t Dm(uint32_t op)
+{
+    return ((op >> 1) & 0x10) | (op & 0xf);
+}
 
 uint32_t ToInt(double x, bool is_signed, bool round_to_zero)
 {
@@ -148,6 +181,30 @@ void Cpu::SetD(uint32_t i, double d)
     SetDBits(i, bits);
 }
 
+template <>
+float Cpu::Fp<float>(uint32_t i) const
+{
+    return S(i);
+}
+
+template <>
+double Cpu::Fp<double>(uint32_t i) const
+{
+    return D(i);
+}
+
+template <>
+void Cpu::SetFp<float>(uint32_t i, float value)
+{
+    SetS(i, value);
+}
+
+template <>
+void Cpu::SetFp<double>(uint32_t i, double value)
+{
+    SetD(i, value);
+}
+
 void Cpu::FpCompare(double a, double b)
 {
     uint32_t nzcv;
@@ -171,6 +228,70 @@ void Cpu::FpCompare(double a, double b)
     state_.fpscr = (state_.fpscr & 0x0fffffff) | (nzcv << 28);
 }
 
+// opc is bits 23, 21, 20 and 6 of the instruction.
+template <typename T>
+bool Cpu::VfpArithmetic(uint32_t op, uint32_t opc, uint32_t d, uint32_t n, uint32_t m)
+{
+    const T a = FlushIn(Fp<T>(n));
+    const T b = FlushIn(Fp<T>(m));
+    T product;
+    switch (opc)
+    {
+    case 0x0: // FMAC
+        product = a * b;
+        SetFp(d, FlushIn(Fp<T>(d)) + FlushIn(product));
+        break;
+
+    case 0x1: // FNMAC
+        product = a * b;
+        SetFp(d, FlushIn(Fp<T>(d)) - FlushIn(product));
+        break;
+
+    case 0x2: // FMSC
+        product = a * b;
+        SetFp(d, -FlushIn(Fp<T>(d)) + FlushIn(product));
+        break;
+
+    case 0x3: // FNMSC
+        product = a * b;
+        SetFp(d, -FlushIn(Fp<T>(d)) - FlushIn(product));
+        break;
+
+    case 0x4: // FMUL
+        SetFp(d, a * b);
+        break;
+
+    case 0x5: // FNMUL: the negation follows default-NaN substitution
+        SetFp(d, a * b);
+        if constexpr (std::is_same_v<T, float>)
+        {
+            state_.vfp[d] ^= 0x80000000;
+        }
+        else
+        {
+            SetDBits(d, DBits(d) ^ 0x8000000000000000ull);
+        }
+        break;
+
+    case 0x6: // FADD
+        SetFp(d, a + b);
+        break;
+
+    case 0x7: // FSUB
+        SetFp(d, a - b);
+        break;
+
+    case 0x8: // FDIV
+        SetFp(d, a / b);
+        break;
+
+    default:
+        return Undefined(op);
+    }
+
+    return true;
+}
+
 bool Cpu::Vfp(uint32_t op)
 {
     if (state_.fpscr & kFpscrVector)
@@ -181,124 +302,25 @@ bool Cpu::Vfp(uint32_t op)
     const bool dp = (op >> 8) & 1;
     const uint32_t opc = ((op >> 20) & 8) | ((op >> 19) & 4) | ((op >> 19) & 2) | ((op >> 6) & 1);
 
-    // Register fields: single precision Vx:X, double precision X:Vx (VFPv2 has D0..D15).
-    const uint32_t sd = ((op >> 11) & 0x1e) | ((op >> 22) & 1);
-    const uint32_t sn = ((op >> 15) & 0x1e) | ((op >> 7) & 1);
-    const uint32_t sm = ((op << 1) & 0x1e) | ((op >> 5) & 1);
-    const uint32_t dd = ((op >> 18) & 0x10) | ((op >> 12) & 0xf);
-    const uint32_t dn = ((op >> 3) & 0x10) | ((op >> 16) & 0xf);
-    const uint32_t dm = ((op >> 1) & 0x10) | (op & 0xf);
+    const uint32_t sd = Sd(op);
+    const uint32_t sn = Sn(op);
+    const uint32_t sm = Sm(op);
+    const uint32_t dd = Dd(op);
+    const uint32_t dn = Dn(op);
+    const uint32_t dm = Dm(op);
     if (opc != 15)
     {
-        if (dp)
+        if (!dp)
         {
-            if (dd >= 16 || dn >= 16 || dm >= 16)
-            {
-                return Undefined(op);
-            }
-
-            const double n = FlushIn(D(dn)), m = FlushIn(D(dm));
-            double product;
-            switch (opc)
-            {
-            case 0x0: // FMACD
-                product = n * m;
-                SetD(dd, FlushIn(D(dd)) + FlushIn(product));
-                break;
-
-            case 0x1: // FNMACD
-                product = n * m;
-                SetD(dd, FlushIn(D(dd)) - FlushIn(product));
-                break;
-
-            case 0x2: // FMSCD
-                product = n * m;
-                SetD(dd, -FlushIn(D(dd)) + FlushIn(product));
-                break;
-
-            case 0x3: // FNMSCD
-                product = n * m;
-                SetD(dd, -FlushIn(D(dd)) - FlushIn(product));
-                break;
-
-            case 0x4: // FMULD
-                SetD(dd, n * m);
-                break;
-
-            case 0x5: // FNMULD: the negation follows default-NaN substitution
-                SetD(dd, n * m);
-                SetDBits(dd, DBits(dd) ^ 0x8000000000000000ull);
-                break;
-
-            case 0x6: // FADDD
-                SetD(dd, n + m);
-                break;
-
-            case 0x7: // FSUBD
-                SetD(dd, n - m);
-                break;
-
-            case 0x8: // FDIVD
-                SetD(dd, n / m);
-                break;
-
-            default:
-                return Undefined(op);
-            }
-        }
-        else
-        {
-            const float n = FlushIn(S(sn)), m = FlushIn(S(sm));
-            float product;
-            switch (opc)
-            {
-            case 0x0: // FMACS
-                product = n * m;
-                SetS(sd, FlushIn(S(sd)) + FlushIn(product));
-                break;
-
-            case 0x1: // FNMACS
-                product = n * m;
-                SetS(sd, FlushIn(S(sd)) - FlushIn(product));
-                break;
-
-            case 0x2: // FMSCS
-                product = n * m;
-                SetS(sd, -FlushIn(S(sd)) + FlushIn(product));
-                break;
-
-            case 0x3: // FNMSCS
-                product = n * m;
-                SetS(sd, -FlushIn(S(sd)) - FlushIn(product));
-                break;
-
-            case 0x4: // FMULS
-                SetS(sd, n * m);
-                break;
-
-            case 0x5: // FNMULS: the negation follows default-NaN substitution
-                SetS(sd, n * m);
-                state_.vfp[sd] ^= 0x80000000;
-                break;
-
-            case 0x6: // FADDS
-                SetS(sd, n + m);
-                break;
-
-            case 0x7: // FSUBS
-                SetS(sd, n - m);
-                break;
-
-            case 0x8: // FDIVS
-                SetS(sd, n / m);
-                break;
-
-            default:
-                return Undefined(op);
-            }
+            return VfpArithmetic<float>(op, opc, sd, sn, sm);
         }
 
-        return true;
+        if (dd >= 16 || dn >= 16 || dm >= 16)
+        {
+            return Undefined(op);
+        }
+
+        return VfpArithmetic<double>(op, opc, dd, dn, dm);
     }
 
     // Extension instructions, selected by Vn:N.
@@ -489,7 +511,7 @@ bool Cpu::VfpLoadStore(uint32_t op)
     const bool dp = (op >> 8) & 1;
     const uint32_t rn = (op >> 16) & 0xf;
     const uint32_t imm8 = op & 0xff;
-    const uint32_t d = dp ? (((op >> 18) & 0x10) | ((op >> 12) & 0xf)) : (((op >> 11) & 0x1e) | ((op >> 22) & 1));
+    const uint32_t d = dp ? Dd(op) : Sd(op);
     if (p && !w) // FLDS/FLDD/FSTS/FSTD
     {
         const uint32_t base = rn == 15 ? (Reg(15) & ~3u) : state_.r[rn];
@@ -579,7 +601,7 @@ bool Cpu::VfpTransfer(uint32_t op)
 
     if (cp == 10 && opc1 == 0) // FMSR / FMRS
     {
-        const uint32_t n = ((op >> 15) & 0x1e) | ((op >> 7) & 1);
+        const uint32_t n = Sn(op);
         if (l)
         {
             state_.r[rt] = state_.vfp[n];
@@ -650,7 +672,7 @@ bool Cpu::VfpTransfer(uint32_t op)
 
     if (cp == 11 && (opc1 & 6) == 0) // FMDLR / FMDHR / FMRDL / FMRDH
     {
-        const uint32_t n = ((op >> 3) & 0x10) | ((op >> 16) & 0xf);
+        const uint32_t n = Dn(op);
         if (n >= 16)
         {
             return Undefined(op);
@@ -686,7 +708,7 @@ bool Cpu::VfpTransfer64(uint32_t op)
     uint32_t first;
     if ((op >> 8) & 1) // FMDRR / FMRRD
     {
-        const uint32_t m = ((op >> 1) & 0x10) | (op & 0xf);
+        const uint32_t m = Dm(op);
         if (m >= 16)
         {
             return Undefined(op);
@@ -696,7 +718,7 @@ bool Cpu::VfpTransfer64(uint32_t op)
     }
     else // FMSRR / FMRRS
     {
-        first = ((op << 1) & 0x1e) | ((op >> 5) & 1);
+        first = Sm(op);
         if (first == 31)
         {
             return Undefined(op);

@@ -10,7 +10,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <deque>
-#include <functional>
 #include <map>
 #include <memory>
 #include <optional>
@@ -18,6 +17,7 @@
 #include <utility>
 #include <vector>
 
+#include "ntdlib/nwsnd/length_hooks.h"
 #include "ntdlib/nwsnd/util.h"
 #include "ntdlib/sar/formats.h"
 
@@ -36,7 +36,9 @@ struct EngineOptions
     uint8_t output_mode = 1;
 };
 
-class Engine
+// The ripper's length analysis sets the engine's hooks (LengthHooks). ntdlib's SequenceSoundPlayer reports the
+// sequence's loops, every track's passes and the open-track commands to them.
+class Engine : public ntdlib::nwsnd::LengthHooks
 {
 public:
     struct LoadedWarc
@@ -108,16 +110,6 @@ public:
     // A channel's callback, for its owner: track `track` of player `player`.
     void ChannelEvent(int player, int track, Channel& channel, Channel::CallbackStatus status);
 
-    bool FollowsLoops() const
-    {
-        return static_cast<bool>(on_loop_);
-    }
-
-    void OnLoop(const SequenceSoundPlayer&, int track, uint32_t target)
-    {
-        on_loop_(track, target);
-    }
-
     // One sound frame: nn::snd receive, FrameProcess, nn::snd send. Returns false if the DSP stopped answering.
     bool RunFrame();
 
@@ -137,10 +129,6 @@ public:
     // Restores the engine from a snapshot. Restore FCRAM to the same state so cached wave archive addresses remain
     // valid.
     void Restore(const Snapshot& snapshot);
-
-    // While set, the sequences' loops go here: the track and the command it jumps back to (for the ripper's length
-    // analysis, see SequenceSoundPlayer's comment on loops).
-    std::function<void(int track, uint32_t target)> on_loop_;
 
 private:
     void FrameProcess();

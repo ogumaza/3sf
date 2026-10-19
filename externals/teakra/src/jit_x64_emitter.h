@@ -133,7 +133,7 @@ public:
     }
     // Stores an immediate; a 64-bit store sign-extends it from 32 bits.
     void MovImm(const Mem& dst, s32 imm, int bits) {
-        RM(bits == 8 ? 0xC6 : 0xC7, bits, 0, dst, ImmSize(bits));
+        RMExt(bits == 8 ? 0xC6 : 0xC7, bits, 0, dst);
         Imm(imm, ImmSize(bits));
     }
     // Loads an immediate into a register, in the shortest form that gives its 64-bit value.
@@ -236,13 +236,13 @@ public:
     void OpImm(Arith op, const Mem& dst, s32 imm, int bits) {
         const u8 ext = static_cast<u8>(op);
         if (bits == 8) {
-            RM(0x80, bits, ext, dst, 1);
+            RMExt(0x80, bits, ext, dst);
             Imm(imm, 1);
         } else if (imm >= -128 && imm <= 127) {
-            RM(0x83, bits, ext, dst, 1);
+            RMExt(0x83, bits, ext, dst);
             Imm(imm, 1);
         } else {
-            RM(0x81, bits, ext, dst, ImmSize(bits));
+            RMExt(0x81, bits, ext, dst);
             Imm(imm, ImmSize(bits));
         }
     }
@@ -252,7 +252,7 @@ public:
     }
     void TestImm(Reg a, s32 imm, int bits) {
         RRExt(bits == 8 ? 0xF6 : 0xF7, bits, 0, a);
-        Imm(imm, bits == 8 ? 1 : ImmSize(bits));
+        Imm(imm, ImmSize(bits));
     }
 
     void ShiftImm(Shift op, Reg dst, u8 count, int bits) {
@@ -420,14 +420,16 @@ private:
         ModRMReg(ext, Num(rm));
     }
 
-    // An instruction with a register or an opcode extension in the reg field and memory in r/m.
+    // An instruction with a register in the reg field and memory in r/m.
     void RM(u8 opcode, int bits, Reg reg, const Mem& m) {
         Prefix16(bits);
         RexMem(bits == 64, Num(reg), m, bits == 8 && Num(reg) >= 4);
         Byte(opcode);
         ModRMMem(Num(reg), m);
     }
-    void RM(u8 opcode, int bits, u8 ext, const Mem& m, int /*immediate size*/) {
+
+    // An instruction with an opcode extension in the reg field and memory in r/m.
+    void RMExt(u8 opcode, int bits, u8 ext, const Mem& m) {
         Prefix16(bits);
         RexMem(bits == 64, ext, m, false);
         Byte(opcode);

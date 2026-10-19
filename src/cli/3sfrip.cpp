@@ -53,10 +53,12 @@
 #include "xsflib/files.h"
 #include "xsflib/rip/tool.h"
 #include "xsflib/text.h"
-#include <zlib.h>
 
 #include "common/quiet_stdout.h"
 #include "common/sar_options.h"
+#include "dsp/dsp.h"
+#include "rip/length.h"
+#include "rip/music.h"
 #include "rip/rip.h"
 
 using namespace threesf;
@@ -103,13 +105,19 @@ void ListArchives(const rip::GameFiles& game)
     }
 }
 
+// A DSP firmware file and its bytes.
+struct FirmwareFile
+{
+    std::string path;
+    std::vector<uint8_t> bytes;
+};
+
 struct Options : xsflib::cli::RipOptions
 {
     Variables variables; // --var: set before each sequence starts, and written as the 3sf_var tag
 
     // The firmware --firmware names, and a firmware file among the inputs, which only loose sound archives use.
-    std::string firmware_file, input_firmware_file;
-    std::vector<uint8_t> firmware, input_firmware;
+    FirmwareFile firmware, input_firmware;
 };
 
 struct Job
@@ -138,6 +146,36 @@ void AnalyzeLengths(std::vector<Job>& jobs, const std::vector<uint8_t>& archive,
         return true;
     };
     xsflib::cli::AnalyzeLengths(jobs, threads, analyze);
+}
+
+// Lists and drops the sequences whose data isn't all in the archive. They would play with missing instruments. Returns
+// how many it dropped.
+std::size_t DropIncomplete(std::vector<Job>& jobs, const ntdlib::sar::SoundArchive& archive)
+{
+    const auto incomplete = [&archive](const Job& job)
+    {
+        const auto missing = rip::MissingData(archive, job.index);
+        if (missing.empty())
+        {
+            return false;
+        }
+
+        std::string what;
+        for (std::size_t i = 0; i < missing.size() && i < 3; i++)
+        {
+            what += (i ? ", " : "") + missing[i];
+        }
+
+        if (missing.size() > 3)
+        {
+            what += ", ...";
+        }
+
+        std::fprintf(stderr, "skipped %s: not in this archive: %s\n", job.label.c_str(), what.c_str());
+
+        return true;
+    };
+    return std::erase_if(jobs, incomplete);
 }
 
 // Lists and drops the sounds whose volume in the archive is 0. The game's sound library multiplies everything a sound
@@ -174,6 +212,22 @@ std::size_t DropUnheard(std::vector<Job>& jobs)
         return true;
     };
     return std::erase_if(jobs, unheard);
+}
+
+// Drops the sounds that make no sound. DropMuted finds those at a volume of 0. Unless --no-length is given, the length
+// analysis of the rest then finds the sequences that never sound. Returns how many it dropped.
+std::size_t AnalyzeAndDropSilent(std::vector<Job>& jobs, const ntdlib::sar::SoundArchive& archive,
+                                 const std::vector<uint8_t>& archive_bytes, const std::vector<uint8_t>& firmware,
+                                 const Variables& variables, const Options& o)
+{
+    std::size_t silent = DropMuted(jobs, archive);
+    if (o.lengths && !jobs.empty())
+    {
+        AnalyzeLengths(jobs, archive_bytes, firmware, variables, o.jobs);
+        silent += DropUnheard(jobs);
+    }
+
+    return silent;
 }
 
 // "; 3 sounds skipped (2 data outside the archive, 1 no sound)", or nothing when none were skipped.
@@ -213,12 +267,28 @@ std::vector<Job> SelectSounds(const ntdlib::sar::SoundArchive& archive, const Op
 // The item id of a job's sound: the item type of sounds (1) in the top byte, and the sound's index.
 uint32_t SoundId(const Job& job)
 {
-    return ntdlib::sar::kSoundItem << 24 | job.index;
+    return ntdlib::sar::ItemId(ntdlib::sar::kSoundItem, job.index);
+}
+
+// Writes the .3sflib `lib` as `lib_name` in `out_dir`, which it makes if it doesn't exist. Returns false after an error
+// message if it can't.
+bool WriteLibrary(const fs::path& out_dir, const std::string& lib_name, const std::vector<uint8_t>& lib)
+{
+    fs::create_directories(out_dir);
+    if (!WriteFile(out_dir / xsflib::PathFromUtf8(lib_name), lib))
+    {
+        std::fprintf(stderr, "error: can't write %s\n", lib_name.c_str());
+        return false;
+    }
+
+    std::fprintf(stderr, "wrote %s (%zu bytes)\n", lib_name.c_str(), lib.size());
+
+    return true;
 }
 
 // Rips one sound archive in archive mode, adding the number of sounds --only picked to `matched`. Returns the number of
 // .mini3sf files written, or -1 on an error.
-int RipArchive(const std::string& out_dir, rip::FileNames& names, const std::string& lib_base,
+int RipArchive(const fs::path& out_dir, rip::FileNames& names, const std::string& lib_base,
                const std::string& archive_path, const std::vector<uint8_t>& archive_bytes,
                const std::string& firmware_path, const std::vector<uint8_t>& firmware, const std::string& game_name,
                const Options& o, std::size_t& matched)
@@ -249,43 +319,9 @@ int RipArchive(const std::string& out_dir, rip::FileNames& names, const std::str
         wave_sounds += s.type == ntdlib::sar::SoundType::kWaveSound;
     }
 
-    // Sequences whose data isn't all in the archive would play with missing instruments.
-    std::vector<Job> complete;
-    std::size_t skipped = 0;
-    for (Job& job : jobs)
-    {
-        const auto missing = rip::MissingData(*archive, job.index);
-        if (missing.empty())
-        {
-            complete.push_back(std::move(job));
-            continue;
-        }
-
-        skipped++;
-        std::string what;
-        for (std::size_t i = 0; i < missing.size() && i < 3; i++)
-        {
-            what += (i ? ", " : "") + missing[i];
-        }
-
-        if (missing.size() > 3)
-        {
-            what += ", ...";
-        }
-
-        std::fprintf(stderr, "skipped %s: not in this archive: %s\n", job.label.c_str(), what.c_str());
-    }
-
-    // The sequences that make no sound are left out too. The length analysis finds those that don't play at a volume of
-    // 0.
-    std::size_t silent = DropMuted(complete, *archive);
-    if (o.lengths && !complete.empty())
-    {
-        AnalyzeLengths(complete, archive_bytes, firmware, o.variables, o.jobs);
-        silent += DropUnheard(complete);
-    }
-
-    if (complete.empty())
+    const std::size_t skipped = DropIncomplete(jobs, *archive);
+    const std::size_t silent = AnalyzeAndDropSilent(jobs, *archive, archive_bytes, firmware, o.variables, o);
+    if (jobs.empty())
     {
         std::fprintf(stderr, "%s: nothing to rip%s\n", archive_path.c_str(), SkippedText(skipped, silent).c_str());
         return 0;
@@ -294,14 +330,10 @@ int RipArchive(const std::string& out_dir, rip::FileNames& names, const std::str
     const Tags common = xsflib::cli::RipTags(o, game_name, "3sf", "archive");
     const std::string lib_name = names.Library(lib_base);
     const auto lib = rip::BuildArchiveLibrary(archive_path, archive_bytes, firmware_path, firmware, common);
-    fs::create_directories(out_dir);
-    if (!WriteFile(fs::path(out_dir) / xsflib::PathFromUtf8(lib_name), lib))
+    if (!WriteLibrary(out_dir, lib_name, lib))
     {
-        std::fprintf(stderr, "error: can't write %s\n", lib_name.c_str());
         return -1;
     }
-
-    std::fprintf(stderr, "wrote %s (%zu bytes)\n", lib_name.c_str(), lib.size());
 
     Tags mini_tags = common;
     if (!o.variables.empty())
@@ -313,7 +345,7 @@ int RipArchive(const std::string& out_dir, rip::FileNames& names, const std::str
     {
         return rip::BuildArchiveMini(SoundId(job), lib_name, tags);
     };
-    const int count = xsflib::cli::WriteMinis(out_dir, names, complete, mini_tags, "3sf_sound", build_mini);
+    const int count = xsflib::cli::WriteMinis(out_dir, names, jobs, mini_tags, "3sf_sound", build_mini);
     if (count >= 0)
     {
         std::fprintf(stderr, "%s: %d mini3sf files%s; %zu wave sounds not ripped (archive mode only plays sequences)\n",
@@ -324,8 +356,7 @@ int RipArchive(const std::string& out_dir, rip::FileNames& names, const std::str
 }
 
 // Finds a DSP firmware image among `paths` (read with `read`).
-std::optional<std::pair<std::string, std::vector<uint8_t>>> FindFirmware(const std::vector<std::string>& paths,
-                                                                         const FileReader& read)
+std::optional<FirmwareFile> FindFirmware(const std::vector<std::string>& paths, const FileReader& read)
 {
     for (const auto& p : paths)
     {
@@ -338,11 +369,40 @@ std::optional<std::pair<std::string, std::vector<uint8_t>>> FindFirmware(const s
         std::vector<uint8_t> data;
         if (read(p, data) && rip::IsDspFirmware(data))
         {
-            return std::make_pair(p, std::move(data));
+            return FirmwareFile{p, std::move(data)};
         }
     }
 
     return std::nullopt;
+}
+
+// The DSP firmware for a loose sound archive: the file that --firmware names, or else the firmware file among the
+// inputs, or else the first firmware file in the archive's folder.
+std::optional<FirmwareFile> LooseArchiveFirmware(const std::string& input, const Options& o)
+{
+    if (!o.firmware.path.empty())
+    {
+        return o.firmware;
+    }
+
+    if (!o.input_firmware.path.empty())
+    {
+        return o.input_firmware;
+    }
+
+    std::vector<std::string> candidates;
+    std::error_code ec;
+    for (const auto& e : fs::directory_iterator(InputPath(input).parent_path(), ec))
+    {
+        if (e.is_regular_file())
+        {
+            candidates.push_back(e.path().string());
+        }
+    }
+
+    std::sort(candidates.begin(), candidates.end());
+
+    return FindFirmware(candidates, ReadWholeFile);
 }
 
 // The file name a rip gives the DSP firmware it carries, unless it's a file from the game's RomFS, which keeps its path
@@ -406,12 +466,12 @@ constexpr char kUsage[] =
 
 // The bytes at the start of an input that tell a sound archive, a 3DS image and a DSP firmware image apart by their
 // magic. A DSP1 image has its magic at 0x100.
-constexpr std::size_t kHeadSize = 0x104;
+constexpr std::size_t kHeadSize = dsp::Dsp1Image::kMagicOffset + 4;
 
 // Returns true if `head` starts a DSP firmware image (DSP1).
 bool IsFirmwareHead(const std::string& head)
 {
-    return head.size() >= 0x104 && head.compare(0x100, 4, "DSP1") == 0;
+    return head.size() >= kHeadSize && head.compare(dsp::Dsp1Image::kMagicOffset, 4, "DSP1") == 0;
 }
 
 // Reports that --only or --bgm picked no sound, which is an error: nothing gets written.
@@ -431,6 +491,17 @@ int NoSoundMatches(const Options& o)
     }
 
     return 1;
+}
+
+// The game tag: the value of --game, or else the name in the profile, or else the name of the input.
+std::string GameName(const Options& o, const std::string& input, const rip::GameProfile* profile)
+{
+    if (!o.game_name.empty())
+    {
+        return o.game_name;
+    }
+
+    return profile ? profile->name : NameOfInput(input);
 }
 
 // Rips a loose sound archive in archive mode. Returns the exit code.
@@ -458,40 +529,18 @@ int RipLooseArchive(const std::string& input, const fs::path& out_dir, const Opt
         return 1;
     }
 
-    // The firmware comes from --firmware, then from a firmware file among the inputs, then from the archive's folder.
-    std::string firmware_file = o.firmware_file.empty() ? o.input_firmware_file : o.firmware_file;
-    std::vector<uint8_t> firmware = o.firmware_file.empty() ? o.input_firmware : o.firmware;
-    if (firmware.empty())
-    {
-        std::vector<std::string> candidates;
-        std::error_code ec;
-        for (const auto& e : fs::directory_iterator(InputPath(input).parent_path(), ec))
-        {
-            if (e.is_regular_file())
-            {
-                candidates.push_back(e.path().string());
-            }
-        }
-
-        std::sort(candidates.begin(), candidates.end());
-
-        if (auto found = FindFirmware(candidates, ReadWholeFile))
-        {
-            firmware_file = found->first;
-            firmware = std::move(found->second);
-        }
-    }
+    const std::optional<FirmwareFile> firmware = LooseArchiveFirmware(input, o);
 
     // Listing doesn't need the firmware, but it says which one a rip would use.
     if (o.list)
     {
         std::fprintf(stderr, "firmware: %s\n",
-                     firmware.empty() ? "none found, so ripping needs --firmware" : firmware_file.c_str());
+                     firmware ? firmware->path.c_str() : "none found, so ripping needs --firmware");
         std::fprintf(stderr, "%s: a sound archive (archive mode)\n", input.c_str());
         return 0;
     }
 
-    if (firmware.empty())
+    if (!firmware)
     {
         std::fprintf(stderr,
                      "error: %s: a sound archive doesn't hold the DSP firmware that plays it. Give a firmware\n"
@@ -502,13 +551,13 @@ int RipLooseArchive(const std::string& input, const fs::path& out_dir, const Opt
         return 1;
     }
 
-    std::fprintf(stderr, "firmware: %s\n", firmware_file.c_str());
+    std::fprintf(stderr, "firmware: %s\n", firmware->path.c_str());
 
     std::fprintf(stderr, "%s", kArchiveModeNotice);
 
-    const std::string game_name = o.game_name.empty() ? NameOfInput(input) : o.game_name;
+    const std::string game_name = GameName(o, input, nullptr);
     std::size_t matched = 0;
-    const int count = RipArchive(out_dir.string(), names, game_name, file_name, archive_bytes, kFirmwareName, firmware,
+    const int count = RipArchive(out_dir, names, game_name, file_name, archive_bytes, kFirmwareName, firmware->bytes,
                                  game_name, o, matched);
     if (count < 0)
     {
@@ -540,7 +589,7 @@ int RipGameInArchiveMode(const std::string& input, const rip::GameFiles& game, c
     std::fprintf(stderr, "%s", kArchiveModeNotice);
 
     std::string firmware_path = kFirmwareName;
-    std::vector<uint8_t> firmware = o.firmware;
+    std::vector<uint8_t> firmware = o.firmware.bytes;
     if (firmware.empty())
     {
         if (auto found = rip::FindGameFirmware(game, profile))
@@ -569,7 +618,7 @@ int RipGameInArchiveMode(const std::string& input, const rip::GameFiles& game, c
         return 1;
     }
 
-    const std::string game_name = o.game_name.empty() ? (profile ? profile->name : NameOfInput(input)) : o.game_name;
+    const std::string game_name = GameName(o, input, profile);
     int total = 0;
     std::size_t matched = 0;
     bool failed = false; // an archive that can't be ripped doesn't stop the others
@@ -590,8 +639,8 @@ int RipGameInArchiveMode(const std::string& input, const rip::GameFiles& game, c
 
         const std::string lib_base =
             archives.size() == 1 ? game_name : game_name + " " + fs::path(path).stem().string();
-        const int n = RipArchive(out_dir.string(), names, lib_base, path, archive_bytes, firmware_path, firmware,
-                                 game_name, o, matched);
+        const int n =
+            RipArchive(out_dir, names, lib_base, path, archive_bytes, firmware_path, firmware, game_name, o, matched);
         if (n < 0)
         {
             failed = true;
@@ -619,7 +668,7 @@ int RipGameInArchiveMode(const std::string& input, const rip::GameFiles& game, c
 int RipGameInGameMode(const std::string& input, const rip::GameFiles& game, const rip::GameProfile& profile,
                       const fs::path& out_dir, const Options& o, rip::FileNames& names)
 {
-    const std::string game_name = o.game_name.empty() ? profile.name : o.game_name;
+    const std::string game_name = GameName(o, input, &profile);
     std::fprintf(stderr, "game: %s\n", profile.name);
     for (const auto& path : game.SoundArchives())
     {
@@ -654,15 +703,7 @@ int RipGameInGameMode(const std::string& input, const rip::GameFiles& game, cons
         return NoSoundMatches(o);
     }
 
-    // The sounds that make no sound are left out. The length analysis finds the sequences that don't play at a volume
-    // of 0.
-    std::size_t silent = DropMuted(jobs, archive);
-    if (o.lengths && !jobs.empty())
-    {
-        AnalyzeLengths(jobs, archive_bytes, cdc, {}, o.jobs);
-        silent += DropUnheard(jobs);
-    }
-
+    const std::size_t silent = AnalyzeAndDropSilent(jobs, archive, archive_bytes, cdc, {}, o);
     const std::string input_name = InputPath(input).filename().string();
     if (jobs.empty())
     {
@@ -670,14 +711,10 @@ int RipGameInGameMode(const std::string& input, const rip::GameFiles& game, cons
         return 0;
     }
 
-    fs::create_directories(out_dir);
-    if (!WriteFile(out_dir / xsflib::PathFromUtf8(lib_name), *lib))
+    if (!WriteLibrary(out_dir, lib_name, *lib))
     {
-        std::fprintf(stderr, "error: can't write %s\n", lib_name.c_str());
         return 1;
     }
-
-    std::fprintf(stderr, "wrote %s (%zu bytes)\n", lib_name.c_str(), lib->size());
 
     const auto build_mini = [&](const Job& job, const Tags& tags)
     {
@@ -706,9 +743,8 @@ int RipGame(const std::string& input, const fs::path& out_dir, const Options& o,
         return 1;
     }
 
-    const uint32_t crc = static_cast<uint32_t>(crc32(0, game.code.data(), static_cast<uInt>(game.code.size())));
     std::fprintf(stderr, "program id %016llx, code.bin %zu bytes, CRC-32 %08x\n",
-                 static_cast<unsigned long long>(game.ProgramId()), game.code.size(), crc);
+                 static_cast<unsigned long long>(game.ProgramId()), game.code.size(), game.CodeCrc32());
     const rip::GameProfile* profile = rip::FindProfile(game);
     if (o.list)
     {
@@ -729,7 +765,7 @@ int RipGame(const std::string& input, const fs::path& out_dir, const Options& o,
     }
 
     const std::string mode = o.mode.empty() ? (profile ? "game" : "archive") : o.mode;
-    if (mode == "game" && (!o.only_archive.empty() || !o.firmware_file.empty() || !o.variables.empty()))
+    if (mode == "game" && (!o.only_archive.empty() || !o.firmware.path.empty() || !o.variables.empty()))
     {
         std::fprintf(stderr, "error: --archive, --firmware and --var are for archive mode (--mode archive)\n");
         return 2;
@@ -760,7 +796,7 @@ int ParseOption(const std::string& a, const std::function<std::string()>& next, 
 {
     if (a == "--firmware")
     {
-        o.firmware_file = next();
+        o.firmware.path = next();
         return 0;
     }
 
@@ -822,7 +858,7 @@ int TakeFirmwareInputs(std::vector<std::string>& inputs, Options& o)
     const std::vector<std::string> firmware_files(firmware_begin, inputs.end());
     inputs.erase(firmware_begin, inputs.end());
 
-    if (firmware_files.size() + !o.firmware_file.empty() > 1)
+    if (firmware_files.size() + !o.firmware.path.empty() > 1)
     {
         std::fprintf(stderr, "error: give only one DSP firmware file\n");
         return 2;
@@ -830,8 +866,8 @@ int TakeFirmwareInputs(std::vector<std::string>& inputs, Options& o)
 
     if (!firmware_files.empty())
     {
-        o.input_firmware_file = firmware_files[0];
-        if (!ReadFirmwareFile(o.input_firmware_file, o.input_firmware))
+        o.input_firmware.path = firmware_files[0];
+        if (!ReadFirmwareFile(o.input_firmware.path, o.input_firmware.bytes))
         {
             return 1;
         }
@@ -884,7 +920,7 @@ int BeforeInputs(std::vector<std::string>& inputs, Options& o)
 {
     SilenceStdout(); // Teakra reports unmodelled MMIO accesses on stdout
 
-    if (!o.firmware_file.empty() && !ReadFirmwareFile(o.firmware_file, o.firmware))
+    if (!o.firmware.path.empty() && !ReadFirmwareFile(o.firmware.path, o.firmware.bytes))
     {
         return 1;
     }

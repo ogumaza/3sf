@@ -1,16 +1,21 @@
 // SPDX-License-Identifier: MIT
 
-// RomFS level-3 image builder (see romfs.h).
+// The level-3 RomFS image (see romfs.h). The image is a header, a hash table and a table of entries for the
+// directories, the same two for the files, and then the files' data. Each directory lists its subdirectories and its
+// files, and each entry links to the next one in its hash table's bucket. A game's file system code follows those
+// links. The entries can therefore come in any order. This builder puts them in the order of the sorted paths.
 
 #include "horizon/romfs.h"
 
 #include <algorithm>
+#include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <memory>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "xsflib/bytes.h"
@@ -21,59 +26,112 @@ namespace threesf::horizon
 namespace
 {
 
-constexpr uint32_t kEmpty = 0xffffffff;
+using Layout = RomFsLayout;
 
-// Decodes the UTF-8 sequence that starts at s[i] and moves i past it. A malformed sequence decodes to U+FFFD, and i
-// moves past its first byte only.
-uint32_t DecodeUtf8(const std::string& s, std::size_t& i)
+// A name's hash starts from the entry offset of its directory XORed with this value.
+constexpr uint32_t kHashSeed = 123456789;
+
+// The character that stands for a UTF-8 sequence that doesn't decode.
+constexpr char16_t kReplacement = 0xfffd;
+
+// The fixed part of each kind of entry, before its name.
+constexpr uint32_t kDirEntrySize = 0x18;
+constexpr uint32_t kFileEntrySize = 0x20;
+
+// File data starts at a multiple of 16 bytes, from the start of the image and from the start of the data.
+constexpr uint64_t kDataAlignment = 16;
+
+// A directory of the tree.
+struct DirNode
 {
-    const auto [c, length] = xsflib::Utf8Character(std::string_view(s).substr(i));
-    if (length == 0)
-    {
-        i++;
-        return 0xfffd;
-    }
+    std::u16string name;
+    uint32_t parent = 0;                 // the index of the parent; the root's parent is the root
+    std::vector<uint32_t> dirs;          // the subdirectories, in the order they were made
+    std::vector<uint32_t> files;         // the files, in sorted order
+    uint32_t offset = 0;                 // the entry's offset in the directory table
+    uint32_t sibling = Layout::kNoEntry; // the offset of the next entry in the parent's list of subdirectories
+};
 
-    i += length;
-
-    return c;
-}
-
-// Converts a FILE chunk's UTF-8 path component to RomFS UTF-16.
-std::u16string Utf16(const std::string& s)
+// A file of the tree.
+struct FileNode
 {
-    std::u16string out;
-    for (std::size_t i = 0; i < s.size();)
+    std::u16string name;
+    uint32_t dir = 0;
+    uint64_t data_offset = 0; // from the start of the file data
+    uint64_t size = 0;
+    uint32_t offset = 0;                 // the entry's offset in the file table
+    uint32_t sibling = Layout::kNoEntry; // the offset of the next entry in the directory's list of files
+};
+
+// A part of a path in UTF-16. A UTF-8 sequence that doesn't decode gives U+FFFD and moves on by one byte.
+std::u16string Utf16(std::string_view part)
+{
+    std::u16string name;
+    while (!part.empty())
     {
-        const uint32_t c = DecodeUtf8(s, i);
-        if (c < 0x10000)
+        const auto [c, length] = xsflib::Utf8Character(part);
+        if (length == 0)
         {
-            out.push_back(static_cast<char16_t>(c));
+            name.push_back(kReplacement);
+            part.remove_prefix(1);
+            continue;
+        }
+
+        if (c > 0xffff)
+        {
+            name.push_back(static_cast<char16_t>(0xd800 + ((c - 0x10000) >> 10)));
+            name.push_back(static_cast<char16_t>(0xdc00 + ((c - 0x10000) & 0x3ff)));
         }
         else
         {
-            out.push_back(static_cast<char16_t>(0xd800 + ((c - 0x10000) >> 10)));
-            out.push_back(static_cast<char16_t>(0xdc00 + ((c - 0x10000) & 0x3ff)));
+            name.push_back(static_cast<char16_t>(c));
         }
+
+        part.remove_prefix(length);
     }
 
-    return out;
+    return name;
 }
 
-uint32_t HashTableCount(uint32_t entries)
+uint64_t AlignUp(uint64_t value, uint64_t alignment)
+{
+    return (value + alignment - 1) / alignment * alignment;
+}
+
+// The bytes that a name takes in its entry: two for each UTF-16 unit, padded to a multiple of 4.
+uint32_t NameField(const std::u16string& name)
+{
+    return static_cast<uint32_t>(AlignUp(2 * uint64_t{name.size()}, 4));
+}
+
+// The bucket count of a hash table for `entries` entries.
+uint32_t BucketCount(uint32_t entries)
 {
     if (entries < 3)
     {
         return 3;
     }
+
     if (entries < 19)
     {
         return entries | 1;
     }
 
+    const auto has_small_factor = [](uint32_t n)
+    {
+        for (const uint32_t prime : {2u, 3u, 5u, 7u, 11u, 13u, 17u})
+        {
+            if (n % prime == 0)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    };
+
     uint32_t count = entries;
-    while (count % 2 == 0 || count % 3 == 0 || count % 5 == 0 || count % 7 == 0 || count % 11 == 0 || count % 13 == 0 ||
-           count % 17 == 0)
+    while (has_small_factor(count))
     {
         count++;
     }
@@ -81,253 +139,284 @@ uint32_t HashTableCount(uint32_t entries)
     return count;
 }
 
-uint32_t PathHash(uint32_t parent, const std::u16string& name)
+// The hash of a name in the directory whose entry is at `dir_offset`.
+uint32_t NameHash(uint32_t dir_offset, const std::u16string& name)
 {
-    uint32_t hash = parent ^ 123456789;
-    for (char16_t c : name)
+    uint32_t hash = dir_offset ^ kHashSeed;
+    for (const char16_t c : name)
     {
-        hash = (hash >> 5) | (hash << 27);
-        hash ^= c;
+        hash = std::rotr(hash, 5) ^ static_cast<uint32_t>(c);
     }
 
     return hash;
 }
 
-uint32_t Align(uint32_t v, uint32_t a)
+// The index of the subdirectory of `parent` called `name`. A missing one is made, at the end of the list of all
+// directories and of its parent's list.
+uint32_t Subdirectory(std::vector<DirNode>& dirs, uint32_t parent, std::u16string name)
 {
-    return (v + a - 1) / a * a;
-}
-
-struct Dir
-{
-    std::u16string name;
-    int parent = -1;
-    std::vector<int> children; // directory indices
-    std::vector<int> files;    // file indices
-    uint32_t offset = 0;       // offset in the directory metadata table
-};
-
-struct FileEntry
-{
-    std::u16string name;
-    int dir = 0;
-    uint64_t data_offset = 0; // relative to the file data section
-    uint64_t data_size = 0;
-    uint32_t offset = 0; // offset in the file metadata table
-    std::shared_ptr<const std::vector<uint8_t>> data;
-};
-
-void Put32(std::vector<uint8_t>& v, std::size_t off, uint32_t x)
-{
-    xsflib::StoreLe32(v.data() + off, x);
-}
-
-void Put64(std::vector<uint8_t>& v, std::size_t off, uint64_t x)
-{
-    xsflib::StoreLe64(v.data() + off, x);
-}
-
-void PutUtf16(std::vector<uint8_t>& v, std::size_t off, const std::u16string& s)
-{
-    for (std::size_t i = 0; i < s.size(); i++)
+    for (const uint32_t dir : dirs[parent].dirs)
     {
-        xsflib::StoreLe16(v.data() + off + 2 * i, s[i]);
+        if (dirs[dir].name == name)
+        {
+            return dir;
+        }
     }
+
+    const auto index = static_cast<uint32_t>(dirs.size());
+    DirNode dir;
+    dir.name = std::move(name);
+    dir.parent = parent;
+    dirs.push_back(std::move(dir));
+    dirs[parent].dirs.push_back(index);
+
+    return index;
+}
+
+// The entry offset of the first item in `list`, or kNoEntry for an empty list.
+template <typename Node>
+uint32_t FirstOffset(const std::vector<uint32_t>& list, const std::vector<Node>& nodes)
+{
+    return list.empty() ? Layout::kNoEntry : nodes[list.front()].offset;
+}
+
+// Writes a name in UTF-16LE at `out`.
+void StoreName(uint8_t* out, const std::u16string& name)
+{
+    for (std::size_t i = 0; i < name.size(); i++)
+    {
+        xsflib::StoreLe16(out + 2 * i, static_cast<uint16_t>(name[i]));
+    }
+}
+
+// The directories and files of an image, in the order of their entries. The root comes first among the directories.
+// The others come in the order that the sorted paths first name them. The files come in sorted order.
+struct Tree
+{
+    std::vector<DirNode> dirs;
+    std::vector<FileNode> files;
+};
+
+// The tree of files sorted by path. Each part of a path before the last names a directory inside the one before it.
+// The last part names the file. Empty parts are names too.
+Tree BuildTree(const std::vector<RomFs::File>& files)
+{
+    Tree tree;
+    tree.dirs.resize(1);
+    tree.files.reserve(files.size());
+    for (const RomFs::File& file : files)
+    {
+        std::string_view path = file.path;
+        uint32_t dir = 0;
+        for (std::size_t slash = path.find('/'); slash != std::string_view::npos; slash = path.find('/'))
+        {
+            dir = Subdirectory(tree.dirs, dir, Utf16(path.substr(0, slash)));
+            path.remove_prefix(slash + 1);
+        }
+
+        FileNode node;
+        node.name = Utf16(path);
+        node.dir = dir;
+        node.size = file.data ? file.data->size() : 0;
+        tree.dirs[dir].files.push_back(static_cast<uint32_t>(tree.files.size()));
+        tree.files.push_back(std::move(node));
+    }
+
+    return tree;
+}
+
+// The lengths of the directory table, of the file table and of the file data.
+struct Lengths
+{
+    uint32_t dir_table = 0;
+    uint32_t file_table = 0;
+    uint64_t data = 0;
+};
+
+// Gives each entry its offset in its table and each file its place in the data. Each entry then links to the next
+// entry in its directory's list. The last of each list and the root link to none.
+Lengths PlaceEntries(Tree& tree)
+{
+    Lengths lengths;
+    for (DirNode& dir : tree.dirs)
+    {
+        dir.offset = lengths.dir_table;
+        lengths.dir_table += kDirEntrySize + NameField(dir.name);
+    }
+
+    for (FileNode& node : tree.files)
+    {
+        node.offset = lengths.file_table;
+        lengths.file_table += kFileEntrySize + NameField(node.name);
+        lengths.data = AlignUp(lengths.data, kDataAlignment);
+        node.data_offset = lengths.data;
+        lengths.data += node.size;
+    }
+
+    for (const DirNode& dir : tree.dirs)
+    {
+        for (std::size_t i = 0; i + 1 < dir.dirs.size(); i++)
+        {
+            tree.dirs[dir.dirs[i]].sibling = tree.dirs[dir.dirs[i + 1]].offset;
+        }
+
+        for (std::size_t i = 0; i + 1 < dir.files.size(); i++)
+        {
+            tree.files[dir.files[i]].sibling = tree.files[dir.files[i + 1]].offset;
+        }
+    }
+
+    return lengths;
+}
+
+// The image up to the file data: the header, the directories' hash table and entries, the files' hash table and
+// entries, and zeros up to the data. The data starts at a multiple of 16 bytes.
+std::vector<uint8_t> BuildHead(const Tree& tree, const Lengths& lengths)
+{
+    const uint32_t dir_buckets = BucketCount(static_cast<uint32_t>(tree.dirs.size()));
+    const uint32_t file_buckets = BucketCount(static_cast<uint32_t>(tree.files.size()));
+    const uint32_t dir_hash_offset = Layout::kHeaderSize;
+    const uint32_t dir_table_offset = dir_hash_offset + 4 * dir_buckets;
+    const uint32_t file_hash_offset = dir_table_offset + lengths.dir_table;
+    const uint32_t file_table_offset = file_hash_offset + 4 * file_buckets;
+    const auto data_offset =
+        static_cast<uint32_t>(AlignUp(uint64_t{file_table_offset} + lengths.file_table, kDataAlignment));
+
+    std::vector<uint8_t> bytes(data_offset, 0);
+    uint8_t* const head = bytes.data();
+
+    // The header starts with its size. The offset and the length of each table follow. The data's offset comes last.
+    xsflib::StoreLe32(head, Layout::kHeaderSize);
+    xsflib::StoreLe32(head + Layout::kDirHashOffset, dir_hash_offset);
+    xsflib::StoreLe32(head + Layout::kDirHashLength, 4 * dir_buckets);
+    xsflib::StoreLe32(head + Layout::kDirMetaOffset, dir_table_offset);
+    xsflib::StoreLe32(head + Layout::kDirMetaLength, lengths.dir_table);
+    xsflib::StoreLe32(head + Layout::kFileHashOffset, file_hash_offset);
+    xsflib::StoreLe32(head + Layout::kFileHashLength, 4 * file_buckets);
+    xsflib::StoreLe32(head + Layout::kFileMetaOffset, file_table_offset);
+    xsflib::StoreLe32(head + Layout::kFileMetaLength, lengths.file_table);
+    xsflib::StoreLe32(head + Layout::kFileDataOffset, data_offset);
+
+    // Each entry links to the entry that its bucket held before it. The bucket then holds the entry.
+    std::vector<uint32_t> dir_hash(dir_buckets, Layout::kNoEntry);
+    for (const DirNode& dir : tree.dirs)
+    {
+        uint8_t* entry = head + dir_table_offset + dir.offset;
+        const uint32_t parent = tree.dirs[dir.parent].offset;
+        uint32_t& bucket = dir_hash[NameHash(parent, dir.name) % dir_buckets];
+        xsflib::StoreLe32(entry + Layout::kDirParent, parent);
+        xsflib::StoreLe32(entry + Layout::kDirSibling, dir.sibling);
+        xsflib::StoreLe32(entry + Layout::kDirFirstDir, FirstOffset(dir.dirs, tree.dirs));
+        xsflib::StoreLe32(entry + Layout::kDirFirstFile, FirstOffset(dir.files, tree.files));
+        xsflib::StoreLe32(entry + Layout::kDirHashNext, bucket);
+        xsflib::StoreLe32(entry + Layout::kDirNameLength, static_cast<uint32_t>(2 * dir.name.size()));
+        StoreName(entry + Layout::kDirName, dir.name);
+        bucket = dir.offset;
+    }
+
+    std::vector<uint32_t> file_hash(file_buckets, Layout::kNoEntry);
+    for (const FileNode& node : tree.files)
+    {
+        uint8_t* entry = head + file_table_offset + node.offset;
+        const uint32_t dir = tree.dirs[node.dir].offset;
+        uint32_t& bucket = file_hash[NameHash(dir, node.name) % file_buckets];
+        xsflib::StoreLe32(entry + Layout::kFileDir, dir);
+        xsflib::StoreLe32(entry + Layout::kFileSibling, node.sibling);
+        xsflib::StoreLe64(entry + Layout::kFileData, node.data_offset);
+        xsflib::StoreLe64(entry + Layout::kFileSize, node.size);
+        xsflib::StoreLe32(entry + Layout::kFileHashNext, bucket);
+        xsflib::StoreLe32(entry + Layout::kFileNameLength, static_cast<uint32_t>(2 * node.name.size()));
+        StoreName(entry + Layout::kFileName, node.name);
+        bucket = node.offset;
+    }
+
+    for (std::size_t i = 0; i < dir_buckets; i++)
+    {
+        xsflib::StoreLe32(head + dir_hash_offset + 4 * i, dir_hash[i]);
+    }
+
+    for (std::size_t i = 0; i < file_buckets; i++)
+    {
+        xsflib::StoreLe32(head + file_hash_offset + 4 * i, file_hash[i]);
+    }
+
+    return bytes;
 }
 
 } // namespace
 
 RomFs::RomFs(std::vector<File> files)
 {
-    std::vector<Dir> dirs(1); // root
-    std::vector<FileEntry> entries;
-    std::sort(files.begin(), files.end(), [](const File& a, const File& b) { return a.path < b.path; });
-    for (auto& f : files)
+    std::stable_sort(files.begin(), files.end(), [](const File& a, const File& b) { return a.path < b.path; });
+    Tree tree = BuildTree(files);
+    const Lengths lengths = PlaceEntries(tree);
+    head_ = BuildHead(tree, lengths);
+
+    // The files' data stays in their buffers. Empty files take no place in it.
+    const uint64_t data_offset = head_.size();
+    for (std::size_t i = 0; i < files.size(); i++)
     {
-        // Find or create each directory on the file's path.
-        int dir = 0;
-        std::size_t start = 0;
-        while (true)
+        const FileNode& node = tree.files[i];
+        if (node.size > 0)
         {
-            const std::size_t slash = f.path.find('/', start);
-            if (slash == std::string::npos)
-            {
-                break;
-            }
-
-            const std::u16string part = Utf16(f.path.substr(start, slash - start));
-            int found = -1;
-            for (int c : dirs[dir].children)
-            {
-                if (dirs[c].name == part)
-                {
-                    found = c;
-                }
-            }
-            if (found < 0)
-            {
-                Dir d;
-                d.name = part;
-                d.parent = dir;
-                dirs.push_back(d);
-                found = static_cast<int>(dirs.size()) - 1;
-                dirs[dir].children.push_back(found);
-            }
-
-            dir = found;
-            start = slash + 1;
+            data_.push_back({data_offset + node.data_offset, node.size, std::move(files[i].data)});
         }
-
-        FileEntry e;
-        e.name = Utf16(f.path.substr(start));
-        e.dir = dir;
-        e.data = f.data;
-        e.data_size = f.data->size();
-        entries.push_back(e);
-        dirs[dir].files.push_back(static_cast<int>(entries.size()) - 1);
     }
 
-    // Lay out metadata tables (directories in creation order, files in insertion order).
-    uint32_t dir_table = 0;
-    for (auto& d : dirs)
-    {
-        d.offset = dir_table;
-        dir_table += 0x18 + Align(static_cast<uint32_t>(d.name.size() * 2), 4);
-    }
+    size_ = data_offset + lengths.data;
+}
 
-    uint32_t file_table = 0;
-    uint64_t data = 0;
-    for (auto& e : entries)
-    {
-        e.offset = file_table;
-        file_table += 0x20 + Align(static_cast<uint32_t>(e.name.size() * 2), 4);
-        data = (data + 0xf) & ~uint64_t{0xf};
-        e.data_offset = data;
-        data += e.data_size;
-    }
-
-    const uint32_t dir_buckets = HashTableCount(static_cast<uint32_t>(dirs.size()));
-    const uint32_t file_buckets = HashTableCount(static_cast<uint32_t>(entries.size()));
-    constexpr uint32_t kHeaderSize = 0x28;
-    constexpr uint32_t kDirHashOffset = kHeaderSize;
-    const uint32_t dir_hash_len = dir_buckets * 4;
-    const uint32_t dir_meta_off = kDirHashOffset + dir_hash_len;
-    const uint32_t file_hash_off = dir_meta_off + dir_table;
-    const uint32_t file_hash_len = file_buckets * 4;
-    const uint32_t file_meta_off = file_hash_off + file_hash_len;
-    data_offset_ = Align(file_meta_off + file_table, 0x10);
-
-    meta_.assign(static_cast<std::size_t>(data_offset_), 0);
-    Put32(meta_, 0x00, kHeaderSize);
-    Put32(meta_, 0x04, kDirHashOffset);
-    Put32(meta_, 0x08, dir_hash_len);
-    Put32(meta_, 0x0c, dir_meta_off);
-    Put32(meta_, 0x10, dir_table);
-    Put32(meta_, 0x14, file_hash_off);
-    Put32(meta_, 0x18, file_hash_len);
-    Put32(meta_, 0x1c, file_meta_off);
-    Put32(meta_, 0x20, file_table);
-    Put32(meta_, 0x24, static_cast<uint32_t>(data_offset_));
-
-    std::vector<uint32_t> dir_hash(dir_buckets, kEmpty);
-    std::vector<uint32_t> file_hash(file_buckets, kEmpty);
-
-    // Directory entries
-    for (std::size_t i = 0; i < dirs.size(); i++)
-    {
-        const Dir& d = dirs[i];
-        const std::size_t off = dir_meta_off + d.offset;
-        const uint32_t parent_off = d.parent < 0 ? 0 : dirs[d.parent].offset;
-        uint32_t sibling = kEmpty;
-        if (d.parent >= 0)
-        {
-            const auto& sibs = dirs[d.parent].children;
-            auto it = std::find(sibs.begin(), sibs.end(), static_cast<int>(i));
-            if (it + 1 != sibs.end())
-            {
-                sibling = dirs[*(it + 1)].offset;
-            }
-        }
-
-        Put32(meta_, off + 0x00, parent_off);
-        Put32(meta_, off + 0x04, sibling);
-        Put32(meta_, off + 0x08, d.children.empty() ? kEmpty : dirs[d.children[0]].offset);
-        Put32(meta_, off + 0x0c, d.files.empty() ? kEmpty : entries[d.files[0]].offset);
-        const uint32_t bucket = PathHash(parent_off, d.name) % dir_buckets;
-        Put32(meta_, off + 0x10, dir_hash[bucket]);
-        dir_hash[bucket] = d.offset;
-        Put32(meta_, off + 0x14, static_cast<uint32_t>(d.name.size() * 2));
-        PutUtf16(meta_, off + 0x18, d.name);
-    }
-
-    // File entries
-    for (std::size_t i = 0; i < entries.size(); i++)
-    {
-        const FileEntry& e = entries[i];
-        const std::size_t off = file_meta_off + e.offset;
-        const auto& sibs = dirs[e.dir].files;
-        auto it = std::find(sibs.begin(), sibs.end(), static_cast<int>(i));
-        const uint32_t sibling = (it + 1 != sibs.end()) ? entries[*(it + 1)].offset : kEmpty;
-        const uint32_t dir_off = dirs[e.dir].offset;
-        Put32(meta_, off + 0x00, dir_off);
-        Put32(meta_, off + 0x04, sibling);
-        Put64(meta_, off + 0x08, e.data_offset);
-        Put64(meta_, off + 0x10, e.data_size);
-        const uint32_t bucket = PathHash(dir_off, e.name) % file_buckets;
-        Put32(meta_, off + 0x18, file_hash[bucket]);
-        file_hash[bucket] = e.offset;
-        Put32(meta_, off + 0x1c, static_cast<uint32_t>(e.name.size() * 2));
-        PutUtf16(meta_, off + 0x20, e.name);
-    }
-
-    for (uint32_t b = 0; b < dir_buckets; b++)
-    {
-        Put32(meta_, kDirHashOffset + 4 * b, dir_hash[b]);
-    }
-
-    for (uint32_t b = 0; b < file_buckets; b++)
-    {
-        Put32(meta_, file_hash_off + 4 * b, file_hash[b]);
-    }
-
-    for (auto& e : entries)
-    {
-        placements_.push_back({data_offset_ + e.data_offset, e.data});
-    }
-
-    size_ = data_offset_ + data;
+uint64_t RomFs::Size() const
+{
+    return size_;
 }
 
 uint64_t RomFs::Read(uint64_t offset, uint64_t length, uint8_t* dst) const
 {
-    // A read of nothing may come without a buffer, and memset and memcpy mustn't be given a null pointer.
     if (offset >= size_ || length == 0)
     {
         return 0;
     }
 
-    length = std::min(length, size_ - offset);
-    std::memset(dst, 0, static_cast<std::size_t>(length));
+    const uint64_t count = std::min(length, size_ - offset);
+    const uint64_t end = offset + count;
+    uint64_t at = offset;
 
-    // Metadata
-    if (offset < meta_.size())
+    // The header, the tables and the zeros after them.
+    if (at < head_.size())
     {
-        const uint64_t n = std::min<uint64_t>(length, meta_.size() - offset);
-        std::memcpy(dst, meta_.data() + offset, static_cast<std::size_t>(n));
+        const auto n = static_cast<std::size_t>(std::min<uint64_t>(end, head_.size()) - at);
+        std::memcpy(dst, head_.data() + at, n);
+        dst += n;
+        at += n;
     }
 
-    // File data
-    for (const auto& p : placements_)
+    // The files' data, with zeros in the gaps between files.
+    const auto past = [](const Data& data, uint64_t position)
     {
-        const uint64_t begin = p.offset, end = p.offset + p.data->size();
-        const uint64_t lo = std::max(begin, offset), hi = std::min(end, offset + length);
-        if (lo < hi)
+        return data.offset + data.size <= position;
+    };
+    auto data = std::lower_bound(data_.begin(), data_.end(), at, past);
+    while (at < end)
+    {
+        const uint64_t start = data == data_.end() ? end : std::min(end, data->offset);
+        if (at < start)
         {
-            std::memcpy(dst + (lo - offset), p.data->data() + (lo - begin), static_cast<std::size_t>(hi - lo));
+            const auto n = static_cast<std::size_t>(start - at);
+            std::memset(dst, 0, n);
+            dst += n;
+            at = start;
+            continue;
         }
+
+        const auto n = static_cast<std::size_t>(std::min(end, data->offset + data->size) - at);
+        std::memcpy(dst, data->bytes->data() + static_cast<std::size_t>(at - data->offset), n);
+        dst += n;
+        at += n;
+        ++data;
     }
 
-    return length;
+    return count;
 }
 
 } // namespace threesf::horizon

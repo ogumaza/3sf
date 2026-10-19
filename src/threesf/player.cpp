@@ -5,7 +5,6 @@
 #include "threesf/player.h"
 
 #include <cstdint>
-#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -14,19 +13,10 @@
 
 #include "horizon/system.h"
 #include "threesf/archive_player.h"
+#include "threesf/game_mode.h"
 
 namespace threesf
 {
-namespace
-{
-
-// Emulated time run per step while producing output: 1 ms of ARM11 cycles.
-constexpr uint64_t kStepCycles = horizon::kArmClock / 1000;
-
-// Longest time allowed from boot until the driver reports that the sound plays.
-constexpr uint64_t kBootTimeout = 10 * horizon::kArmClock;
-
-} // namespace
 
 struct Player::SourceSnapshot : xsflib::player::ModeSnapshot<ArchivePlayer::Snapshot, horizon::System::Snapshot>
 {
@@ -83,38 +73,10 @@ bool Player::StartSource()
     }
 
     archive_.reset();
-
-    const ProcessDescriptor& d = *set_.descriptor;
-    horizon::ProcessImage image;
-    image.entry = d.entry;
-    image.stack_size = d.stack_size;
-    image.priority = static_cast<int32_t>(d.priority);
-    for (const auto& m : set_.memory)
-    {
-        image.memory.push_back({m.address, m.data});
-    }
-
-    // A FILE chunk replaces an earlier one with the same path.
-    std::map<std::string, const std::vector<uint8_t>*> files;
-    for (const auto& f : set_.files)
-    {
-        files[f.path] = &f.data;
-    }
-
-    for (const auto& [path, data] : files)
-    {
-        image.files.push_back({path, std::make_shared<const std::vector<uint8_t>>(*data)});
-    }
-
-    horizon::KernelConfig config;
-    config.app_memory = d.app_memory;
-    system_ = std::make_unique<horizon::System>(image, config);
-    system_->GetKernel().log_ = [](const std::string&) // drop the guest's debug output
-    {
-    };
+    system_ = MakeGameSystem(set_);
 
     // Run until the driver reports that the sound plays; discard the silence before it.
-    return RunUntilSoundPlays(kBootTimeout);
+    return RunUntilSoundPlays(kGameBootTimeout);
 }
 
 bool Player::RunStep()
@@ -130,7 +92,7 @@ bool Player::RunStep()
     }
 
     horizon::Kernel& k = system_->GetKernel();
-    switch (k.RunUntil(k.Ticks() + kStepCycles))
+    switch (k.RunUntil(k.Ticks() + kGameStepCycles))
     {
     case horizon::Kernel::RunResult::kOk:
         return true;

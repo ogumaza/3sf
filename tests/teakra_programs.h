@@ -35,74 +35,6 @@ enum class Kind : uint8_t
     kThrows, // undefined, or the interpreter throws for it whatever the state (not something to test)
 };
 
-// Marks the opcodes the interpreter throws for from a reset state, which programs leave out.
-inline void FindThrowing(Teakra::Teakra& dsp, std::vector<Kind>& kinds)
-{
-    for (uint32_t op = 0; op < 0x10000; ++op)
-    {
-        if (kinds[op] != Kind::kOrdinary)
-        {
-            continue;
-        }
-
-        dsp.Reset();
-        uint8_t* memory = dsp.GetDspMemory();
-        memory[0] = static_cast<uint8_t>(op);
-        memory[1] = static_cast<uint8_t>(op >> 8);
-        memory[2] = memory[3] = 0;
-
-        try
-        {
-            dsp.Run(1);
-        }
-        catch (const std::exception&)
-        {
-            kinds[op] = Kind::kThrows;
-        }
-    }
-}
-
-inline std::vector<Kind>& Kinds()
-{
-    static std::vector<Kind> kinds = []
-    {
-        static const char* const kFlow[] = {"br",   "brr",  "call",  "calla", "callr", "ret",
-                                            "rets", "reti", "retd",  "retic", "retid", "retidc",
-                                            "rep",  "trap", "break", "cntx",  "eint",  "dint"};
-
-        std::vector<Kind> table(0x10000, Kind::kOrdinary);
-        for (uint32_t op = 0; op < 0x10000; ++op)
-        {
-            const std::vector<std::string> tokens = Teakra::Disassembler::GetTokenList(static_cast<uint16_t>(op));
-            if (tokens.empty() || tokens[0] == "[ERROR]")
-            {
-                table[op] = Kind::kThrows;
-                continue;
-            }
-
-            if (tokens[0] == "bkrep")
-            {
-                table[op] = Kind::kBlockRepeat;
-            }
-            for (const char* name : kFlow)
-            {
-                if (tokens[0] == name)
-                {
-                    table[op] = Kind::kFlow;
-                }
-            }
-        }
-
-        return table;
-    }();
-    return kinds;
-}
-
-inline Kind KindOf(uint16_t opcode)
-{
-    return Kinds()[opcode];
-}
-
 // Sets TEAKRA_JIT while a DSP is made, which is when its JIT reads it.
 class JitSetting
 {
@@ -143,6 +75,84 @@ private:
     std::string old_;
     bool had_ = false;
 };
+
+// A DSP with the JIT or without. Each program gets new ones: Reset leaves some MMIO registers as they were.
+inline std::unique_ptr<Teakra::Teakra> MakeDsp(bool with_jit)
+{
+    JitSetting setting(with_jit ? nullptr : "0");
+    return std::make_unique<Teakra::Teakra>(Teakra::UserConfig{});
+}
+
+// Marks the opcodes the interpreter throws for from a reset state, which programs leave out.
+inline void FindThrowing(Teakra::Teakra& dsp, std::vector<Kind>& kinds)
+{
+    for (uint32_t op = 0; op < 0x10000; ++op)
+    {
+        if (kinds[op] != Kind::kOrdinary)
+        {
+            continue;
+        }
+
+        dsp.Reset();
+        uint8_t* memory = dsp.GetDspMemory();
+        memory[0] = static_cast<uint8_t>(op);
+        memory[1] = static_cast<uint8_t>(op >> 8);
+        memory[2] = memory[3] = 0;
+
+        try
+        {
+            dsp.Run(1);
+        }
+        catch (const std::exception&)
+        {
+            kinds[op] = Kind::kThrows;
+        }
+    }
+}
+
+// The kind of each opcode. The first call runs each ordinary opcode once on a DSP (FindThrowing). Teakra may report
+// MMIO on stdout during those runs. The tests therefore make the first call after SilenceStdout.
+inline const std::vector<Kind>& Kinds()
+{
+    static const std::vector<Kind> kinds = []
+    {
+        static const char* const kFlow[] = {"br",   "brr",  "call",  "calla", "callr", "ret",
+                                            "rets", "reti", "retd",  "retic", "retid", "retidc",
+                                            "rep",  "trap", "break", "cntx",  "eint",  "dint"};
+
+        std::vector<Kind> table(0x10000, Kind::kOrdinary);
+        for (uint32_t op = 0; op < 0x10000; ++op)
+        {
+            const std::vector<std::string> tokens = Teakra::Disassembler::GetTokenList(static_cast<uint16_t>(op));
+            if (tokens.empty() || tokens[0] == "[ERROR]")
+            {
+                table[op] = Kind::kThrows;
+                continue;
+            }
+
+            if (tokens[0] == "bkrep")
+            {
+                table[op] = Kind::kBlockRepeat;
+            }
+            for (const char* name : kFlow)
+            {
+                if (tokens[0] == name)
+                {
+                    table[op] = Kind::kFlow;
+                }
+            }
+        }
+
+        FindThrowing(*MakeDsp(false), table);
+        return table;
+    }();
+    return kinds;
+}
+
+inline Kind KindOf(uint16_t opcode)
+{
+    return Kinds()[opcode];
+}
 
 // A random state: data, pointers, flags and the modes that decide how the JIT translates.
 inline void Randomize(Teakra::RegisterState& r, std::mt19937_64& rng)
@@ -302,11 +312,19 @@ inline std::string FieldAt(std::size_t offset)
     return "offset " + std::to_string(offset);
 }
 
-// A DSP with the JIT or without. Each program gets new ones: Reset leaves some MMIO registers as they were.
-inline std::unique_ptr<Teakra::Teakra> MakeDsp(bool with_jit)
+// Runs `dsp` for `cycles` cycles. Returns what the run threw, or an empty string.
+inline std::string RunCatching(Teakra::Teakra& dsp, uint32_t cycles)
 {
-    JitSetting setting(with_jit ? nullptr : "0");
-    return std::make_unique<Teakra::Teakra>(Teakra::UserConfig{});
+    try
+    {
+        dsp.Run(cycles);
+    }
+    catch (const std::exception& e)
+    {
+        return std::string("threw: ") + e.what();
+    }
+
+    return {};
 }
 
 // DSP memory for a program: few jumps (and some block repeats) in program memory, and random data.

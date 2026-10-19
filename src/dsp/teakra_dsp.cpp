@@ -28,17 +28,6 @@ namespace threesf::dsp
 namespace
 {
 
-// The fields of a DSP1 image's header that matter here (3dbrew, "DSP Binary"). The header and its table of at most 10
-// segment records take the first 0x300 bytes.
-constexpr std::size_t kHeaderSize = 0x300;
-constexpr std::size_t kMagicOffset = 0x100;
-constexpr std::size_t kSegmentCountOffset = 0x10E;
-constexpr std::size_t kFlagsOffset = 0x10F;
-constexpr std::size_t kSegmentTableOffset = 0x120;
-constexpr std::size_t kSegmentRecordSize = 0x30;
-constexpr std::size_t kSegmentTypeOffset = 15; // in a record, after the offset, word address, size and padding
-constexpr unsigned kMaxSegments = 10;
-
 // Header flag: the firmware reports 1 on reply registers 0, 1 and 2 once it runs. Flag bit 1 asks for a special segment
 // filled from the console's configuration. That one isn't loaded: 3SF never has, and loading it could change the
 // output.
@@ -95,13 +84,13 @@ struct Segment
 // Checks a DSP1 image. Returns the segments to copy into DSP RAM, in table order, and throws if the image is broken.
 std::vector<Segment> ReadSegments(std::span<const uint8_t> image)
 {
-    if (image.size() < kHeaderSize || std::memcmp(image.data() + kMagicOffset, "DSP1", 4) != 0)
+    if (image.size() < Dsp1Image::kHeaderSize || std::memcmp(image.data() + Dsp1Image::kMagicOffset, "DSP1", 4) != 0)
     {
         throw std::runtime_error("DSP: the firmware isn't a DSP1 image");
     }
 
-    const unsigned count = image[kSegmentCountOffset];
-    if (count > kMaxSegments)
+    const unsigned count = image[Dsp1Image::kSegmentCountOffset];
+    if (count > Dsp1Image::kMaxSegments)
     {
         throw std::runtime_error("DSP: the firmware has " + std::to_string(count) +
                                  " segments; at most 10 are supported");
@@ -110,16 +99,16 @@ std::vector<Segment> ReadSegments(std::span<const uint8_t> image)
     std::vector<Segment> segments;
     for (unsigned i = 0; i < count; i++)
     {
-        const uint8_t* record = image.data() + kSegmentTableOffset + i * kSegmentRecordSize;
-        const uint8_t type = record[kSegmentTypeOffset];
+        const uint8_t* record = image.data() + Dsp1Image::kSegmentTableOffset + i * Dsp1Image::kSegmentRecordSize;
+        const uint8_t type = record[Dsp1Image::kSegmentTypeOffset];
         if (type > kDataMemoryType)
         {
             continue;
         }
 
         const uint64_t offset = xsflib::LoadLe32(record);
-        const uint64_t address = xsflib::LoadLe32(record + 4);
-        const uint64_t size = xsflib::LoadLe32(record + 8);
+        const uint64_t address = xsflib::LoadLe32(record + Dsp1Image::kSegmentAddressOffset);
+        const uint64_t size = xsflib::LoadLe32(record + Dsp1Image::kSegmentSizeOffset);
         if (offset + size > image.size())
         {
             throw std::runtime_error("DSP: firmware segment " + std::to_string(i) + " lies outside the image");
@@ -400,7 +389,7 @@ void TeakraDsp::LoadComponent(std::span<const uint8_t> image)
         std::copy_n(image.data() + segment.source, segment.size, ram + segment.destination);
     }
 
-    if (image[kFlagsOffset] & kReportsReady)
+    if (image[Dsp1Image::kFlagsOffset] & kReportsReady)
     {
         // The firmware reports 1 on reply registers 0, 1 and 2, in order. Discard other values. All reads from one
         // register share a timeout so unexpected replies cannot keep the player waiting indefinitely.
