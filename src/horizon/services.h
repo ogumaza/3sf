@@ -14,6 +14,7 @@
 #include <string>
 #include <vector>
 
+#include "dsp/dsp.h"
 #include "dsp/teakra_dsp.h"
 #include "horizon/ipc.h"
 #include "horizon/kernel.h"

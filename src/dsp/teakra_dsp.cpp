@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "xsflib/bytes.h"
+#include "xsflib/memory_image.h"
 #include <teakra/teakra.h>
 
 #include "dsp/dsp.h"
@@ -84,7 +85,8 @@ struct Segment
 // Checks a DSP1 image. Returns the segments to copy into DSP RAM, in table order, and throws if the image is broken.
 std::vector<Segment> ReadSegments(std::span<const uint8_t> image)
 {
-    if (image.size() < Dsp1Image::kHeaderSize || std::memcmp(image.data() + Dsp1Image::kMagicOffset, "DSP1", 4) != 0)
+    if (image.size() < Dsp1Image::kHeaderSize ||
+        std::memcmp(image.data() + Dsp1Image::kMagicOffset, Dsp1Image::kMagic.data(), Dsp1Image::kMagic.size()) != 0)
     {
         throw std::runtime_error("DSP: the firmware isn't a DSP1 image");
     }

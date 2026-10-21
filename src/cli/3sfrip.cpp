@@ -57,9 +57,11 @@
 #include "common/quiet_stdout.h"
 #include "common/sar_options.h"
 #include "dsp/dsp.h"
+#include "rip/game.h"
 #include "rip/length.h"
 #include "rip/music.h"
 #include "rip/rip.h"
+#include "threesf/format.h"
 
 using namespace threesf;
 namespace fs = std::filesystem;
@@ -466,12 +468,13 @@ constexpr char kUsage[] =
 
 // The bytes at the start of an input that tell a sound archive, a 3DS image and a DSP firmware image apart by their
 // magic. A DSP1 image has its magic at 0x100.
-constexpr std::size_t kHeadSize = dsp::Dsp1Image::kMagicOffset + 4;
+constexpr std::size_t kHeadSize = dsp::Dsp1Image::kMagicOffset + dsp::Dsp1Image::kMagic.size();
 
 // Returns true if `head` starts a DSP firmware image (DSP1).
 bool IsFirmwareHead(const std::string& head)
 {
-    return head.size() >= kHeadSize && head.compare(dsp::Dsp1Image::kMagicOffset, 4, "DSP1") == 0;
+    return head.size() >= kHeadSize &&
+           head.compare(dsp::Dsp1Image::kMagicOffset, dsp::Dsp1Image::kMagic.size(), dsp::Dsp1Image::kMagic) == 0;
 }
 
 // Reports that --only or --bgm picked no sound, which is an error: nothing gets written.
@@ -679,10 +682,10 @@ int RipGameInGameMode(const std::string& input, const rip::GameFiles& game, cons
         }
     }
 
-    std::vector<uint8_t> archive_bytes, cdc;
-    if (!game.read_romfs(profile.archive, archive_bytes) || !game.read_romfs(profile.dsp_component, cdc))
+    std::vector<uint8_t> archive_bytes, firmware;
+    if (!game.read_romfs(profile.archive, archive_bytes) || !game.read_romfs(profile.firmware, firmware))
     {
-        std::fprintf(stderr, "error: can't read %s or %s\n", profile.archive, profile.dsp_component);
+        std::fprintf(stderr, "error: can't read %s or %s\n", profile.archive, profile.firmware);
         return 1;
     }
 
@@ -703,7 +706,7 @@ int RipGameInGameMode(const std::string& input, const rip::GameFiles& game, cons
         return NoSoundMatches(o);
     }
 
-    const std::size_t silent = AnalyzeAndDropSilent(jobs, archive, archive_bytes, cdc, {}, o);
+    const std::size_t silent = AnalyzeAndDropSilent(jobs, archive, archive_bytes, firmware, {}, o);
     const std::string input_name = InputPath(input).filename().string();
     if (jobs.empty())
     {

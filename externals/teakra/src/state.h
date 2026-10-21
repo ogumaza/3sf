@@ -12,10 +12,10 @@
 #include <bitset>
 #include <cstddef>
 #include <cstring>
-#include <queue>
 #include <stdexcept>
 #include <type_traits>
 #include <vector>
+#include <queue>
 #include "common_types.h"
 
 namespace Teakra {

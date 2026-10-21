@@ -365,7 +365,6 @@ uint32_t Kernel::Lookup(uint32_t handle) const
     }
 
     const auto entry = FindHandle(handle);
-
     return entry != s.handles.end() ? entry->object : kNone;
 }
 
@@ -1967,7 +1966,6 @@ std::vector<Kernel::HandleEntry>::const_iterator Kernel::FindHandle(uint32_t han
 uint32_t Kernel::LookupKind(uint32_t handle, ObjectKind kind) const
 {
     const uint32_t object = Lookup(handle);
-
     return object != kNone && state_.objects[object].kind == kind ? object : kNone;
 }
 

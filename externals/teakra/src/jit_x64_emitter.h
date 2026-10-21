@@ -77,7 +77,7 @@ public:
     bool Bound() const {
         return position != Unbound;
     }
-    // True if a jump to it has been emitted.
+    // True once the label is bound or a jump to it has been emitted.
     bool Used() const {
         return Bound() || !fixups.empty();
     }

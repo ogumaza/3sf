@@ -114,7 +114,7 @@ inline void FindThrowing(Teakra::Teakra& dsp, std::vector<Kind>& kinds)
 // MMIO on stdout during those runs. The tests therefore make the first call after SilenceStdout.
 inline const std::vector<Kind>& Kinds()
 {
-    static const std::vector<Kind> kinds = []
+    static const std::vector<Kind> kKinds = []
     {
         static const char* const kFlow[] = {"br",   "brr",  "call",  "calla", "callr", "ret",
                                             "rets", "reti", "retd",  "retic", "retid", "retidc",
@@ -134,6 +134,7 @@ inline const std::vector<Kind>& Kinds()
             {
                 table[op] = Kind::kBlockRepeat;
             }
+
             for (const char* name : kFlow)
             {
                 if (tokens[0] == name)
@@ -144,9 +145,10 @@ inline const std::vector<Kind>& Kinds()
         }
 
         FindThrowing(*MakeDsp(false), table);
+
         return table;
     }();
-    return kinds;
+    return kKinds;
 }
 
 inline Kind KindOf(uint16_t opcode)

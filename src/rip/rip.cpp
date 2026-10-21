@@ -5,6 +5,7 @@
 #include "rip/rip.h"
 
 #include <algorithm>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <exception>
@@ -24,6 +25,8 @@
 #include "common/sar_options.h"
 #include "dsp/dsp.h"
 #include "rip/driver_blob.h"
+#include "rip/game.h"
+#include "threesf/format.h"
 
 namespace threesf::rip
 {
@@ -198,7 +201,7 @@ std::vector<std::string> FirmwareCandidates(const GameFiles& game, const GamePro
     std::vector<std::string> out;
     if (profile)
     {
-        out.push_back(profile->dsp_component);
+        out.push_back(profile->firmware);
     }
 
     for (const auto* list : {&named, &dspaudio, &others})
@@ -212,8 +215,8 @@ std::vector<std::string> FirmwareCandidates(const GameFiles& game, const GamePro
 std::optional<std::size_t> FindFirmwareInCode(const std::vector<uint8_t>& code)
 {
     const std::string_view bytes(reinterpret_cast<const char*>(code.data()), code.size());
-    for (std::size_t magic = bytes.find("DSP1", Dsp1Image::kMagicOffset); magic != std::string_view::npos;
-         magic = bytes.find("DSP1", magic + 1))
+    for (std::size_t magic = bytes.find(Dsp1Image::kMagic, Dsp1Image::kMagicOffset); magic != std::string_view::npos;
+         magic = bytes.find(Dsp1Image::kMagic, magic + 1))
     {
         if (IsDspImageAt(code, magic - Dsp1Image::kMagicOffset))
         {
@@ -276,7 +279,7 @@ std::optional<std::vector<uint8_t>> BuildLibrary(const GameFiles& game, const Ga
     program.AddMemory(text, image);
     program.AddMemory(kDriverBase, DriverPage(profile));
 
-    for (const char* path : {profile.archive, profile.dsp_component})
+    for (const char* path : {profile.archive, profile.firmware})
     {
         std::vector<uint8_t> bytes;
         if (!game.read_romfs || !game.read_romfs(path, bytes))
@@ -349,7 +352,8 @@ std::vector<uint8_t> BuildArchiveMini(uint32_t sound_id, const std::string& lib_
 
 bool IsDspFirmware(const std::vector<uint8_t>& data)
 {
-    return data.size() >= Dsp1Image::kHeaderSize && std::memcmp(data.data() + Dsp1Image::kMagicOffset, "DSP1", 4) == 0;
+    return data.size() >= Dsp1Image::kHeaderSize &&
+           std::memcmp(data.data() + Dsp1Image::kMagicOffset, Dsp1Image::kMagic.data(), Dsp1Image::kMagic.size()) == 0;
 }
 
 std::vector<std::string> MissingData(const ntdlib::sar::SoundArchive& archive, uint32_t index)

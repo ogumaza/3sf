@@ -10,6 +10,11 @@
 #include <string>
 #include <vector>
 
+#include "dsp/teakra_dsp.h"
+#include "horizon/kernel.h"
+#include "horizon/system.h"
+#include "threesf/format.h"
+
 namespace threesf
 {
 

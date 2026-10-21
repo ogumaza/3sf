@@ -3,6 +3,8 @@
 // Unit tests for the Horizon kernel HLE (src/horizon): runs small ARM programs in an emulated system and checks what
 // the SVCs give them.
 
+#include "horizon/kernel.h"
+
 #include <cstddef>
 #include <cstdint>
 #include <initializer_list>

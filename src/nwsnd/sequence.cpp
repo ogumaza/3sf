@@ -4,10 +4,13 @@
 
 #include <array>
 
+#include "ntdlib/nwsnd/channel.h"
 #include "ntdlib/nwsnd/channel_impl.h"
+#include "ntdlib/nwsnd/sequence.h"
 #include "ntdlib/nwsnd/sequence_impl.h"
 
 #include "nwsnd/engine.h"
+#include "nwsnd/voice.h"
 
 namespace threesf::nwsnd
 {

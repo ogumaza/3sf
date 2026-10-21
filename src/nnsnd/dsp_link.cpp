@@ -11,6 +11,10 @@
 
 #include "xsflib/bytes.h"
 
+#include "dsp/dsp.h"
+#include "dsp/teakra_dsp.h"
+#include "nnsnd/dsp_abi.h"
+
 namespace threesf::nnsnd
 {
 namespace
@@ -205,6 +209,7 @@ bool DspLink::RunUntilAudioInterrupt(uint64_t limit, uint64_t slice)
     }
 
     audio_irq_ = false;
+
     return true;
 }
 

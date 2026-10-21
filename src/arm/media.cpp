@@ -7,6 +7,8 @@
 #include <bit>
 #include <cstdint>
 
+#include "xsflib/bytes.h"
+
 #include "arm/cpu.h"
 
 namespace threesf::arm

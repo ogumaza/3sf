@@ -3,7 +3,7 @@
 cmake_minimum_required(VERSION 3.20)
 # Shared version for 3sfrip, 3sfplay, the foobar2000 component, the XMPlay plugin, Windows file properties and macOS
 # bundles (THREESF_VERSION_ARGS below). For a release, update it here and add notes in docs/release-notes/.
-project(threesf VERSION 1.3.1 LANGUAGES CXX)
+project(threesf VERSION 1.3.2 LANGUAGES CXX)
 
 # xsflib is a library for players and rippers of the PSF family. It's a submodule. Its XsflibProject.cmake sets what a
 # project built on it starts with: C++20, a release build by default, the static C runtime, the options that keep the
@@ -144,7 +144,7 @@ add_library(threesf_rip STATIC
     src/rip/rip.h
 )
 target_link_libraries(threesf_rip PUBLIC threesf_core threesf_nwsnd ntdlib::rip_archive xsflib::rip
-                      PRIVATE xsflib::zlib)
+                      PRIVATE ntdlib::nwsnd_commands xsflib::zlib)
 target_compile_options(threesf_rip PRIVATE ${THREESF_WARNINGS})
 
 # The version of each program, as THREESF_VERSION, and on Windows the version resource that Explorer shows in the file's

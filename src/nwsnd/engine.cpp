@@ -7,12 +7,19 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <span>
 #include <stdexcept>
 #include <utility>
 #include <vector>
 
+#include "ntdlib/sar/formats.h"
+#include "ntdlib/types.h"
+
 #include "common/sar_options.h"
+#include "dsp/fcram.h"
+#include "nnsnd/sound_system.h"
 #include "nwsnd/sequence.h"
+#include "nwsnd/voice.h"
 
 namespace threesf::nwsnd
 {
@@ -163,10 +170,9 @@ Channel* Engine::NoteOn(const std::vector<uint32_t>& bank_items, int bank_index,
 {
     // Bank::NoteOn (0x48f954) with BankFileReader::ReadVelocityRegionInfo (0x48e2f8). StartSequence has read the
     // player's banks.
-    const ntdlib::sar::Bank* bank =
-        bank_index >= 0 && bank_index < 4 && static_cast<std::size_t>(bank_index) < bank_items.size()
-            ? GetBank(bank_items[static_cast<std::size_t>(bank_index)])
-            : nullptr;
+    const bool in_slots = bank_index >= 0 && bank_index < ntdlib::sar::kBankSlots &&
+                          static_cast<std::size_t>(bank_index) < bank_items.size();
+    const ntdlib::sar::Bank* bank = in_slots ? GetBank(bank_items[static_cast<std::size_t>(bank_index)]) : nullptr;
     if (!bank || info.prg_no >= bank->instruments.size() || !bank->instruments[info.prg_no])
     {
         return nullptr;
@@ -245,7 +251,7 @@ SequenceSoundPlayer* Engine::StartSequence(uint32_t index)
     }
 
     // The banks load when the sequence starts. The sound's data loads then too.
-    for (std::size_t i = 0; i < std::min<std::size_t>(4, info.banks.size()); i++)
+    for (std::size_t i = 0; i < std::min<std::size_t>(ntdlib::sar::kBankSlots, info.banks.size()); i++)
     {
         GetBank(info.banks[i]);
     }

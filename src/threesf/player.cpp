@@ -10,7 +10,9 @@
 #include <vector>
 
 #include "xsflib/player/modes.h"
+#include "xsflib/player/player.h"
 
+#include "horizon/kernel.h"
 #include "horizon/system.h"
 #include "threesf/archive_player.h"
 #include "threesf/game_mode.h"
@@ -41,13 +43,13 @@ uint32_t Player::DriverStatus() const
 {
     if (archive_)
     {
-        return archive_->Busy() ? 1 : 2;
+        return archive_->Busy() ? xsflib::player::kDriverPlaying : xsflib::player::kDriverFinished;
     }
 
     const uint32_t addr = set_.descriptor ? set_.descriptor->status_address : 0;
     if (!addr || !system_)
     {
-        return 1; // no status word: assume playing
+        return xsflib::player::kDriverPlaying; // no status word: assume playing
     }
 
     return system_->GetKernel().Memory().Read32(addr);
@@ -107,7 +109,7 @@ bool Player::RunStep()
 
 bool Player::Finished() const
 {
-    return DriverStatus() == 2;
+    return DriverStatus() == xsflib::player::kDriverFinished;
 }
 
 uint64_t Player::EmulatedCycles() const

@@ -20,6 +20,7 @@
 #include "ntdlib/nwsnd/length_hooks.h"
 #include "ntdlib/nwsnd/util.h"
 #include "ntdlib/sar/formats.h"
+#include "ntdlib/types.h"
 
 #include "dsp/fcram.h"
 #include "dsp/teakra_dsp.h"

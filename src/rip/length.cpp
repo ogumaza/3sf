@@ -11,6 +11,7 @@
 #include <utility>
 #include <vector>
 
+#include "ntdlib/nwsnd/sequence.h"
 #include "ntdlib/sar/formats.h"
 #include "xsflib/rip/length.h"
 
@@ -20,6 +21,7 @@
 #include "nnsnd/sound_system.h"
 #include "nwsnd/engine.h"
 #include "nwsnd/sequence.h"
+#include "threesf/format.h"
 
 namespace threesf::rip
 {
@@ -190,7 +192,7 @@ private:
 
 // Plays a sequence on the model until it loops twice, ends, falls silent for good or reaches kMaxSeconds
 // (xsflib::rip::MeasureLength). docs/3sf.md, "Lengths", gives the rules.
-std::optional<Timing> MeasureSequence(const ntdlib::sar::SoundArchive& archive, const std::vector<uint8_t>& cdc,
+std::optional<Timing> MeasureSequence(const ntdlib::sar::SoundArchive& archive, const std::vector<uint8_t>& firmware,
                                       const Variables& variables, uint32_t sound_index)
 {
     // The model, and whether the frame being run has made a sound, from the DSP's output.
@@ -202,7 +204,7 @@ std::optional<Timing> MeasureSequence(const ntdlib::sar::SoundArchive& archive, 
     };
     model.dsp.SetSampleSink(listen);
 
-    if (!model.Start(cdc, archive))
+    if (!model.Start(firmware, archive))
     {
         return std::nullopt;
     }
@@ -228,13 +230,13 @@ std::optional<Timing> MeasureSequence(const ntdlib::sar::SoundArchive& archive, 
 struct LengthAnalyzer::Impl
 {
     ntdlib::sar::SoundArchive archive;
-    std::vector<uint8_t> cdc;
+    std::vector<uint8_t> firmware;
     Variables variables;
 };
 
-LengthAnalyzer::LengthAnalyzer(const std::vector<uint8_t>& archive_bytes, const std::vector<uint8_t>& dsp_component,
+LengthAnalyzer::LengthAnalyzer(const std::vector<uint8_t>& archive_bytes, const std::vector<uint8_t>& firmware,
                                const Variables& variables)
-    : impl_(new Impl{ntdlib::sar::SoundArchive::Load(archive_bytes, kSarOptions), dsp_component, variables})
+    : impl_(new Impl{ntdlib::sar::SoundArchive::Load(archive_bytes, kSarOptions), firmware, variables})
 {
 }
 
@@ -242,8 +244,11 @@ LengthAnalyzer::~LengthAnalyzer() = default;
 
 std::optional<Timing> LengthAnalyzer::Analyze(uint32_t sound_index) const
 {
-    return xsflib::rip::TryMeasure(
-        [this, sound_index] { return MeasureSequence(impl_->archive, impl_->cdc, impl_->variables, sound_index); });
+    const auto measure = [this, sound_index]
+    {
+        return MeasureSequence(impl_->archive, impl_->firmware, impl_->variables, sound_index);
+    };
+    return xsflib::rip::TryMeasure(measure);
 }
 
 } // namespace threesf::rip

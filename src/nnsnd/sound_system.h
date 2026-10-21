@@ -12,6 +12,8 @@
 #include <span>
 #include <utility>
 
+#include "dsp/teakra_dsp.h"
+#include "nnsnd/dsp_abi.h"
 #include "nnsnd/dsp_link.h"
 #include "nnsnd/voice.h"
 

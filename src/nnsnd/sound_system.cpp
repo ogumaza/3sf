@@ -7,6 +7,10 @@
 #include <span>
 #include <vector>
 
+#include "dsp/teakra_dsp.h"
+#include "nnsnd/dsp_abi.h"
+#include "nnsnd/voice.h"
+
 namespace threesf::nnsnd
 {
 namespace

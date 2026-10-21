@@ -3,15 +3,18 @@
 #include "nwsnd/voice.h"
 
 #include <algorithm>
+#include <cstddef>
 #include <cstdint>
 #include <stdexcept>
 #include <utility>
 #include <vector>
 
+#include "ntdlib/nwsnd/channel.h"
 #include "ntdlib/nwsnd/console.h"
 #include "ntdlib/nwsnd/util.h"
 
 #include "nnsnd/sound_system.h"
+#include "nnsnd/voice.h"
 #include "nwsnd/engine.h"
 #include "nwsnd/util.h"
 

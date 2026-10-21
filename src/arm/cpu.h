@@ -145,12 +145,6 @@ public:
         Write16(a + 2, static_cast<uint16_t>(v >> 16));
     }
 
-    void Write64(uint32_t a, uint64_t v)
-    {
-        Write32(a, static_cast<uint32_t>(v));
-        Write32(a + 4, static_cast<uint32_t>(v >> 32));
-    }
-
     // Copy between host buffers and virtual memory, for the kernel HLE. They stop at the first unmapped page, without
     // setting the fault flag.
     void ReadBlock(uint32_t vaddr, void* dst, std::size_t size) const;

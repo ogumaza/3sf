@@ -7,6 +7,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string_view>
 
 namespace threesf::dsp
 {
@@ -55,6 +56,7 @@ constexpr uint32_t DataOffset(uint32_t word_address)
 // memory type comes after some padding.
 struct Dsp1Image
 {
+    static constexpr std::string_view kMagic = "DSP1";
     static constexpr std::size_t kHeaderSize = 0x300;
     static constexpr std::size_t kMagicOffset = 0x100;
     static constexpr std::size_t kSizeOffset = 0x104;

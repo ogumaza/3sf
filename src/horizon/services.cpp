@@ -10,6 +10,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <set>
 #include <span>
 #include <string>
 #include <utility>

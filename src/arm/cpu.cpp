@@ -9,8 +9,11 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <functional>
+#include <memory>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace threesf::arm
 {
@@ -168,6 +171,7 @@ void Memory::WriteBlock(uint32_t vaddr, const void* src, std::size_t size)
         {
             on_watched_write_();
         }
+
         s += chunk;
         vaddr += static_cast<uint32_t>(chunk);
         size -= chunk;
@@ -190,6 +194,7 @@ void Memory::ZeroBlock(uint32_t vaddr, std::size_t size)
         {
             on_watched_write_();
         }
+
         vaddr += static_cast<uint32_t>(chunk);
         size -= chunk;
     }

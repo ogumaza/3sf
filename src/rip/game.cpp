@@ -25,6 +25,7 @@
 #include "xsflib/ascii.h"
 #include "xsflib/bytes.h"
 #include "xsflib/files.h"
+#include "xsflib/utf8.h"
 #include <zlib.h>
 
 #include "horizon/romfs.h"
@@ -41,9 +42,47 @@ constexpr uint64_t kMaxFileSize = 1ull << 30; // largest single file read into m
 // An image's media unit is 0x200 << n bytes. Real images use 0; anything past this would overflow the offsets.
 constexpr uint8_t kMaxMediaUnitShift = 16;
 
+// The offsets of the fields of an NCSD or NCCH header that 3SF reads (3dbrew, "NCSD" and "NCCH"). Both headers take
+// 0x200 bytes. Both hold their magic word and their flags at the same offsets. The offsets and sizes of the partitions
+// and areas count media units.
+constexpr std::size_t kImageHeaderSize = 0x200;
+constexpr std::size_t kImageMagic = 0x100;
+constexpr std::size_t kImageFlags = 0x188;
+constexpr std::size_t kNcsdPartition0Offset = 0x120;
+constexpr std::size_t kNcsdPartition0Size = 0x124;
+constexpr std::size_t kNcchExheaderSize = 0x180;
+constexpr std::size_t kNcchExeFsOffset = 0x1a0;
+constexpr std::size_t kNcchExeFsSize = 0x1a4;
+constexpr std::size_t kNcchRomFsOffset = 0x1b0;
+constexpr std::size_t kNcchRomFsSize = 0x1b4;
+
+// The bytes of the flags that 3SF reads, and their bits: the NCCH's content type, the media unit's size in either
+// header, and the NCCH's crypto method.
+constexpr std::size_t kFlagContentType = 5;
+constexpr std::size_t kFlagMediaUnit = 6;
+constexpr std::size_t kFlagCrypto = 7;
+constexpr uint8_t kExecutable = 0x02;
+constexpr uint8_t kNoCrypto = 0x04;
+
+// The extended header follows the NCCH's header. The loader reads it with the access descriptor after it.
+constexpr std::size_t kExheaderSize = 0x400;
+constexpr std::size_t kExheaderAndDescriptorSize = 0x800;
+
 uint64_t AlignUp(uint64_t x, uint64_t a)
 {
     return (x + a - 1) / a * a;
+}
+
+// The media unit of an NCSD or NCCH header, in bytes, or nothing when its flags give a size past kMaxMediaUnitShift.
+std::optional<uint64_t> MediaUnit(const uint8_t* header)
+{
+    const uint8_t shift = header[kImageFlags + kFlagMediaUnit];
+    if (shift > kMaxMediaUnitShift)
+    {
+        return std::nullopt;
+    }
+
+    return uint64_t{0x200} << shift;
 }
 
 // Reads one of an extracted game's files, up to kMaxFileSize bytes.
@@ -121,16 +160,8 @@ std::string Utf16ToUtf8(const uint8_t* p, uint32_t bytes)
             }
         }
 
-        if (c < 0x80)
-        {
-            out += static_cast<char>(c);
-        }
-        else if (c < 0x800)
-        {
-            out += static_cast<char>(0xc0 | (c >> 6));
-            out += static_cast<char>(0x80 | (c & 0x3f));
-        }
-        else if (c < 0x10000)
+        // AppendUtf8 writes U+FFFD for a surrogate. A surrogate without its partner is written here as its three bytes.
+        if (c >= 0xd800 && c < 0xe000)
         {
             out += static_cast<char>(0xe0 | (c >> 12));
             out += static_cast<char>(0x80 | ((c >> 6) & 0x3f));
@@ -138,10 +169,7 @@ std::string Utf16ToUtf8(const uint8_t* p, uint32_t bytes)
         }
         else
         {
-            out += static_cast<char>(0xf0 | (c >> 18));
-            out += static_cast<char>(0x80 | ((c >> 12) & 0x3f));
-            out += static_cast<char>(0x80 | ((c >> 6) & 0x3f));
-            out += static_cast<char>(0x80 | (c & 0x3f));
+            xsflib::AppendUtf8(out, c);
         }
     }
 
@@ -332,44 +360,45 @@ std::optional<std::string> OpenRomFs(const std::shared_ptr<Image>& img, uint64_t
 // An NCCH (a CXI) at `base`.
 std::optional<std::string> LoadNcch(const std::shared_ptr<Image>& img, uint64_t base, uint64_t limit, GameFiles& out)
 {
-    uint8_t h[0x200];
-    if (!img->Read(base, h, sizeof(h)) || std::memcmp(h + 0x100, "NCCH", 4) != 0)
+    uint8_t h[kImageHeaderSize];
+    if (!img->Read(base, h, sizeof(h)) || std::memcmp(h + kImageMagic, "NCCH", 4) != 0)
     {
         char message[40];
         std::snprintf(message, sizeof(message), "no NCCH at 0x%llx", static_cast<unsigned long long>(base));
         return message;
     }
 
-    const uint8_t* flags = h + 0x188;
-    if (!(flags[7] & 0x04))
+    const uint8_t* flags = h + kImageFlags;
+    if (!(flags[kFlagCrypto] & kNoCrypto))
     {
         return "the image is encrypted: decrypt it first (only decrypted images are supported)";
     }
 
-    if (!(flags[5] & 0x02))
+    if (!(flags[kFlagContentType] & kExecutable))
     {
         return "the NCCH isn't an application (CXI)";
     }
 
-    if (flags[6] > kMaxMediaUnitShift)
+    const std::optional<uint64_t> mu = MediaUnit(h);
+    if (!mu)
     {
         return "the NCCH's media unit size is invalid";
     }
 
-    const uint64_t mu = 0x200ull << flags[6];
-    const uint32_t exheader_size = xsflib::LoadLe32(h + 0x180);
-    if (exheader_size < 0x400)
+    const uint32_t exheader_size = xsflib::LoadLe32(h + kNcchExheaderSize);
+    if (exheader_size < kExheaderSize)
     {
         return "the NCCH has no extended header";
     }
 
-    if (!img->Read(base + 0x200, 0x800, out.exheader))
+    if (!img->Read(base + kImageHeaderSize, kExheaderAndDescriptorSize, out.exheader))
     {
         return "truncated extended header";
     }
 
     // Read .code from the ExeFS, and decompress it if the exheader says it's compressed.
-    if (auto err = ReadExeFsCode(*img, base + xsflib::LoadLe32(h + 0x1a0) * mu, xsflib::LoadLe32(h + 0x1a4), out.code))
+    const uint64_t exefs = base + xsflib::LoadLe32(h + kNcchExeFsOffset) * *mu;
+    if (auto err = ReadExeFsCode(*img, exefs, xsflib::LoadLe32(h + kNcchExeFsSize), out.code))
     {
         return err;
     }
@@ -385,7 +414,8 @@ std::optional<std::string> LoadNcch(const std::shared_ptr<Image>& img, uint64_t 
         out.code = std::move(*code);
     }
 
-    return OpenRomFs(img, base + xsflib::LoadLe32(h + 0x1b0) * mu, xsflib::LoadLe32(h + 0x1b4) * mu, limit, out);
+    return OpenRomFs(img, base + xsflib::LoadLe32(h + kNcchRomFsOffset) * *mu,
+                     xsflib::LoadLe32(h + kNcchRomFsSize) * *mu, limit, out);
 }
 
 std::optional<std::string> LoadCia(const std::shared_ptr<Image>& img, GameFiles& out)
@@ -575,7 +605,7 @@ std::optional<std::string> LoadGameDirectory(const std::string& dir, GameFiles& 
         return dir + " isn't an extracted game: it has no exefs folder";
     }
 
-    if (!ReadFile(exefs / "exheader.bin", out.exheader) || out.exheader.size() < 0x400)
+    if (!ReadFile(exefs / "exheader.bin", out.exheader) || out.exheader.size() < kExheaderSize)
     {
         return "can't read " + (exefs / "exheader.bin").string();
     }
@@ -653,22 +683,23 @@ std::optional<std::string> LoadGameImage(const std::string& path, GameFiles& out
         return "can't open " + path;
     }
 
-    uint8_t h[0x200];
+    uint8_t h[kImageHeaderSize];
     if (!img->Read(0, h, sizeof(h)))
     {
         return path + " is too small for a 3DS image";
     }
 
-    if (std::memcmp(h + 0x100, "NCSD", 4) == 0)
+    if (std::memcmp(h + kImageMagic, "NCSD", 4) == 0)
     {
         // .3ds/.cci: partition 0 is the application.
-        if (h[0x188 + 6] > kMaxMediaUnitShift)
+        const std::optional<uint64_t> mu = MediaUnit(h);
+        if (!mu)
         {
             return "the NCSD image's media unit size is invalid";
         }
 
-        const uint64_t mu = 0x200ull << h[0x188 + 6];
-        const uint64_t offset = xsflib::LoadLe32(h + 0x120) * mu, size = xsflib::LoadLe32(h + 0x124) * mu;
+        const uint64_t offset = xsflib::LoadLe32(h + kNcsdPartition0Offset) * *mu;
+        const uint64_t size = xsflib::LoadLe32(h + kNcsdPartition0Size) * *mu;
         if (!size)
         {
             return "the NCSD image has no partition 0";
@@ -677,7 +708,7 @@ std::optional<std::string> LoadGameImage(const std::string& path, GameFiles& out
         return LoadNcch(img, offset, offset + size, out);
     }
 
-    if (std::memcmp(h + 0x100, "NCCH", 4) == 0)
+    if (std::memcmp(h + kImageMagic, "NCCH", 4) == 0)
     {
         return LoadNcch(img, 0, img->Size(), out); // .cxi
     }

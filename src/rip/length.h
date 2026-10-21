@@ -26,9 +26,9 @@ using Timing = xsflib::rip::Timing;
 class LengthAnalyzer
 {
 public:
-    // Analyzes sequences of `archive_bytes` on `dsp_component`, with `variables` set before each sequence starts (see
-    // the 3sf_var tag in docs/3sf.md).
-    LengthAnalyzer(const std::vector<uint8_t>& archive_bytes, const std::vector<uint8_t>& dsp_component,
+    // Analyzes sequences of `archive_bytes` on `firmware`. The analyzer sets `variables` before each sequence starts
+    // (see the 3sf_var tag in docs/3sf.md).
+    LengthAnalyzer(const std::vector<uint8_t>& archive_bytes, const std::vector<uint8_t>& firmware,
                    const Variables& variables = {});
 
     ~LengthAnalyzer();

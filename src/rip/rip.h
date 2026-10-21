@@ -34,7 +34,7 @@ struct GameProfile
     uint32_t handle;         // sound handle slot the driver plays on
     uint32_t data_heap_size; // device memory for one sound's data
     const char* archive;     // RomFS path of the sound archive
-    const char* dsp_component;
+    const char* firmware;    // RomFS path of the DSP firmware
 };
 
 const std::vector<GameProfile>& KnownProfiles();

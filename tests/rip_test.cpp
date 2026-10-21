@@ -59,7 +59,7 @@ static void TestFirmwareCandidates()
                   std::vector<std::string>{"b/dspaudio.cdc", "a/first.cdc", "snd/game.cdc", "c/other.CDC"}));
 
     rip::GameProfile profile{};
-    profile.dsp_component = "sound/x.cdc";
+    profile.firmware = "sound/x.cdc";
 
     const auto with_profile = rip::FirmwareCandidates(game, &profile);
 
@@ -189,7 +189,7 @@ static void TestWalkSequence()
 
     XSFLIB_CHECK(shape.tracks == 3 && shape.notes == 4);
     XSFLIB_CHECK(conditional.tracks == 1 && conditional.notes == 1);
-    XSFLIB_CHECK(truncated.tracks == 2 && truncated.notes == 0);
+    XSFLIB_CHECK(truncated.tracks == 1 && truncated.notes == 0);
 }
 
 int main()

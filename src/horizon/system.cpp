@@ -49,8 +49,12 @@ std::vector<PageRange> ProgramPages(const ProcessImage& image)
         }
     }
 
-    std::sort(ranges.begin(), ranges.end(), [](const PageRange& a, const PageRange& b)
-              { return a.first != b.first ? a.first < b.first : a.end < b.end; });
+    const auto starts_first = [](const PageRange& a, const PageRange& b)
+    {
+        return a.first != b.first ? a.first < b.first : a.end < b.end;
+    };
+    std::sort(ranges.begin(), ranges.end(), starts_first);
+
     std::vector<PageRange> merged;
     for (const PageRange& range : ranges)
     {
@@ -86,6 +90,7 @@ uint32_t ProgramEnd(const std::vector<PageRange>& ranges, uint32_t entry, uint32
 KernelConfig WithProgramEnd(KernelConfig config, uint32_t program_end)
 {
     config.program_end = program_end;
+
     return config;
 }
 
@@ -129,25 +134,31 @@ System::System(const ProcessImage& image, const KernelConfig& config, const dsp:
     memory.Map(kDspRam, dsp_.Ram(), dsp::kRamSize);
     memory.WatchWrites(dsp_.Ram(), dsp::kDataMemoryOffset, [this] { dsp_.ProgramWritten(); });
 
-    // The services, the DSP's steps with the clock and its samples, and the main thread.
+    // The services.
     services_ = std::make_unique<Services>(kernel, dsp_, image.files);
     kernel.SetServiceHost(services_.get());
-    kernel.SetDeviceStep(
-        [this](uint64_t ticks)
+
+    // The DSP's steps with the clock.
+    const auto step_dsp = [this](uint64_t ticks)
+    {
+        const uint64_t target = ticks / 2;
+        const uint64_t cycles = dsp_.Cycles();
+        if (cycles < target)
         {
-            const uint64_t target = ticks / 2;
-            const uint64_t cycles = dsp_.Cycles();
-            if (cycles < target)
-            {
-                dsp_.Run(target - cycles);
-            }
-        });
-    dsp_.SetSampleSink(
-        [this](std::array<int16_t, 2> sample)
-        {
-            output_.push_back(sample[0]);
-            output_.push_back(sample[1]);
-        });
+            dsp_.Run(target - cycles);
+        }
+    };
+    kernel.SetDeviceStep(step_dsp);
+
+    // The DSP's samples.
+    const auto keep_sample = [this](std::array<int16_t, 2> sample)
+    {
+        output_.push_back(sample[0]);
+        output_.push_back(sample[1]);
+    };
+    dsp_.SetSampleSink(keep_sample);
+
+    // The main thread.
     kernel.CreateThread(image.priority, image.entry, 0, kStackTop);
 }
 

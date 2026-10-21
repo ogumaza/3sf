@@ -14,6 +14,9 @@
 #include <string_view>
 #include <vector>
 
+#include "ntdlib/commands/sequence.h"
+#include "ntdlib/nwsnd/commands.h"
+#include "ntdlib/nwsnd/console.h"
 #include "ntdlib/sar/formats.h"
 
 #include "common/sar_options.h"
@@ -26,120 +29,6 @@ namespace
 // The fewest tracks and notes that make IsMusic take a sequence for music, whatever its label says.
 constexpr int kMusicMinTracks = 3;
 constexpr int kMusicMinNotes = 50;
-
-// One sequence command, decoded where it starts as the nw::snd model's parser reads it (SequenceTrack::Parse).
-struct Command
-{
-    std::size_t next = 0; // where the next command starts
-    bool note = false;
-    std::optional<std::size_t> track;  // opentrack: where the track it opens starts
-    std::optional<std::size_t> target; // jump or call: where it goes
-    bool ends = false;                 // an unconditional jump, ret or fin, which the next command doesn't follow
-};
-
-Command DecodeCommand(std::span<const uint8_t> data, std::size_t pc)
-{
-    // Past the end, a read gives 0xff (fin), as the model's does.
-    const auto byte = [&](std::size_t p) -> std::size_t
-    {
-        return p < data.size() ? data[p] : 0xff;
-    };
-
-    // The bytes a variable-length number takes at `p`.
-    const auto midi_number_size = [&](std::size_t p)
-    {
-        std::size_t n = 1;
-        while (p + n - 1 < data.size() && (data[p + n - 1] & 0x80))
-        {
-            n++;
-        }
-
-        return n;
-    };
-
-    // The prefixes, in the order the parser takes them: a condition, a time argument, and then a random or variable
-    // argument, whose size replaces that of the argument the command normally takes.
-    Command c;
-    std::size_t p = pc;
-    std::size_t cmd = byte(p++);
-    const bool conditional = cmd == 0xa2;
-    if (conditional)
-    {
-        cmd = byte(p++);
-    }
-
-    std::size_t time_size = 0;
-    if (cmd >= 0xa3 && cmd <= 0xa5)
-    {
-        time_size = cmd == 0xa3 ? 2 : (cmd == 0xa4 ? 4 : 1);
-        cmd = byte(p++);
-    }
-
-    std::size_t prefixed_size = 0;
-    if (cmd == 0xa0 || cmd == 0xa1)
-    {
-        prefixed_size = cmd == 0xa0 ? 4 : 1;
-        cmd = byte(p++);
-    }
-
-    const auto argument = [&](std::size_t size)
-    {
-        return prefixed_size != 0 ? prefixed_size : size;
-    };
-
-    if (cmd < 0x80) // a note: the key, then the velocity and the length
-    {
-        c.note = true;
-        p += 1 + argument(midi_number_size(p + 1));
-    }
-    else if (cmd == 0x80 || cmd == 0x81) // wait, program change
-    {
-        p += argument(midi_number_size(p));
-    }
-    else if (cmd == 0x88) // opentrack: the track's number and its offset
-    {
-        c.track = byte(p + 1) << 16 | byte(p + 2) << 8 | byte(p + 3);
-        p += 4;
-    }
-    else if (cmd == 0x89 || cmd == 0x8a) // jump, call
-    {
-        c.target = byte(p) << 16 | byte(p + 1) << 8 | byte(p + 2);
-        c.ends = cmd == 0x89 && !conditional;
-        p += 3;
-    }
-    else if (cmd >= 0xb0 && cmd < 0xe0) // a byte, and the time argument if there is one
-    {
-        p += argument(1) + time_size;
-    }
-    else if (cmd >= 0xe0 && cmd < 0xf0) // a 16-bit value
-    {
-        p += argument(2);
-    }
-    else if (cmd == 0xf0) // the extended commands: the variable operations take a variable and a 16-bit value
-    {
-        const std::size_t kind = byte(p++) & 0xf0;
-        if (kind == 0x80 || kind == 0x90)
-        {
-            p += 1 + argument(2);
-        }
-        else if (kind == 0xe0)
-        {
-            p += argument(2);
-        }
-    }
-    else if (cmd == 0xfe) // alloctrack
-    {
-        p += 2;
-    }
-    else if (cmd == 0xfd || cmd == 0xff) // ret, fin
-    {
-        c.ends = !conditional;
-    }
-
-    c.next = p;
-
-    return c;
-}
 
 // The label's words: the runs of ASCII letters and digits in it, in capitals. Unlike std::isalnum and std::toupper,
 // this doesn't depend on the C locale.
@@ -189,6 +78,9 @@ bool IsNumberedWord(std::string_view word, std::string_view name)
 
 SequenceShape WalkSequence(std::span<const uint8_t> data, uint32_t start)
 {
+    using ntdlib::commands::Kind;
+
+    const ntdlib::nwsnd::Grammar grammar = ntdlib::nwsnd::GrammarOf<ntdlib::nwsnd::CtrPolicy>();
     SequenceShape shape;
     std::vector<bool> seen(data.size());
     std::vector<std::size_t> todo{start};
@@ -199,25 +91,27 @@ SequenceShape WalkSequence(std::span<const uint8_t> data, uint32_t start)
         while (pc < data.size() && !seen[pc])
         {
             seen[pc] = true;
-            const Command c = DecodeCommand(data, pc);
-            shape.notes += c.note ? 1 : 0;
-            if (c.track)
-            {
-                shape.tracks++;
-                todo.push_back(*c.track);
-            }
-
-            if (c.target)
-            {
-                todo.push_back(*c.target);
-            }
-
-            if (c.ends)
+            const std::optional<ntdlib::nwsnd::DecodedCommand> read =
+                ntdlib::nwsnd::DecodeCommand(data, static_cast<uint32_t>(pc), grammar);
+            if (!read)
             {
                 break;
             }
 
-            pc = c.next;
+            const ntdlib::commands::Command& c = read->command;
+            shape.notes += c.kind == Kind::kNote ? 1 : 0;
+            shape.tracks += c.kind == Kind::kOpenTrack ? 1 : 0;
+            if (ntdlib::commands::HasTarget(c.kind))
+            {
+                todo.push_back(c.target);
+            }
+
+            if (!ntdlib::nwsnd::FallsThrough(c, grammar))
+            {
+                break;
+            }
+
+            pc += read->size;
         }
     }
 

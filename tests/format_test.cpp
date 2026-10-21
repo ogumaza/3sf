@@ -13,6 +13,7 @@
 #include <string>
 #include <vector>
 
+#include "xsflib/bytes.h"
 #include "xsflib/testing/check.h"
 #include "xsflib/testing/sets.h"
 
@@ -114,10 +115,7 @@ static void TestLoadSet()
         const uint32_t words[] = {DriverBlock::kMagic, version, 0, 0, mode};
         for (std::size_t i = 0; i < std::size(words); i++)
         {
-            for (int b = 0; b < 4; b++)
-            {
-                block[i * 4 + b] = static_cast<uint8_t>(words[i] >> (8 * b));
-            }
+            xsflib::StoreLe32(block.data() + 4 * i, words[i]);
         }
 
         ProgramBuilder b;
