@@ -47,6 +47,7 @@
 #include <utility>
 #include <vector>
 
+#include "ntdlib/rip/archive.h"
 #include "ntdlib/sar/formats.h"
 #include "xsflib/ascii.h"
 #include "xsflib/cli/rip.h"
@@ -329,9 +330,25 @@ int RipArchive(const fs::path& out_dir, rip::FileNames& names, const std::string
         return 0;
     }
 
+    // The library holds only the files that the sequences play. Archive mode's model reads nothing else.
+    std::vector<uint32_t> sounds;
+    for (const Job& job : jobs)
+    {
+        sounds.push_back(job.index);
+    }
+    const std::optional<ntdlib::rip::LibraryArchive> kept = ntdlib::rip::KeepSequenceData(*archive, sounds);
+    if (!kept)
+    {
+        std::fprintf(stderr,
+                     "warning: the files that the sequences play can't be cut out of %s. The library holds the whole "
+                     "archive\n",
+                     archive_path.c_str());
+    }
+
     const Tags common = xsflib::cli::RipTags(o, game_name, "3sf", "archive");
-    const std::string lib_name = names.Library(lib_base);
-    const auto lib = rip::BuildArchiveLibrary(archive_path, archive_bytes, firmware_path, firmware, common);
+    const auto lib =
+        rip::BuildArchiveLibrary(archive_path, kept ? kept->archive : archive_bytes, firmware_path, firmware, common);
+    const std::string lib_name = names.LibraryIn(out_dir, lib_base, lib);
     if (!WriteLibrary(out_dir, lib_name, lib))
     {
         return -1;
@@ -691,15 +708,6 @@ int RipGameInGameMode(const std::string& input, const rip::GameFiles& game, cons
 
     const auto archive = ntdlib::sar::SoundArchive::Load(archive_bytes, kSarOptions);
     const Tags common = xsflib::cli::RipTags(o, game_name, "3sf", "game");
-    const std::string lib_name = names.Library(game_name);
-    std::string error;
-    const auto lib = rip::BuildLibrary(game, profile, common, &error);
-    if (!lib)
-    {
-        std::fprintf(stderr, "error: %s\n", error.c_str());
-        return 1;
-    }
-
     std::vector<Job> jobs = SelectSounds(archive, o, true);
     if (jobs.empty() && PicksSounds(o))
     {
@@ -714,6 +722,22 @@ int RipGameInGameMode(const std::string& input, const rip::GameFiles& game, cons
         return 0;
     }
 
+    // The library's archive holds the files that the ripped sounds play.
+    std::vector<uint32_t> sounds;
+    for (const Job& job : jobs)
+    {
+        sounds.push_back(job.index);
+    }
+
+    std::string error;
+    const auto lib = rip::BuildLibrary(game, profile, sounds, common, &error);
+    if (!lib)
+    {
+        std::fprintf(stderr, "error: %s\n", error.c_str());
+        return 1;
+    }
+
+    const std::string lib_name = names.LibraryIn(out_dir, game_name, *lib);
     if (!WriteLibrary(out_dir, lib_name, *lib))
     {
         return 1;

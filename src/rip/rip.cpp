@@ -19,6 +19,7 @@
 #include "ntdlib/rip/archive.h"
 #include "ntdlib/sar/formats.h"
 #include "xsflib/ascii.h"
+#include "xsflib/binary.h"
 #include "xsflib/bytes.h"
 #include "xsflib/psf/streaming.h"
 
@@ -120,6 +121,35 @@ std::vector<uint8_t> DriverPage(const GameProfile& profile)
     }
 
     return driver;
+}
+
+// Pokemon X's nw::snd ends each read of a file in the sound archive on a multiple of 32 bytes from the archive's start.
+constexpr std::size_t kReadAlignment = 32;
+
+// The copy of the sound archive `archive` that a game-mode library holds for the sounds at `sounds`. When the sound
+// system starts, Pokemon X's nw::snd reads the archive's first 0x40 bytes and its INFO block. To load a sequence,
+// LoadData reads the sequence's file, the files of its banks and the files of the wave archives that the banks name.
+// Each read starts at the place that the file table gives. Where the waves load one by one, a wave archive is read in
+// parts. The parts lie within the file's bytes. The copy keeps all those bytes in their places, with zeros in place of
+// the FILE block's other bytes (ntdlib::rip::KeepLoadedFiles). The game therefore reads the same bytes as from the
+// whole archive. LoadedArchive returns the whole archive when the archive can't be read or KeepLoadedFiles gives no
+// copy. A wave sound among `sounds` is one case where KeepLoadedFiles gives none.
+std::vector<uint8_t> LoadedArchive(const std::vector<uint8_t>& archive, const std::vector<uint32_t>& sounds)
+{
+    try
+    {
+        const ntdlib::sar::SoundArchive read = ntdlib::sar::SoundArchive::Load(archive, kSarOptions);
+        if (std::optional<std::vector<uint8_t>> copy = ntdlib::rip::KeepLoadedFiles(read, sounds, kReadAlignment))
+        {
+            return std::move(*copy);
+        }
+    }
+    catch (const xsflib::FormatError&)
+    {
+        // A damaged archive goes into the library whole.
+    }
+
+    return archive;
 }
 
 } // namespace
@@ -249,7 +279,8 @@ std::optional<GameFirmware> FindGameFirmware(const GameFiles& game, const GamePr
     return GameFirmware{"", *offset, std::vector<uint8_t>(begin, end)};
 }
 
-std::optional<std::vector<uint8_t>> BuildLibrary(const GameFiles& game, const GameProfile& profile, const Tags& tags,
+std::optional<std::vector<uint8_t>> BuildLibrary(const GameFiles& game, const GameProfile& profile,
+                                                 const std::vector<uint32_t>& sounds, const Tags& tags,
                                                  std::string* error)
 {
     const auto& exh = game.exheader;
@@ -279,7 +310,8 @@ std::optional<std::vector<uint8_t>> BuildLibrary(const GameFiles& game, const Ga
     program.AddMemory(text, image);
     program.AddMemory(kDriverBase, DriverPage(profile));
 
-    for (const char* path : {profile.archive, profile.firmware})
+    // The files that the profile names: the sound archive, with only the sounds' files, and the DSP firmware.
+    const auto read = [&game, error](const char* path) -> std::optional<std::vector<uint8_t>>
     {
         std::vector<uint8_t> bytes;
         if (!game.read_romfs || !game.read_romfs(path, bytes))
@@ -292,8 +324,18 @@ std::optional<std::vector<uint8_t>> BuildLibrary(const GameFiles& game, const Ga
             return std::nullopt;
         }
 
-        program.AddFile(path, bytes);
+        return bytes;
+    };
+
+    const std::optional<std::vector<uint8_t>> archive = read(profile.archive);
+    const std::optional<std::vector<uint8_t>> firmware = archive ? read(profile.firmware) : std::nullopt;
+    if (!firmware)
+    {
+        return std::nullopt;
     }
+
+    program.AddFile(profile.archive, LoadedArchive(*archive, sounds));
+    program.AddFile(profile.firmware, *firmware);
 
     ProcessDescriptor d;
     d.entry = text;

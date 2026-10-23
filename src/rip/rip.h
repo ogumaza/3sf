@@ -64,9 +64,12 @@ struct GameFirmware
 // one, and loads rom:/sound/dspaudio.cdc. Returns nullopt if the game has neither.
 std::optional<GameFirmware> FindGameFirmware(const GameFiles& game, const GameProfile* profile);
 
-// Game mode: builds the .3sflib. Fails (nullopt, with `error` set) if a file the profile names is missing from the
-// RomFS.
-std::optional<std::vector<uint8_t>> BuildLibrary(const GameFiles& game, const GameProfile& profile, const Tags& tags,
+// Game mode: builds the .3sflib that plays the sounds at `sounds`, by their indices in the profile's sound archive. In
+// the library's copy of the archive, only the files that those sounds play keep their bytes. The rest of the FILE block
+// is zeros. The game reads the same bytes in the same places (see LoadedArchive in rip.cpp). Fails (nullopt, with
+// `error` set) if a file the profile names is missing from the RomFS.
+std::optional<std::vector<uint8_t>> BuildLibrary(const GameFiles& game, const GameProfile& profile,
+                                                 const std::vector<uint32_t>& sounds, const Tags& tags,
                                                  std::string* error = nullptr);
 
 // Game mode: a .mini3sf that plays `sound_id` from `lib_name`.
