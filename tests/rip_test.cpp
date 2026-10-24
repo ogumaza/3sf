@@ -8,14 +8,21 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <map>
+#include <optional>
 #include <string>
 #include <vector>
 
+#include "ntdlib/sar/formats.h"
+#include "ntdlib/testing/sar_files.h"
 #include "xsflib/bytes.h"
 #include "xsflib/testing/check.h"
+#include "xsflib/testing/sets.h"
 
+#include "common/sar_options.h"
 #include "rip/game.h"
 #include "rip/music.h"
+#include "threesf/format.h"
 
 using namespace threesf;
 using namespace xsflib::testing;
@@ -192,12 +199,134 @@ static void TestWalkSequence()
     XSFLIB_CHECK(truncated.tracks == 1 && truncated.notes == 0);
 }
 
+// A 3DS sound archive whose sounds have the labels `labels`, each with a file of its own. They're sequences, but for
+// those in `wave_sounds`.
+static std::vector<uint8_t> ArchiveOf(const std::vector<std::string>& labels,
+                                      const std::vector<std::string>& wave_sounds = {})
+{
+    namespace sar_files = ntdlib::testing::sar_files;
+    sar_files::ArchiveSpec spec;
+    spec.players = {{"PLAYER_BGM", 1}};
+    for (std::size_t i = 0; i < labels.size(); i++)
+    {
+        const bool wave_sound = std::ranges::find(wave_sounds, labels[i]) != wave_sounds.end();
+        const auto kind = wave_sound ? sar_files::SoundSpec::kWaveSound : sar_files::SoundSpec::kSequence;
+        spec.sounds.push_back({.name = labels[i], .kind = kind, .file = static_cast<uint32_t>(i)});
+        spec.files.push_back({.bytes = sar_files::Sequence(ntdlib::sar::Flavor::kCtr, {0xff}, {})});
+    }
+
+    return sar_files::Archive(ntdlib::sar::Flavor::kCtr, spec);
+}
+
+// The pieces whose channels are separate sequences (rip::FindPieces): five sequences labelled with one name and the
+// suffixes _DPCM, _NOISE, _P1, _P2 and _TRI.
+static void TestPieces()
+{
+    // Two pieces, one of them with its sounds in another order, and labels that make no piece: a channel missing, a
+    // channel that isn't a sequence, suffixes without a name, and a second sound with a piece's first label.
+    const std::vector<std::string> kLabels = {
+        "BGM_A_DPCM", "BGM_A_NOISE", "BGM_A_P1",   "BGM_A_P2",   "BGM_A_TRI",   "BGM_B_TRI", "BGM_B_P2",
+        "BGM_B_P1",   "BGM_B_NOISE", "BGM_B_DPCM", "BGM_C_DPCM", "BGM_C_NOISE", "BGM_C_P1",  "BGM_C_P2",
+        "BGM_D_DPCM", "BGM_D_NOISE", "BGM_D_P1",   "BGM_D_P2",   "BGM_D_TRI",   "_DPCM",     "_NOISE",
+        "_P1",        "_P2",         "_TRI",       "BGM_A_DPCM",
+    };
+    const auto archive = ntdlib::sar::SoundArchive::Load(ArchiveOf(kLabels, {"BGM_D_TRI"}), kSarOptions);
+
+    const std::vector<rip::Piece> pieces = rip::FindPieces(archive);
+
+    Check(pieces.size() == 2, "two pieces (" + std::to_string(pieces.size()) + ")");
+    if (pieces.size() == 2)
+    {
+        Check(pieces[0].name == "BGM_A" && pieces[0].sounds == std::vector<uint32_t>{0, 1, 2, 3, 4},
+              "a piece's sounds: _DPCM, _NOISE, _P1, _P2 and _TRI");
+        Check(pieces[1].name == "BGM_B" && pieces[1].sounds == std::vector<uint32_t>{9, 8, 7, 6, 5},
+              "a piece's sounds go by their suffixes, not their places in the archive");
+    }
+}
+
+// The timing of sequences that play together (rip::TimingOfPiece): the latest end, and the longest fade. A silent
+// sequence doesn't count.
+static void TestTimingOfPiece()
+{
+    using rip::Timing;
+    const Timing kLoop{60000, 10000};
+    const Timing kEnd{30000, 0};
+    const Timing kSilent{500, 0, true};
+    const auto same = [](const std::optional<Timing>& a, const Timing& b)
+    {
+        return a && a->length_ms == b.length_ms && a->fade_ms == b.fade_ms && a->silent == b.silent;
+    };
+
+    Check(same(rip::TimingOfPiece({kLoop, kLoop}), kLoop), "sequences that loop together");
+    Check(same(rip::TimingOfPiece({kEnd, Timing{32000, 0}}), Timing{32000, 0}), "sequences that end: the latest end");
+    Check(same(rip::TimingOfPiece({kLoop, Timing{70000, 0}}), Timing{70000, 10000}),
+          "a sequence that ends after another's loops: its end, and the fade");
+    Check(same(rip::TimingOfPiece({kSilent, kEnd, kSilent}), kEnd), "a silent sequence doesn't count");
+    Check(same(rip::TimingOfPiece({kSilent, kSilent}), kSilent), "a piece of silent sequences is silent");
+    Check(same(rip::TimingOfPiece({kEnd}), kEnd), "one sequence keeps its timing");
+    Check(!rip::TimingOfPiece({kLoop, std::nullopt}) && !rip::TimingOfPiece({}),
+          "no timing without the timing of each sequence");
+}
+
+// The archive-mode library and minis: the group files beside the archive, the descriptor's version and a mini that
+// lists the sounds of a piece (docs/3sf.md, "Archive descriptor" and "Sounds that play together").
+static void TestArchiveSets()
+{
+    const std::vector<uint8_t> kArchive = {1, 2, 3};
+    const std::vector<uint8_t> kFirmware = {4, 5};
+    const std::vector<rip::FileChunk> kGroups = {{"GROUP_A.bcgrp", {6}}, {"sound/GROUP_B.bcgrp", {7, 8}}};
+    const std::vector<uint32_t> kPiece = {0x01000009, 0x01000008, 0x01000007};
+    std::map<std::string, std::vector<uint8_t>> files;
+    files["a/plain.3sflib"] = rip::BuildArchiveLibrary("Sound.bcsar", kArchive, "dspaudio.cdc", kFirmware, {});
+    files["a/groups.3sflib"] = rip::BuildArchiveLibrary("Sound.bcsar", kArchive, "dspaudio.cdc", kFirmware, {}, kGroups,
+                                                        ArchiveDescriptor::kListVersion);
+    files["a/piece.mini3sf"] = rip::BuildArchiveMini(kPiece, "groups.3sflib", {});
+    files["a/one.mini3sf"] = rip::BuildArchiveMini(0x01000013, "plain.3sflib", {});
+    const FileReader reader = xsflib::testing::MapReader(files);
+
+    LoadedSet piece;
+    LoadedSet one;
+    const auto piece_error = LoadSet("a/piece.mini3sf", reader, piece);
+    const auto one_error = LoadSet("a/one.mini3sf", reader, one);
+
+    // A library without group files has version 1, and only bit 0 of the flags: the descriptor that every player of
+    // archive mode takes.
+    ArchiveDescriptor v1;
+    v1.archive_path = "Sound.bcsar";
+    v1.firmware_path = "dspaudio.cdc";
+
+    Check(!one_error && one.archive && one.archive->Serialize() == v1.Serialize() &&
+              SoundsToPlay(one) == std::vector<uint32_t>{0x01000013},
+          "a set without group files keeps version 1's descriptor");
+
+    // The group files follow the archive and the firmware, and the descriptor lists them in their order.
+    std::vector<std::string> paths;
+    for (const auto& file : piece.files)
+    {
+        paths.push_back(file.path);
+    }
+
+    Check(!piece_error && piece.archive && piece.archive->version == ArchiveDescriptor::kListVersion &&
+              piece.archive->flags == (kFlagDspRequired | kFlagGroupFiles) &&
+              piece.archive->group_paths == std::vector<std::string>{"GROUP_A.bcgrp", "sound/GROUP_B.bcgrp"},
+          "a set with group files lists them");
+    Check(paths == std::vector<std::string>{"Sound.bcsar", "dspaudio.cdc", "GROUP_A.bcgrp", "sound/GROUP_B.bcgrp"},
+          "the library holds the group files after the archive and the firmware");
+    Check(SoundsToPlay(piece) == kPiece, "a mini of a piece plays its sounds in their order");
+    Check(rip::BuildArchiveMini(0x01000013, "lib", {}) ==
+              rip::BuildArchiveMini(std::vector<uint32_t>{0x01000013}, "lib", {}),
+          "a mini of one sound is the same either way");
+}
+
 int main()
 {
+    TestArchiveSets();
     TestFirmwareCandidates();
     TestFirmwareInCode();
     TestGameFirmware();
     TestMusicLabels();
+    TestPieces();
+    TestTimingOfPiece();
     TestWalkSequence();
 
     return Summary("rip");

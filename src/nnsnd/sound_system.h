@@ -13,6 +13,7 @@
 #include <utility>
 
 #include "dsp/teakra_dsp.h"
+#include "nnsnd/aux_effects.h"
 #include "nnsnd/dsp_abi.h"
 #include "nnsnd/dsp_link.h"
 #include "nnsnd/voice.h"
@@ -74,7 +75,11 @@ public:
     // Runs the DSP to the end of the current frame and processes the returned statuses.
     bool WaitForDspSync();
 
-    // Writes all voice and DSP parameters and commits the frame.
+    // Puts `effects` on the aux buses, as a game does once nn::snd has started. A bus with an effect is turned on and
+    // returns at full volume (0x17940c and 0x179624). nn::snd then runs its effects in each frame's send step.
+    void SetAuxEffects(AuxEffects effects);
+
+    // Runs the effects on the aux buses, writes all voice and DSP parameters and commits the frame.
     void SendParameterToDsp();
 
     VoicePlace PlaceOf(int id) const;
@@ -94,6 +99,7 @@ private:
     DropHandler drop_handler_;
     std::list<Voice*> priority_list_; // highest priority first
     int32_t voice_cycles_ = 0;        // the DSP cycles a frame that voices may take
+    AuxEffects aux_effects_;
 };
 
 } // namespace threesf::nnsnd

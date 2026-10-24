@@ -5,11 +5,14 @@
 #include "rip/rip.h"
 
 #include <algorithm>
+#include <array>
+#include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <exception>
-#include <iterator>
+#include <functional>
+#include <map>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -25,6 +28,7 @@
 
 #include "common/sar_options.h"
 #include "dsp/dsp.h"
+#include "nnsnd/aux_effects.h"
 #include "rip/driver_blob.h"
 #include "rip/game.h"
 #include "threesf/format.h"
@@ -88,7 +92,7 @@ std::vector<uint8_t> DriverPage(const GameProfile& profile)
     std::vector<uint8_t> driver(kDriverRegion, 0);
     std::memcpy(driver.data(), kDriverBlob, sizeof(kDriverBlob));
     constexpr std::size_t kParamsOffset = kDriverParams - kDriverBase;
-    const uint32_t params[] = {
+    std::vector<uint32_t> params = {
         DriverBlock::kMagic,    // magic: "3SFD"
         DriverBlock::kVersion,  // version
         0,                      // status
@@ -114,8 +118,13 @@ std::vector<uint8_t> DriverPage(const GameProfile& profile)
         profile.heap_size,
         profile.device_base,
         profile.device_size,
+        // The reverb on aux bus A.
+        profile.reverb.manager_pointer,
+        profile.reverb.start,
     };
-    for (std::size_t i = 0; i < std::size(params); i++)
+    params.insert(params.end(), profile.reverb.parameters.begin(), profile.reverb.parameters.end());
+    params.insert(params.end(), profile.reverb.filter_sizes.begin(), profile.reverb.filter_sizes.end());
+    for (std::size_t i = 0; i < params.size(); i++)
     {
         xsflib::StoreLe32(driver.data() + kParamsOffset + 4 * i, params[i]);
     }
@@ -182,6 +191,26 @@ const std::vector<GameProfile>& KnownProfiles()
             16u << 20, // data heap
             "sound/xy_sound.bcsar",
             "sound/dspaudio.cdc",
+            // The reverb that the game's field module starts on aux bus A (its function at +0xa3908). It calls the
+            // static module's wrapper 0x424d5c with these parameters. The wrapper reads the sound manager's pointer at
+            // 0x5af0f8, where the game puts it after the manager's init (0x10cc10). It then runs gfl::snd's setup of
+            // the reverb (0x38d7c8) on aux bus A.
+            {
+                0x005af0f8,
+                0x00424d5c,
+                {
+                    0,                              // early reflections: 0 ms
+                    4600,                           // the time in which the reverb falls by 60 dB: 4,600 ms
+                    1,                              // pre-delay: 1 ms
+                    std::bit_cast<uint32_t>(0.5f),  // a level
+                    std::bit_cast<uint32_t>(0.91f), // damping: the coefficient of a one-pole filter in the feedback
+                    0,                              // the filter sizes' pointer, which the driver sets
+                    std::bit_cast<uint32_t>(0.3f),  // a level
+                    std::bit_cast<uint32_t>(0.73f), // a level
+                    0,                              // two flags, both clear: stereo, and damping by a low-pass filter
+                },
+                {1120, 1440, 4960},
+            },
         },
     };
     return kProfiles;
@@ -361,15 +390,32 @@ std::vector<uint8_t> BuildMini(uint32_t sound_id, const std::string& lib_name, T
 
 std::vector<uint8_t> BuildArchiveLibrary(const std::string& archive_path, const std::vector<uint8_t>& archive,
                                          const std::string& firmware_path, const std::vector<uint8_t>& firmware,
-                                         const Tags& tags)
+                                         const Tags& tags, const std::vector<FileChunk>& groups, uint32_t version,
+                                         const nnsnd::AuxEffectLists& effects)
 {
     ArchiveDescriptor descriptor;
+    descriptor.version = version;
     descriptor.archive_path = archive_path;
     descriptor.firmware_path = firmware_path;
+    if (!groups.empty())
+    {
+        descriptor.flags |= kFlagGroupFiles;
+    }
+
+    if (!effects[0].empty() || !effects[1].empty())
+    {
+        descriptor.flags |= kFlagAuxEffects;
+        descriptor.aux_effects = effects;
+    }
 
     ProgramBuilder program;
     program.AddFile(archive_path, archive);
     program.AddFile(firmware_path, firmware);
+    for (const FileChunk& group : groups)
+    {
+        descriptor.group_paths.push_back(group.path);
+        program.AddFile(group.path, group.data);
+    }
 
     return WritePsf(kPsfVersion3sf, descriptor.Serialize(), program.Data(), tags);
 }
@@ -390,6 +436,98 @@ struct ArchiveMiniFormat
 std::vector<uint8_t> BuildArchiveMini(uint32_t sound_id, const std::string& lib_name, Tags tags)
 {
     return ntdlib::rip::BuildMini<ArchiveMiniFormat>(ntdlib::sar::ItemNumber(sound_id), lib_name, std::move(tags));
+}
+
+std::vector<uint8_t> BuildArchiveMini(const std::vector<uint32_t>& sound_ids, const std::string& lib_name, Tags tags)
+{
+    if (sound_ids.size() == 1)
+    {
+        return BuildArchiveMini(sound_ids.front(), lib_name, std::move(tags));
+    }
+
+    ArchiveMiniFormat::ProgramBuilder program;
+    program.AddSounds(sound_ids);
+    tags["_lib"] = lib_name;
+
+    return program.WritePsf(ArchiveMiniFormat::kPsfVersion, {}, tags);
+}
+
+std::vector<Piece> FindPieces(const ntdlib::sar::SoundArchive& archive)
+{
+    static constexpr std::array<std::string_view, 5> kSuffixes = {"_DPCM", "_NOISE", "_P1", "_P2", "_TRI"};
+
+    const auto& sounds = archive.Sounds();
+    std::map<std::string, uint32_t, std::less<>> sequences;
+    for (std::size_t i = 0; i < sounds.size(); i++)
+    {
+        if (sounds[i].type == ntdlib::sar::SoundType::kSequence)
+        {
+            sequences.emplace(sounds[i].name, static_cast<uint32_t>(i));
+        }
+    }
+
+    // Each piece starts at its first channel's sequence.
+    std::vector<Piece> pieces;
+    for (std::size_t i = 0; i < sounds.size(); i++)
+    {
+        const std::string& label = sounds[i].name;
+        if (sounds[i].type != ntdlib::sar::SoundType::kSequence || label.size() <= kSuffixes[0].size() ||
+            !label.ends_with(kSuffixes[0]))
+        {
+            continue;
+        }
+
+        Piece piece{label.substr(0, label.size() - kSuffixes[0].size()), {}};
+        for (const std::string_view suffix : kSuffixes)
+        {
+            const auto found = sequences.find(piece.name + std::string(suffix));
+            if (found == sequences.end())
+            {
+                break;
+            }
+
+            piece.sounds.push_back(found->second);
+        }
+
+        if (piece.sounds.size() == kSuffixes.size() && piece.sounds.front() == i)
+        {
+            pieces.push_back(std::move(piece));
+        }
+    }
+
+    return pieces;
+}
+
+std::optional<Timing> TimingOfPiece(const std::vector<std::optional<Timing>>& timings)
+{
+    const auto missing = [](const std::optional<Timing>& timing)
+    {
+        return !timing;
+    };
+    if (timings.empty() || std::ranges::any_of(timings, missing))
+    {
+        return std::nullopt;
+    }
+
+    std::optional<Timing> piece;
+    for (const std::optional<Timing>& timing : timings)
+    {
+        if (timing->silent)
+        {
+            continue;
+        }
+
+        if (!piece)
+        {
+            piece = timing;
+            continue;
+        }
+
+        piece->length_ms = std::max(piece->length_ms, timing->length_ms);
+        piece->fade_ms = std::max(piece->fade_ms, timing->fade_ms);
+    }
+
+    return piece ? piece : timings.front();
 }
 
 bool IsDspFirmware(const std::vector<uint8_t>& data)

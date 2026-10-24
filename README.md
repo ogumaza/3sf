@@ -18,6 +18,35 @@ The format is described in [`docs/3sf.md`](docs/3sf.md). Game mode needs a small
 per game (`src/rip/rip.cpp`), and so far only Pokemon X (Japan) has one. Archive mode takes any
 sound archive, with a DSP firmware file.
 
+Some games keep groups of their sound data outside the sound archive, in group files (`.bcgrp`).
+`3sfrip` finds each one by its group's name, in the game's RomFS or in the folder of a loose
+`.bcsar` and the folders below it. The `.3sflib` holds the parts of the group files that the rips
+play. Mighty Gunvolt Burst keeps its sound data that way. It also plays each piece of its music as
+five sequences, one for each channel of the NES's sound chip. `3sfrip` rips each piece as one
+`.mini3sf`. Like the game, the `.mini3sf` starts the five together. Rips with group files or with
+such pieces require a player newer than 3SF 1.3.3. 3SF 1.3.3 refuses them. `docs/3sf.md`
+describes both, under "Archive descriptor" and "Sounds that play together".
+
+Besides the main mix, a 3DS sends sounds to two aux buses, A and B. A game puts effects on them
+as it runs, such as a reverb. Its sound archive doesn't hold them. In archive mode, `3sfrip`
+writes the effects of these games into their rips. The player runs them as the game's sound
+library does:
+
+- Pokémon X: a reverb on bus A. The game starts it in the field. Some of the field's sound
+  effects send to it.
+- WarioWare Gold (North America, the first release and Rev 1): a reverb on each bus.
+- The Legend of Zelda: Ocarina of Time 3D (North America): a reverb on bus A and a delay on bus B.
+- The Legend of Zelda: Majora's Mask 3D (North America): a delay on bus B.
+
+Ocarina of Time 3D and Majora's Mask 3D pick bus B's delay from 18 presets for each scene. A rip
+plays every sound with the preset that the game picks when it starts. In one of its modes,
+WarioWare Gold also puts a pitch shifter on bus A. The rips leave it out. `3sfrip` finds a game
+by its program ID. Other regions' releases of WarioWare Gold, Ocarina of Time 3D and Majora's
+Mask 3D have other IDs. Their rips get no effects until someone reads their code. Rips of a loose
+`.bcsar` or of any other game get none. Some games use effects that the DSP runs. Archive mode
+doesn't play those. Rips with effects require a player newer than 3SF 1.3.3. 3SF 1.3.3 refuses
+them. `docs/3sf.md` describes the effects under "Effects on the aux buses".
+
 ## Tools
 
 | Tool | Description |

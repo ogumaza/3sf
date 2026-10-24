@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -14,6 +15,8 @@
 #include "xsflib/psf/program.h"
 #include "xsflib/psf/psf.h"
 #include "xsflib/psf/set.h"
+
+#include "nnsnd/aux_effects.h"
 
 namespace threesf
 {
@@ -25,8 +28,13 @@ constexpr uint8_t kPsfVersion3sf = 0x26;
 // DSP's exact output rate is 268111856 / 8192, about 32728.498 Hz.
 constexpr int kPlayerSampleRate = 32728;
 
-// Descriptor flags. Version 1 requires bit 0 (DSP required) and rejects all other bits.
+// Descriptor flags. Every descriptor requires bit 0 (DSP required). An archive descriptor may also set bit 1 (group
+// files) and bit 2 (aux effects). With bit 1, it lists the group files that the set holds beside the sound archive
+// (docs/3sf.md, "Archive descriptor"). With bit 2, it gives the effects on the aux buses (docs/3sf.md, "Effects on the
+// aux buses"). Players of 3SF 1.3.3 and older refuse any other flags than bit 0.
 constexpr uint32_t kFlagDspRequired = xsflib::psf::kDescriptorFlagDspRequired;
+constexpr uint32_t kFlagGroupFiles = 2;
+constexpr uint32_t kFlagAuxEffects = 4;
 
 // Output modes: 0 mono, 1 stereo, 2 surround. Version 1 plays stereo only.
 constexpr uint32_t kOutputStereo = xsflib::psf::kDescriptorOutputStereo;
@@ -73,6 +81,11 @@ struct ArchiveDescriptor
     static constexpr uint32_t kMagic = 0x41465333; // "3SFA"
     static constexpr uint32_t kVersion = 1;
 
+    // The version of a set whose minis select several sounds that play together (docs/3sf.md, "Sounds that play
+    // together"). Players of 3SF 1.3.3 and older accept version 1 alone. They refuse such a set rather than play its
+    // first sound alone.
+    static constexpr uint32_t kListVersion = 2;
+
     static std::optional<ArchiveDescriptor> Parse(const std::vector<uint8_t>& data);
 
     // Returns an error message for an unsupported descriptor, or no value if it is supported.
@@ -85,7 +98,21 @@ struct ArchiveDescriptor
     uint32_t output_mode = kOutputStereo;
     std::string archive_path;  // FILE chunk holding the sound archive (.bcsar)
     std::string firmware_path; // FILE chunk holding the DSP firmware (a DSP1 image)
+
+    // With kFlagGroupFiles: the FILE chunks holding the group files beside the archive (.bcgrp), in the order in which
+    // the player adds them.
+    std::vector<std::string> group_paths;
+
+    // With kFlagAuxEffects: the effects on aux buses A and B. A bus without an effect stays off.
+    nnsnd::AuxEffectLists aux_effects;
+
+    // Why this player can't play the effects that Parse read: one has a kind or flags that it doesn't know. Parse
+    // stops reading the effects there, and Check returns the reason.
+    std::optional<std::string> unsupported_effect;
 };
+
+// The most sounds that an archive-mode set plays together.
+constexpr std::size_t kMaxSounds = 16;
 
 // The program builder (xsflib::psf).
 using xsflib::psf::ProgramBuilder;
@@ -124,9 +151,14 @@ struct SetFormat
 using LoadedSet = xsflib::psf::LoadedSet<SetFormat>;
 
 // Loads a 3SF/mini3SF file with its _lib/_libN chain. Paths in _lib tags are relative to the directory of the file that
-// names them: its path up to the last of `separators`. Returns an error for a set a version 1 player can't play: a
+// names them: its path up to the last of `separators`. Returns an error for a set that this player can't play: a
 // descriptor that fails its Check(), or a game-mode set whose driver block has another version or an output mode other
 // than stereo.
 using xsflib::psf::LoadSet;
+
+// The sounds that an archive-mode set plays, by their item IDs, in the order in which they start (docs/3sf.md, "Sounds
+// that play together"): every sound that the set's last SND chunk lists with archive descriptor version 2, and the
+// first alone with version 1. Empty for a set without a SND chunk or an archive descriptor.
+std::vector<uint32_t> SoundsToPlay(const LoadedSet& set);
 
 } // namespace threesf

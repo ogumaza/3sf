@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: MIT
 
-// The ripper's choice of music for 3sfrip's --bgm: by a sound's label, or by the shape of its sequence.
+// The ripper's choice of music for 3sfrip's --bgm: by a sound's label, or by the shape of its sequence. The walk that
+// finds a sequence's shape also finds the aux buses that it sends to.
 
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <span>
 #include <string_view>
@@ -19,6 +21,9 @@ struct SequenceShape
 {
     int tracks = 1; // the track it starts on, and one for each track it opens
     int notes = 0;  // note commands, each counted once
+
+    // Whether a command sets the send to aux bus A, B or C to anything but 0: a value, a random value or a variable.
+    std::array<bool, 3> aux_sends{};
 };
 
 // Walks `data`, a sequence's commands (the payload of its CSEQ's DATA block), from `start`.
@@ -32,5 +37,9 @@ bool LabelMarksMusic(std::string_view label);
 // least two tracks besides the one it starts on and has at least 50 notes. The second rule finds the music that a label
 // doesn't mark, and the music in archives without labels.
 bool IsMusic(const ntdlib::sar::SoundArchive& archive, const ntdlib::sar::SoundInfo& sound);
+
+// Whether a sound is a sequence whose commands send to aux bus A (SequenceShape::aux_sends). A sequence that doesn't
+// parse doesn't.
+bool SendsToBusA(const ntdlib::sar::SoundArchive& archive, const ntdlib::sar::SoundInfo& sound);
 
 } // namespace threesf::rip

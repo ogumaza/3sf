@@ -17,6 +17,7 @@
 
 #include "common/sar_options.h"
 #include "dsp/fcram.h"
+#include "nnsnd/aux_effects.h"
 #include "nnsnd/sound_system.h"
 #include "nwsnd/sequence.h"
 #include "nwsnd/voice.h"
@@ -367,14 +368,17 @@ void ArchiveModel::Restore(const Snapshot& snapshot)
 }
 
 bool ArchiveModel::Start(std::span<const uint8_t> firmware, const ntdlib::sar::SoundArchive& archive,
-                         uint8_t output_mode)
+                         uint8_t output_mode, const nnsnd::AuxEffectLists& effects)
 {
+    nnsnd::AuxEffects models(effects);
     nnsnd::DspDefaults defaults;
     defaults.output_mode = output_mode;
     if (!snd.Initialize(firmware, defaults))
     {
         return false;
     }
+
+    snd.SetAuxEffects(std::move(models));
 
     EngineOptions options;
     options.output_mode = output_mode;

@@ -48,6 +48,11 @@ public:
     MixerParams& Mixer();
     const SourceReport& SourceReportOf(int voice) const;
 
+    // Aux bus `bus`'s frame in the intermediate mix of the read region (structure 7): four channels of 160 32-bit
+    // samples, one after another, as the ARM11 reads them. nn::snd's send step processes them in place (0x18b2d4).
+    // Unlike the structures above, the frame isn't copied: the pointer goes straight into DSP RAM.
+    uint8_t* AuxBus(int bus) const;
+
 private:
     // Host copies of one of the firmware's structures, one per region. They're loaded from DSP RAM when first used,
     // written back before the DSP next runs, and reloaded after that.

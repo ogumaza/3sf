@@ -28,7 +28,11 @@ enum StructIndex
     kSourceReports = 2,
     kAdpcmCoefficients = 3,
     kMixerParams = 4,
+    kIntermediateMix = 7,
 };
+
+// The intermediate mix holds the frames of aux buses A and B, one after the other.
+constexpr std::size_t kAuxBusBytes = 4 * 160 * sizeof(int32_t);
 
 // nn::snd per-frame semaphore value (SetSemaphoreMask at code.bin 0x148838) and the value it sets directly during
 // initialization (0x1488e8).
@@ -89,12 +93,13 @@ bool DspLink::Initialize(std::span<const uint8_t> component)
     }
 
     // Every structure used here has to lie inside DSP RAM in both regions (region 1 is the higher one).
-    constexpr std::array<std::pair<int, std::size_t>, 5> kUsed = {{
+    constexpr std::array<std::pair<int, std::size_t>, 6> kUsed = {{
         {kFrameCounter, sizeof(uint16_t)},
         {kSourceParams, sizeof(std::array<SourceParams, kNumSources>)},
         {kSourceReports, sizeof(std::array<SourceReport, kNumSources>)},
         {kAdpcmCoefficients, sizeof(AdpcmCoefficientTable)},
         {kMixerParams, sizeof(MixerParams)},
+        {kIntermediateMix, 2 * kAuxBusBytes},
     }};
     for (const auto& [structure, size] : kUsed)
     {
@@ -178,6 +183,11 @@ MixerParams& DspLink::Mixer()
 const SourceReport& DspLink::SourceReportOf(int voice) const
 {
     return Get(reports_, kSourceReports, read_region_)[voice];
+}
+
+uint8_t* DspLink::AuxBus(int bus) const
+{
+    return Address(kIntermediateMix, read_region_) + static_cast<std::size_t>(bus) * kAuxBusBytes;
 }
 
 uint8_t* DspLink::Address(int structure, int region) const

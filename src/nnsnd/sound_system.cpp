@@ -4,10 +4,13 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstring>
 #include <span>
+#include <utility>
 #include <vector>
 
 #include "dsp/teakra_dsp.h"
+#include "nnsnd/aux_effects.h"
 #include "nnsnd/dsp_abi.h"
 #include "nnsnd/voice.h"
 
@@ -105,9 +108,10 @@ void SoundSystem::WriteDspDefaults(const DspDefaults& defaults)
     c.sync_mode = 1; // MixerParams +0xbc: nn::snd writes the system sound mode here
     c.dirty2 |= 1u << 16;
 
-    // The voices get what the output leaves of the frame's cycles (0x18b380). The aux buses' effects (0x18d2f4) take
-    // none: the model has none. When its voice manager's flag at +0xe is set, nn::snd also takes off the cycles over
-    // 655,300 that the DSP last reported. The game doesn't set the flag.
+    // The voices get what the output leaves of the frame's cycles (0x18b380). The firmware's effects on the aux buses
+    // (0x18d2f4) take none: the model has none. The effects on the ARM11 take no DSP cycles. When its voice manager's
+    // flag at +0xe is set, nn::snd also takes off the cycles over 655,300 that the DSP last reported. The game doesn't
+    // set the flag.
     voice_cycles_ = kFrameCycles - OutputCycles(defaults.output_mode, defaults.clipping_mode);
 }
 
@@ -214,8 +218,37 @@ bool SoundSystem::WaitForDspSync()
     return true;
 }
 
+void SoundSystem::SetAuxEffects(AuxEffects effects)
+{
+    aux_effects_ = std::move(effects);
+
+    for (int bus = 0; bus < kAuxBusCount; bus++)
+    {
+        if (aux_effects_.Has(bus))
+        {
+            MixerParams& c = link_.Mixer();
+            c.aux_return[bus] = 1.0f;
+            c.aux_enable[bus] = 1;
+            c.dirty |= (1u << (24 + bus)) | (1u << (8 + bus));
+        }
+    }
+}
+
 void SoundSystem::SendParameterToDsp()
 {
+    // 0x18b2d4: first the effects, over the frames of the aux buses that the DSP last mixed.
+    for (int bus = 0; bus < kAuxBusCount; bus++)
+    {
+        if (aux_effects_.Has(bus))
+        {
+            uint8_t* data = link_.AuxBus(bus);
+            AuxFrame frame;
+            std::memcpy(frame.data(), data, sizeof(frame));
+            aux_effects_.Process(bus, frame);
+            std::memcpy(data, frame.data(), sizeof(frame));
+        }
+    }
+
     // 0x18d368 / 0x18d514
     for (auto& v : voices_)
     {

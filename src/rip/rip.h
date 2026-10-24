@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -12,13 +13,28 @@
 #include <vector>
 
 #include "ntdlib/sar/formats.h"
+#include "xsflib/psf/program.h"
 #include "xsflib/rip/file_names.h"
+#include "xsflib/rip/length.h"
 
+#include "nnsnd/aux_effects.h"
 #include "rip/game.h"
 #include "threesf/format.h"
 
 namespace threesf::rip
 {
+
+// A reverb that the driver starts on aux bus A before it plays the sound, as the game does (see driver/driver.c).
+// `start` is 0 for a game without one.
+struct ReverbProfile
+{
+    uint32_t manager_pointer; // where the game keeps the pointer to its sound manager object
+    uint32_t start;           // start(gfl heap, parameters): starts the reverb on aux bus A
+    // nw::snd's FxReverb parameters, as the driver passes them. The block's pointer to its filter sizes (word 5) is
+    // left 0. The driver points it at `filter_sizes`.
+    std::array<uint32_t, 9> parameters;
+    std::array<uint32_t, 3> filter_sizes; // in samples
+};
 
 // Game-specific addresses for the driver (see driver/driver.c).
 struct GameProfile
@@ -35,6 +51,7 @@ struct GameProfile
     uint32_t data_heap_size; // device memory for one sound's data
     const char* archive;     // RomFS path of the sound archive
     const char* firmware;    // RomFS path of the DSP firmware
+    ReverbProfile reverb;
 };
 
 const std::vector<GameProfile>& KnownProfiles();
@@ -75,14 +92,50 @@ std::optional<std::vector<uint8_t>> BuildLibrary(const GameFiles& game, const Ga
 // Game mode: a .mini3sf that plays `sound_id` from `lib_name`.
 std::vector<uint8_t> BuildMini(uint32_t sound_id, const std::string& lib_name, Tags tags);
 
-// Archive mode: a .3sflib holding the sound archive and the DSP firmware as FILE chunks at the given paths, with an
-// archive descriptor.
+// A file of a set: its path and its data.
+using FileChunk = xsflib::psf::FileChunk;
+
+// Archive mode: a .3sflib holding the sound archive, the DSP firmware and the group files `groups` beside the archive,
+// as FILE chunks at the given paths, with an archive descriptor. The descriptor lists the group files, with
+// kFlagGroupFiles, when there are any. It gives `effects` on the aux buses, with kFlagAuxEffects, when there are any.
+// The descriptor has version `version`: ArchiveDescriptor::kListVersion when a mini of the set plays several sounds.
 std::vector<uint8_t> BuildArchiveLibrary(const std::string& archive_path, const std::vector<uint8_t>& archive,
                                          const std::string& firmware_path, const std::vector<uint8_t>& firmware,
-                                         const Tags& tags);
+                                         const Tags& tags, const std::vector<FileChunk>& groups = {},
+                                         uint32_t version = ArchiveDescriptor::kVersion,
+                                         const nnsnd::AuxEffectLists& effects = {});
 
 // Archive mode: a .mini3sf that plays `sound_id` (a sequence) from `lib_name`.
 std::vector<uint8_t> BuildArchiveMini(uint32_t sound_id, const std::string& lib_name, Tags tags);
+
+// Archive mode: a .mini3sf that plays the sequences `sound_ids` together from `lib_name`, started in that order
+// (docs/3sf.md, "Sounds that play together"). The library's descriptor must have ArchiveDescriptor::kListVersion when
+// `sound_ids` holds more than one sound. A list of one sound gives the mini of that sound alone.
+std::vector<uint8_t> BuildArchiveMini(const std::vector<uint32_t>& sound_ids, const std::string& lib_name, Tags tags);
+
+// A piece of music whose channels a game plays as separate sequences, started together (docs/3sf.md, "Sounds that play
+// together"): the piece's name, and the sequences by their indices in the archive, in the order in which the game
+// starts them.
+struct Piece
+{
+    std::string name;
+    std::vector<uint32_t> sounds;
+};
+
+// The pieces of `archive` whose channels are separate sequences. Mighty Gunvolt Burst plays each piece of its music as
+// five sequences, one for each channel of the NES's sound chip. It starts them together: the DPCM channel, the noise,
+// the two pulse channels and the triangle. Their labels are the piece's name followed by _DPCM, _NOISE, _P1, _P2 and
+// _TRI. A piece is five sequences labelled with one name and those suffixes. The pieces come in the order of their
+// first sounds.
+std::vector<Piece> FindPieces(const ntdlib::sar::SoundArchive& archive);
+
+// A sequence's length and fade in milliseconds, and whether it never makes a sound (xsflib/rip/length.h).
+using Timing = xsflib::rip::Timing;
+
+// The timing of sequences that play together, from the timing that the length analysis gives each sequence alone: the
+// latest end, and the longest fade. Sequences that never make a sound don't count, unless all are silent. Without the
+// timing of one of the sequences, there is none.
+std::optional<Timing> TimingOfPiece(const std::vector<std::optional<Timing>>& timings);
 
 // True if `data` is a DSP1 firmware image (such as a game's dspaudio.cdc).
 bool IsDspFirmware(const std::vector<uint8_t>& data);

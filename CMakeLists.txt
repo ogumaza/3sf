@@ -3,7 +3,7 @@
 cmake_minimum_required(VERSION 3.20)
 # Shared version for 3sfrip, 3sfplay, the foobar2000 component, the XMPlay plugin, Windows file properties and macOS
 # bundles (THREESF_VERSION_ARGS below). For a release, update it here and add notes in docs/release-notes/.
-project(threesf VERSION 1.3.3 LANGUAGES CXX)
+project(threesf VERSION 1.4.0 LANGUAGES CXX)
 
 # xsflib is a library for players and rippers of the PSF family. It's a submodule. Its XsflibProject.cmake sets what a
 # project built on it starts with: C++20, a release build by default, the static C runtime, the options that keep the
@@ -55,8 +55,10 @@ add_library(threesf_dsp STATIC
 target_link_libraries(threesf_dsp PUBLIC threesf_common teakra)
 target_compile_options(threesf_dsp PRIVATE ${THREESF_WARNINGS})
 
-# nn::snd model: the ARM11 side of the DSP protocol.
+# nn::snd model: the ARM11 side of the DSP protocol, and the effects on the aux buses on ntdlib's models of them.
 add_library(threesf_nnsnd STATIC
+    src/nnsnd/aux_effects.cpp
+    src/nnsnd/aux_effects.h
     src/nnsnd/dsp_abi.h
     src/nnsnd/dsp_link.cpp
     src/nnsnd/dsp_link.h
@@ -65,7 +67,7 @@ add_library(threesf_nnsnd STATIC
     src/nnsnd/voice.cpp
     src/nnsnd/voice.h
 )
-target_link_libraries(threesf_nnsnd PUBLIC threesf_dsp)
+target_link_libraries(threesf_nnsnd PUBLIC threesf_dsp ntdlib::ctr_fx)
 target_compile_options(threesf_nnsnd PRIVATE ${THREESF_WARNINGS})
 
 # nw::snd model: ntdlib's sequence player, channels and envelopes with the 3DS's rules, and the engine and the voice
@@ -131,9 +133,12 @@ add_library(threesf_core STATIC
 target_link_libraries(threesf_core PUBLIC threesf_horizon threesf_nwsnd xsflib::player)
 target_compile_options(threesf_core PRIVATE ${THREESF_WARNINGS})
 
-# Ripper: game profiles, the guest driver (driver/driver.c, prebuilt) and length analysis.
+# Ripper: game profiles, the guest driver (driver/driver.c, prebuilt), the games' effects on the aux buses and length
+# analysis.
 add_library(threesf_rip STATIC
     src/rip/driver_blob.h
+    src/rip/effects.cpp
+    src/rip/effects.h
     src/rip/game.cpp
     src/rip/game.h
     src/rip/length.cpp
@@ -195,7 +200,7 @@ if (THREESF_TESTS)
     xsflib_add_project_test(threesf teakra_dsp threesf_dsp)
     xsflib_add_project_test(threesf teakra_jit threesf_dsp)
     xsflib_add_project_test(threesf teakra_state threesf_dsp)
-    xsflib_add_project_test(threesf rip threesf_rip)
+    xsflib_add_project_test(threesf rip threesf_rip ntdlib::testing)
 
     # The tools report the version they were built as.
     string(REPLACE "." "\\." version_pattern ${threesf_VERSION})

@@ -32,8 +32,8 @@ sound update forever. The player produces the DSP's audio output.
 | Extension | Contents |
 |---|---|
 | `.3sf` | A self-contained rip (rarely used). |
-| `.3sflib` | Shared data for one game. Game mode: code segments, driver, RomFS files. Archive mode: the sound archive and the DSP firmware. |
-| `.mini3sf` | One sound: a small chunk that selects the sound, plus tags; references a `.3sflib` with `_lib`. |
+| `.3sflib` | Shared data for one game. Game mode: code segments, driver, RomFS files. Archive mode: the sound archive, the DSP firmware and any group files beside the archive. |
+| `.mini3sf` | One sound, or the sounds of a piece that play together: a small chunk that selects them, plus tags; references a `.3sflib` with `_lib`. |
 
 All three use the PSF container.
 
@@ -78,7 +78,7 @@ u32  size of the payload in bytes (excluding padding)
 |---|---|---|
 | `MEM ` | `u32 address`, then data | Load the data into the emulated address space at `address`. Pages that a `MEM` chunk touches are mapped read/write and zero-filled first. |
 | `FILE` | `u16 path length`, the UTF-8 path (no leading `/`, `/` separators), zeros to a multiple of 4, then the file data | A file in the game's RomFS, as seen through `rom:/` (for example `sound/xy_sound.bcsar`). |
-| `SND ` | `u32 sound id` | Archive mode: the sound to play, as a `nw::snd` item id (`0x01000000 \| index` in the archive's sound table). The last one in loading order takes effect. |
+| `SND ` | `u32 sound id`, one or more | Archive mode: the sounds to play, each as a `nw::snd` item id (`0x01000000 \| index` in the archive's sound table). A list of several sounds plays them together (see "Sounds that play together"). The last `SND ` chunk in loading order takes effect. |
 
 Unknown chunk types are skipped. Chunks are applied in order. For the same address or path, later
 data replaces earlier data.
@@ -119,19 +119,42 @@ memory size of 0 or greater than 0x0B200000 (178 MiB, the maximum available to a
 
 ```
 0x00  u32  magic "3SFA"
-0x04  u32  descriptor version (1)
-0x08  u32  flags: bit 0 = the DSP is required; version 1 has no other flags
-0x0C  u32  output mode: 1 stereo (version 1 plays stereo only)
+0x04  u32  descriptor version (1 or 2)
+0x08  u32  flags: bit 0 = the DSP is required; bit 1 = the set holds group files;
+           bit 2 = the set gives effects on the aux buses
+0x0C  u32  output mode: 1 stereo (this version plays stereo only)
 0x10  u16  length of the sound archive's path, then the path (UTF-8)
       u16  length of the DSP firmware's path, then the path (UTF-8)
+      with bit 1 of the flags: the group files
+      u16  the number of group files
+           then for each: u16 length of its path, then the path (UTF-8)
+      with bit 2 of the flags: the effects of aux bus A, then those of aux bus B
+      u16  the number of the bus's effects
+           then for each: u32 its kind, then its parameters (see "Effects on the aux buses")
       zeros to a multiple of 4
 ```
 
-The paths identify `FILE` chunks containing the sound archive (`.bcsar`) and DSP firmware (a
-DSP1 image). A version 1 player rejects archive descriptors with a different version, flags
-other than 1, or an output mode other than 1. Output modes 0 (mono) and 2 (surround) are reserved
-for a later version. Reproducing the console's surround output requires configuration data that
-rips don't contain.
+The paths identify `FILE` chunks containing the sound archive (`.bcsar`), the DSP firmware (a
+DSP1 image) and the group files (`.bcgrp`). A group file holds copies of some of the archive's
+files. A game can keep groups outside its sound archive, in group files that it loads itself.
+The player adds the group files to the archive in the list's order. It reads a file that the
+archive lacks from the first group file that holds a copy of it. A player rejects archive
+descriptors with another version, without bit 0 of the flags, with a flag above bit 2, with an
+output mode other than 1, or with effects that it can't play (see "Effects on the aux buses").
+Output modes 0 (mono) and 2 (surround) are reserved for a later
+version. Reproducing the console's surround output requires configuration data that rips don't
+contain.
+
+Version 2 has the layout of version 1. It marks a set in which a `.mini3sf` selects several
+sounds that play together (see "Sounds that play together"). With version 1, a player plays the
+first sound of such a list alone. A set whose files each select one sound has version 1. A set
+without group files or effects has flags of 1 alone. Players of 3SF 1.3.3 and older take
+version 1 with flags of 1 alone. They refuse a set of version 2 with the message "archive
+descriptor version 2; this player supports version 1". They refuse a set with group files with
+the message "the archive descriptor's flags are 0x3; version 1 requires only bit 0 (DSP
+required) to be set". They refuse a set with effects the same way, with flags of 0x5 or 0x7.
+They would otherwise play the first sound of each list alone, play without the group files'
+copies, or play without the effects.
 
 ## The emulated system (game mode)
 
@@ -216,13 +239,99 @@ the game's code:
 library, or another number of voices, so archive-mode rips of them are close but not guaranteed
 exact. When a game has a driver profile, game mode is preferred.
 
-Version 1 plays sequence sounds only. An archive stores files directly in its FILE block or
-inside a group file (CGRP). A group's INFO block lists each embedded file's id, offset and size;
-some files exist only inside groups. External banks and wave archives aren't supported, so the
-ripper skips sequences that need them.
+Archive mode plays sequence sounds only. An archive stores files directly in its FILE block, or
+as copies in group files (CGRP). A group file's INFO block lists each copy's file id, offset and
+size. Some files exist only as copies in groups. A group file can be one of the archive's files.
+A group that the archive keeps outside it has no file in the archive. The game loads that group's
+file (`.bcgrp`) from the RomFS. The set holds a copy of it (see "Archive descriptor").
+The model reads a file from the archive's FILE block, or else from the first group file that
+holds a copy of it: first the archive's group files, in the order of its groups, then the group
+files that the descriptor lists, in their order. Like the 3DS's sound library, it reads a copy in
+a group file only when the archive lacks the file. Banks and wave archives that lie in files
+outside the archive and outside every group file aren't supported. The ripper skips the
+sequences that need them.
 The output starts with the samples that the DSP makes while its firmware starts. The frames from
 the sound's start follow. The sound has finished when the sequence has ended and no voice is
 sounding.
+
+## Sounds that play together
+
+A game can play a piece of music as several sequences that it starts together. **Mighty Gunvolt
+Burst** plays each piece of its music as five sequences, one for each channel of the NES's sound
+chip: the DPCM channel, the noise, the two pulse channels and the triangle. Each plays on a
+player of its own. The game's table of its 27 pieces (0x49f000) gives each piece's five sounds in
+that order. The function at 0x2d1b24 starts the five in that order, one after another, with one
+call for each. Each call starts its sound without start parameters. A rip plays the music without
+sound effects.
+
+In archive mode, a `.mini3sf` for such a piece lists its sounds in its `SND ` chunk, in the order
+in which the game starts them. The set's archive descriptor has version 2 (see "Archive
+descriptor"). A player then plays the sounds together:
+
+- Every listed sound starts before the first frame, in the list's order. Each sound has a
+  sequence player of its own. In each frame, the players run in the order in which they started.
+- `3sf_var` applies to every sound of the list (see "Tags").
+- The sounds have finished when every sequence has ended and no voice is sounding.
+- A list holds at most 16 sounds. A player refuses a longer one.
+
+The ripper finds such pieces by their labels (see "Archive mode" under "Ripping").
+
+## Effects on the aux buses
+
+Besides the main mix, a voice sends to two aux buses, A and B. A game puts effects on them at
+run time, such as a reverb. The sound archive doesn't hold them. In archive mode, the archive
+descriptor gives them (see "Archive descriptor"). A bus without an effect is off. What the voices
+send to it is lost. A bus with an effect is on, and returns to the mix at full volume. The
+effects start with silence in their buffers, before the sound's first frame.
+
+In each frame, the DSP mixes each bus into a frame of four channels of 160 32-bit samples: front
+left, front right, rear left and rear right. Each sample is on the scale of a 16-bit one. The
+player runs a bus's effects over the frame that the DSP last mixed, in place, in the list's
+order. It does so before it writes the next frame's parameters, as `nn::snd`'s send step does
+(Pokemon X's `code.bin`, 0x18b2d4). The DSP then mixes the bus's frame back into the main mix.
+
+| Kind | Effect | Parameters |
+|---|---|---|
+| 1 | `nw::snd`'s FxReverb | a reverb's |
+| 2 | `nn::snd`'s FxReverb, as games from 2013 on link it | a reverb's |
+| 3 | `nn::snd`'s FxReverb, as Ocarina of Time 3D links it (2011) | a reverb's |
+| 4 | FxDelay, `nw::snd`'s or `nn::snd`'s: the two compute the same | a delay's |
+
+A reverb's parameters, 44 bytes, in the order of `nw::snd`'s `FxReverb::Param`:
+
+```
+u32  early reflection time in ms
+u32  fused time in ms: the comb filters fall by 60 dB in it
+u32  pre-delay time in ms
+f32  coloration, the all-pass filter's gain: 0 to 1
+f32  damping: 0 to 1
+u32  the lengths of the first comb filter, the second comb filter and the all-pass filter, in
+     samples, three values: a whole number of frames of 160 samples each, one frame at least
+f32  early gain: 0 to 1
+f32  fused gain: 0 to 1
+u32  flags: bit 0 = all four channels (kind 1 alone); bit 1 = the damping filter keeps the
+     highs in place of the lows (not kind 3, whose filter always keeps the highs)
+```
+
+A delay's parameters, 16 bytes, in the order of `nw::snd`'s `FxDelay::Param`:
+
+```
+u32  delay time in ms
+f32  feedback: 0 to 1
+f32  damping: 0 to 1
+u32  flags: bit 0 = all four channels
+```
+
+An `f32` is an IEEE 754 single-precision value, little-endian. Without bit 0 of its flags, an
+effect processes the front channels alone. Each kind computes as its library does, sample for
+sample. That includes the setup's arithmetic in the ARM11's single precision. It runs in the mode
+that the games' startup code sets (FPSCR 0x03000000): results round to nearest, denormal values
+flush to zero, and a NaN comes out as the default NaN. It also includes the library's layout of
+each buffer in whole frames. Each of a reverb's buffers holds one frame at least. ntdlib's models
+(`ntdlib/ctr_fx/effects.h`) do the same.
+A player rejects an effect of another kind, flags that the effect doesn't have, parameters that
+its library refuses, and effects whose buffers would take more than the 178 MiB that a 3DS gives
+a program.
 
 ## Driver (game mode)
 
@@ -250,6 +359,12 @@ Version 1's game profile is for games whose sound code is Game Freak's `gfl::snd
 `nw::snd`, such as Pokemon X: the driver calls gfl's functions to load and play a sound. A game
 that drives `nw::snd` itself needs a later version of the block.
 
+A profile may also give a reverb. In Pokemon X, the field module starts an `nw::snd` FxReverb on
+aux bus A. Some of the field's sound effects send to that bus. A rip doesn't load the module. The
+driver therefore starts the reverb before it loads the sound. It passes the module's parameters to
+the function of the game that the module calls. The reverb's work buffer comes from the driver's
+heap. If the call fails, the status reads 0x80000008.
+
 After loading the sound, the driver repeatedly sleeps for the period at 0x1C (`svcSleepThread`)
 and runs the game's sound update. The interval between updates is therefore the sleep period
 plus the update's execution time. The driver sets status to 2 when the game's sound handle is
@@ -273,9 +388,9 @@ ends of the sound:
 
 The standard PSF tags apply: `title`, `artist`, `game`, `year`, `genre`, `comment`,
 `copyright`, `length`, `fade`, `volume`, `_lib`, `_libN`. `3sfby` credits the ripper. The ripper
-also writes `3sf_sound` with the sound's label from the sound archive (for example
-`SEQ_BGM_TITLE`) and `3sf_mode`: `game` or `archive`, so that players and listeners can
-tell the modes apart.
+also writes `3sf_sound` and `3sf_mode`. `3sf_sound` holds the sound's label from the sound archive
+(for example `SEQ_BGM_TITLE`), or the labels of a piece's sounds separated by ", ". `3sf_mode` is
+`game` or `archive`. Players and listeners can tell the modes apart by it.
 
 `length` and `fade` count time at 32,728 Hz, the rate players report, not at the DSP's exact
 rate: a player plays `length` × 32,728 stereo samples before the fade, and the ripper writes a
@@ -292,7 +407,8 @@ too. N is 0 to 15 for the sound's player variables, and 16 to 31 for the global 
 prefix, and may have a minus sign. A later assignment to the same variable wins. In archive
 mode, a player sets the variables after it sets up the sequence and before the sequence's first
 tick. A player ignores the whole tag if any part of it is malformed or out of range. Game mode
-ignores the tag: version 1's driver can't set variables. `3sfrip --var N=V` writes the tag,
+ignores the tag: version 1's driver can't set variables. A set whose `.mini3sf` lists several
+sounds sets the variables of each of them. `3sfrip --var N=V` writes the tag,
 with the assignments in increasing order of N, in decimal, separated by ", ":
 `3sf_var=0=1, 17=-1`.
 
@@ -317,7 +433,8 @@ The `.3sflib` contains:
 - a process descriptor.
 
 Each `.mini3sf` selects one sequence or wave sound. A sequence's length comes from playing it
-on 3SF's model of the sound player (see "Lengths").
+on 3SF's model of the sound player. For a sequence that sends to the driver's reverb, it comes
+from a render of the rip too (see "Lengths").
 
 The sound archive in the `.3sflib` has the size and the layout of the game's. Its header, `STRG`
 block and `INFO` block keep their bytes. In the `FILE` block, the files that the ripped sequences
@@ -339,9 +456,27 @@ reported, and `--mode archive` rips them.
 ### Archive mode
 
 The `.3sflib` holds the sound archive and a DSP firmware as `FILE` chunks, with an archive
-descriptor. Each `.mini3sf` selects one sequence with a `SND ` chunk. Lengths come from the same
-analysis as in game mode. `--var` sets variables for every sequence ripped, in the analysis and
-in the `3sf_var` tag.
+descriptor. It also holds the group files beside the archive that hold data of the ripped
+sequences, as `FILE` chunks too. Each `.mini3sf` selects one
+sequence with a `SND ` chunk, or the sequences of a piece that the game plays together. Lengths
+come from the same analysis as in game mode. `--var` sets variables for every sequence ripped,
+in the analysis and in the `3sf_var` tag.
+
+The ripper knows the effects that some games put on the aux buses (see "Effects on the aux
+buses"). It finds a game by its program ID, and gives the game's effects in the descriptor of
+each rip of the game. A loose `.bcsar` gets none.
+
+| Game | Program ID | Bus A | Bus B |
+|---|---|---|---|
+| Pokemon X | `0004000000055D00` | kind 1: 0, 4600, 1, 0.5, 0.91, {1120, 1440, 4960}, 0.3, 0.73 | none |
+| WarioWare Gold (North America) | `00040000001D1C00` | kind 1: 60, 800, 100, 0.5, 0.4, {3040, 3680, 2080}, 0.6, 0.4 | kind 1: 40, 4000, 150, 0.25, 0.4, {2720, 3680, 2080}, 0.6, 0.4 |
+| The Legend of Zelda: Ocarina of Time 3D (North America) | `0004000000033500` | kind 3: 60, 4000, 100, 0.5, 0.4, {3040, 3680, 2080}, 0.6, 0.4 | kind 4: 128, 0.01875, 0.2, all four channels |
+| The Legend of Zelda: Majora's Mask 3D (North America) | `0004000000125500` | none | kind 4: 80, 0.625, 0.2, all four channels |
+
+The values are the parameters in their order above. The reverbs have neither flag. Pokemon X
+starts its reverb in the field. Ocarina of Time 3D and Majora's Mask 3D pick bus B's delay from 18
+presets for each scene. The ripper keeps one for every sound: the preset that the game picks when
+it starts.
 
 A sound archive doesn't contain the firmware that plays it. For a game, the ripper uses the
 game's: a DSP1 `.cdc` file in the RomFS, or else a DSP1 image linked into the game's code,
@@ -364,9 +499,32 @@ from the new archive and checks that it's the same. When the cut fails, the ripp
 warning. The `.3sflib` then holds the whole archive. Rips made with earlier versions hold the
 whole archive.
 
-Tags written by `3sfrip`: `title` and `3sf_sound` (the sound's label), `game`, `length` and
-`fade` (sequences only), `3sf_mode`, `3sfby`, `utf8=1`, and optionally `3sf_var`, `artist`,
-`year` and `copyright`.
+A sound archive can keep groups outside it (see "Archive mode"). The ripper finds the file of
+each such group by its name, the group's label followed by `.bcgrp`, in any case: anywhere in a
+game's RomFS, or in a loose archive's folder and the folders below it. It warns of each group file
+that it doesn't find, and skips the sequences whose data lies in one. The `.3sflib` holds the
+group files that hold copies of files that the ripped sequences play, at their paths in the RomFS
+or from the archive's folder. The descriptor lists them. Each kept group file keeps its header,
+its `INFO` block and the blocks after its `FILE` block, such as `INFX`. Its `FILE` block holds
+only the copies that the model reads, each at a multiple of 32 bytes from the file's start. Every
+other item of its table becomes a link: a reference of type 0, with 0xFFFFFFFF for its offset and
+its size. NintendoWare's tools write a link that way. The ripper reads each kept file back from
+the new archive and group files and checks that it's the same. When the cut of the group files
+fails, the ripper prints a warning. The `.3sflib` then holds those group files whole.
+
+A piece of music whose channels the game plays as separate sequences makes one `.mini3sf` (see
+"Sounds that play together"). The ripper finds such pieces by their labels: five sequences
+labelled with one name followed by `_DPCM`, `_NOISE`, `_P1`, `_P2` and `_TRI`. Mighty Gunvolt
+Burst labels its pieces that way. The `.mini3sf` lists the five in that order. Its title is the
+piece's name. The
+length analysis measures each sequence alone. The piece gets the latest end and the longest fade.
+`--only` picks a piece by its name or by any of its sequences' labels, and `--bgm` by any of its
+sequences. Only a set with such a piece has version 2 of the archive descriptor.
+
+Tags written by `3sfrip`: `title` (the sound's label, or a piece's name), `3sf_sound` (the sound's
+label, or the labels of a piece's sequences, separated by ", "), `game`, `length` and `fade`
+(sequences only), `3sf_mode`, `3sfby`, `utf8=1`, and optionally `3sf_var`, `artist`, `year` and
+`copyright`.
 
 ### Lengths
 
@@ -428,6 +586,18 @@ still change the sound. Once its notes end, its next pass starts a new one.
 
 A sequence that stays busy without a sound for 180 seconds ended where it fell silent. An
 example is one whose music has ended while a track that plays no notes runs on.
+
+In archive mode, the effects that the descriptor gives (see "Effects on the aux buses") ring on
+after a sequence's last note. The analysis plays them. A sequence with effects hasn't ended until
+its output has been silent for a second. Its last sound can then be the effects'.
+
+In game mode, a reverb that the driver starts (see "Driver") rings on after the sequences that
+send to it. The model doesn't play the reverb. For each such sequence that ends, `3sfrip`
+therefore renders the rip in game mode. The render plays the rip as a player does. It runs until
+it has been silent for a second past the end that the model found, or until 30 seconds past that
+end. The sequence then ends half a second after the render's last sound, if that comes later. A
+looping sequence keeps its two loops and its fade. The fade silences the reverb along with the
+sequence.
 
 ## Copyright
 

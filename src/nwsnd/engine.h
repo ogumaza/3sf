@@ -24,6 +24,7 @@
 
 #include "dsp/fcram.h"
 #include "dsp/teakra_dsp.h"
+#include "nnsnd/aux_effects.h"
 #include "nnsnd/sound_system.h"
 #include "nwsnd/sequence.h"
 #include "nwsnd/voice.h"
@@ -175,8 +176,10 @@ struct ArchiveModel
     };
 
     // Starts `firmware` on the DSP and then the engine on `archive`, which has to outlive the engine, with
-    // `output_mode` (0 mono, 1 stereo, 2 surround). Returns false if the firmware didn't start.
-    bool Start(std::span<const uint8_t> firmware, const ntdlib::sar::SoundArchive& archive, uint8_t output_mode = 1);
+    // `output_mode` (0 mono, 1 stereo, 2 surround) and `effects` on the aux buses. Returns false if the firmware didn't
+    // start. Throws std::invalid_argument for effects that the libraries refuse.
+    bool Start(std::span<const uint8_t> firmware, const ntdlib::sar::SoundArchive& archive, uint8_t output_mode = 1,
+               const nnsnd::AuxEffectLists& effects = {});
 
     // Takes a snapshot between frames, sharing the memory pages that haven't changed since `previous`.
     Snapshot Save(const Snapshot* previous);

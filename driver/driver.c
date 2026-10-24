@@ -11,8 +11,9 @@
  *   2. nn::fs::MountRom("rom:");
  *   3. the game's sound manager init (nn::snd, nw::snd and the DSP firmware);
  *   4. the console's sound output mode;
- *   5. a sound heap, LoadData(sound), Play(sound);
- *   6. the game's per-frame sound update, forever (about 59.83 times per emulated second).
+ *   5. the reverb that the game runs on aux bus A, if the profile gives one;
+ *   6. a sound heap, LoadData(sound), Play(sound);
+ *   7. the game's per-frame sound update, forever (about 59.83 times per emulated second).
  * `driver_params.status` tells the player what's happening (see docs/3sf.md).
  *
  * Build with driver/build.py (clang and ld.lld); the result is committed as
@@ -55,6 +56,12 @@ struct Params {
     u32 handles_offset;  /* handle array = *(u32*)(sound system + handles_offset) */
     u32 heap_base, heap_size;     /* ordinary memory for the stand-in heap */
     u32 device_base, device_size; /* device (linear) memory for the stand-in device heap */
+    /* The reverb on aux bus A, or 0 in reverb_start for none. reverb_start(gfl heap, parameters) finds the sound
+     * system through the game's pointer to its sound manager, which the game sets after the manager's init. */
+    u32 manager_pointer;    /* where the game keeps the pointer to its sound manager object */
+    u32 reverb_start;       /* u32 reverb_start(gfl heap, const void* parameters) */
+    u32 reverb_params[9];   /* the reverb's parameter block; word 5 points to its filter sizes */
+    u32 reverb_filters[3];  /* the filter sizes */
 };
 
 __attribute__((section(".params"), used)) volatile struct Params driver_params = {
@@ -187,6 +194,14 @@ __attribute__((noreturn)) void driver_main(void) {
     if (!ss)
         fail(4);
     ((fn2)p->set_output)(ss, p->output_mode);
+
+    /* The reverb, as the game starts it. Its work buffer comes from the stand-in heap. */
+    if (p->reverb_start) {
+        *(volatile u32*)p->manager_pointer = obj;
+        p->reverb_params[5] = (u32)p->reverb_filters;
+        if (!((fn2)p->reverb_start)((u32)&heap_normal, (u32)p->reverb_params))
+            fail(8);
+    }
 
     /* A sound heap for the sound's data, then load and play. */
     const u32 sound_heap = (u32)heap_alloc(&heap_normal, 0x40, 8);

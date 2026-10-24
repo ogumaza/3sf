@@ -27,10 +27,15 @@
 //   --artist NAME, --year YEAR, --copyright TEXT, --by NAME (3sfby)
 //   --version        print the version
 //
-// Sequences whose data isn't all in the archive are listed and skipped, and so are the sounds that make no sound: those
-// whose volume in the archive is 0, and the sequences that the length analysis finds never sound. The inputs are ripped
-// one after another, and one that fails doesn't stop the rest. Dropping files on the program gives it the files as
-// inputs.
+// A sound archive can keep groups of its files outside it, in group files (.bcgrp) that the game loads itself. Archive
+// mode finds them by their names in a game's RomFS, or in a loose archive's folder and the folders below it. A rip
+// keeps the copies in them that its sequences play. A piece of music whose channels the game plays as separate
+// sequences makes one .mini3sf. It starts them together (docs/3sf.md, "Sounds that play together").
+//
+// Sequences whose data isn't all in the archive and its group files are listed and skipped, and so are the sounds that
+// make no sound: those whose volume in the archive is 0, and the sequences that the length analysis finds never sound.
+// The inputs are ripped one after another, and one that fails doesn't stop the rest. Dropping files on the program
+// gives it the files as inputs.
 
 #include <algorithm>
 #include <array>
@@ -58,6 +63,8 @@
 #include "common/quiet_stdout.h"
 #include "common/sar_options.h"
 #include "dsp/dsp.h"
+#include "nnsnd/aux_effects.h"
+#include "rip/effects.h"
 #include "rip/game.h"
 #include "rip/length.h"
 #include "rip/music.h"
@@ -129,49 +136,118 @@ struct Job
     std::string label;
     bool sequence;
     std::optional<rip::Timing> timing;
+
+    // Archive mode: the sequences that the mini plays, in the order in which they start. A piece whose channels the
+    // game plays as separate sequences has all of them (see rip::FindPieces), the first at `index`. Empty in game mode.
+    std::vector<uint32_t> sounds;
+
+    // The sounds that the mini plays: `index` alone in game mode.
+    std::vector<uint32_t> Sounds() const
+    {
+        return sounds.empty() ? std::vector<uint32_t>{index} : sounds;
+    }
+};
+
+// What a sound archive is played with: its bytes, the group files beside it that the rip found, and the effects on the
+// aux buses.
+struct ArchiveData
+{
+    const std::vector<uint8_t>& archive;
+    const std::vector<std::vector<uint8_t>>& groups;
+    nnsnd::AuxEffectLists effects = {};
 };
 
 // Length analysis runs every selected sequence through the nw::snd model and the DSP firmware, with `variables` set
-// before each starts. The sounds are independent, and the analysis spreads them over several threads.
-void AnalyzeLengths(std::vector<Job>& jobs, const std::vector<uint8_t>& archive, const std::vector<uint8_t>& firmware,
-                    const Variables& variables, unsigned threads)
+// before each starts. The sounds are independent, and the analysis spreads them over several threads. Each sequence of
+// a piece is measured alone. The piece then gets the latest end and the longest fade (rip::TimingOfPiece).
+void AnalyzeLengths(std::vector<Job>& jobs, const ntdlib::sar::SoundArchive& archive, const ArchiveData& data,
+                    const std::vector<uint8_t>& firmware, const Variables& variables, unsigned threads)
 {
-    const rip::LengthAnalyzer analyzer(archive, firmware, variables);
-    const auto analyze = [&analyzer](Job& job)
+    struct Measure
     {
-        if (!job.sequence)
+        uint32_t index;
+        bool sequence;
+        std::string label; // for the warning of a failed analysis
+        std::optional<rip::Timing> timing;
+    };
+
+    std::vector<Measure> measures;
+    for (const Job& job : jobs)
+    {
+        const std::vector<uint32_t> sounds = job.Sounds();
+        for (const uint32_t sound : sounds)
+        {
+            const std::string& label = sounds.size() > 1 ? archive.Sounds()[sound].name : job.label;
+            measures.push_back({sound, job.sequence, label, std::nullopt});
+        }
+    }
+
+    const rip::LengthAnalyzer analyzer(data.archive, firmware, variables, data.groups, data.effects);
+    const auto analyze = [&analyzer](Measure& measure)
+    {
+        if (!measure.sequence)
         {
             return false;
         }
 
-        job.timing = analyzer.Analyze(job.index);
+        measure.timing = analyzer.Analyze(measure.index);
 
         return true;
     };
-    xsflib::cli::AnalyzeLengths(jobs, threads, analyze);
+    xsflib::cli::AnalyzeLengths(measures, threads, analyze);
+
+    std::size_t next = 0;
+    for (Job& job : jobs)
+    {
+        std::vector<std::optional<rip::Timing>> timings;
+        for (std::size_t i = job.Sounds().size(); i > 0; i--)
+        {
+            timings.push_back(measures[next++].timing);
+        }
+
+        job.timing = rip::TimingOfPiece(timings);
+    }
 }
 
-// Lists and drops the sequences whose data isn't all in the archive. They would play with missing instruments. Returns
-// how many it dropped.
+// Lists and drops the sequences whose data isn't all in the archive and its group files, and the pieces with such a
+// sequence. They would play with missing instruments or channels. Returns how many it dropped.
 std::size_t DropIncomplete(std::vector<Job>& jobs, const ntdlib::sar::SoundArchive& archive)
 {
     const auto incomplete = [&archive](const Job& job)
     {
-        const auto missing = rip::MissingData(archive, job.index);
-        if (missing.empty())
+        const std::vector<uint32_t> sounds = job.Sounds();
+        std::string what;
+        for (const uint32_t sound : sounds)
+        {
+            const auto missing = rip::MissingData(archive, sound);
+            if (missing.empty())
+            {
+                continue;
+            }
+
+            std::string list;
+            for (std::size_t i = 0; i < missing.size() && i < 3; i++)
+            {
+                list += (i ? ", " : "") + missing[i];
+            }
+
+            if (missing.size() > 3)
+            {
+                list += ", ...";
+            }
+
+            // A piece names each sequence whose data is missing.
+            if (sounds.size() > 1)
+            {
+                list = archive.Sounds()[sound].name + " (" + list + ")";
+            }
+
+            what += (what.empty() ? "" : "; ") + list;
+        }
+
+        if (what.empty())
         {
             return false;
-        }
-
-        std::string what;
-        for (std::size_t i = 0; i < missing.size() && i < 3; i++)
-        {
-            what += (i ? ", " : "") + missing[i];
-        }
-
-        if (missing.size() > 3)
-        {
-            what += ", ...";
         }
 
         std::fprintf(stderr, "skipped %s: not in this archive: %s\n", job.label.c_str(), what.c_str());
@@ -181,13 +257,18 @@ std::size_t DropIncomplete(std::vector<Job>& jobs, const ntdlib::sar::SoundArchi
     return std::erase_if(jobs, incomplete);
 }
 
-// Lists and drops the sounds whose volume in the archive is 0. The game's sound library multiplies everything a sound
-// plays by that volume. Such a sound therefore makes no sound. Returns how many it dropped.
+// Lists and drops the sounds whose volume in the archive is 0, and the pieces whose sequences all have a volume of 0.
+// The game's sound library multiplies everything a sound plays by that volume. Such a sound therefore makes no sound.
+// Returns how many it dropped.
 std::size_t DropMuted(std::vector<Job>& jobs, const ntdlib::sar::SoundArchive& archive)
 {
     const auto muted = [&archive](const Job& job)
     {
-        if (archive.Sounds()[job.index].volume != 0)
+        const auto audible = [&archive](uint32_t sound)
+        {
+            return archive.Sounds()[sound].volume != 0;
+        };
+        if (std::ranges::any_of(job.Sounds(), audible))
         {
             return false;
         }
@@ -220,13 +301,13 @@ std::size_t DropUnheard(std::vector<Job>& jobs)
 // Drops the sounds that make no sound. DropMuted finds those at a volume of 0. Unless --no-length is given, the length
 // analysis of the rest then finds the sequences that never sound. Returns how many it dropped.
 std::size_t AnalyzeAndDropSilent(std::vector<Job>& jobs, const ntdlib::sar::SoundArchive& archive,
-                                 const std::vector<uint8_t>& archive_bytes, const std::vector<uint8_t>& firmware,
+                                 const ArchiveData& data, const std::vector<uint8_t>& firmware,
                                  const Variables& variables, const Options& o)
 {
     std::size_t silent = DropMuted(jobs, archive);
     if (o.lengths && !jobs.empty())
     {
-        AnalyzeLengths(jobs, archive_bytes, firmware, variables, o.jobs);
+        AnalyzeLengths(jobs, archive, data, firmware, variables, o.jobs);
         silent += DropUnheard(jobs);
     }
 
@@ -260,11 +341,82 @@ std::vector<Job> SelectSounds(const ntdlib::sar::SoundArchive& archive, const Op
 
         if (std::regex_search(s.name, o.only) && (!o.bgm || rip::IsMusic(archive, s)))
         {
-            jobs.push_back({static_cast<uint32_t>(i), s.name, sequence, std::nullopt});
+            jobs.push_back({static_cast<uint32_t>(i), s.name, sequence, std::nullopt, {}});
         }
     }
 
     return jobs;
+}
+
+// Archive mode: the sequences that --only and --bgm pick. A piece whose channels the game plays as separate sequences
+// makes one job (see rip::FindPieces). --only picks it by its name or by any of its sequences' labels, and --bgm by any
+// of its sequences.
+std::vector<Job> SelectArchiveSounds(const ntdlib::sar::SoundArchive& archive, const Options& o)
+{
+    const auto& sounds = archive.Sounds();
+    const std::vector<rip::Piece> pieces = rip::FindPieces(archive);
+    std::vector<const rip::Piece*> piece_of(sounds.size(), nullptr);
+    for (const rip::Piece& piece : pieces)
+    {
+        for (const uint32_t sound : piece.sounds)
+        {
+            piece_of[sound] = &piece;
+        }
+    }
+
+    std::vector<Job> jobs;
+    for (std::size_t i = 0; i < sounds.size(); i++)
+    {
+        // Streams are out of scope, and archive mode only plays sequences. A piece's job comes at its first sound.
+        const auto index = static_cast<uint32_t>(i);
+        const rip::Piece* piece = piece_of[i];
+        if (sounds[i].type != ntdlib::sar::SoundType::kSequence || (piece && piece->sounds.front() != index))
+        {
+            continue;
+        }
+
+        const std::string& label = piece ? piece->name : sounds[i].name;
+        const std::vector<uint32_t> members = piece ? piece->sounds : std::vector<uint32_t>{index};
+        bool matches = std::regex_search(label, o.only);
+        bool music = false;
+        for (const uint32_t sound : members)
+        {
+            matches = matches || std::regex_search(sounds[sound].name, o.only);
+            music = music || rip::IsMusic(archive, sounds[sound]);
+        }
+
+        if (matches && (!o.bgm || music))
+        {
+            jobs.push_back({index, label, true, std::nullopt, members});
+        }
+    }
+
+    return jobs;
+}
+
+// The item IDs of the sounds that a job's mini plays: the item type of sounds (1) in the top byte, and each sound's
+// index.
+std::vector<uint32_t> SoundIds(const Job& job)
+{
+    std::vector<uint32_t> ids;
+    for (const uint32_t sound : job.Sounds())
+    {
+        ids.push_back(ntdlib::sar::ItemId(ntdlib::sar::kSoundItem, sound));
+    }
+
+    return ids;
+}
+
+// The labels of the sounds that a job's mini plays, joined with ", ".
+std::string SoundLabels(const ntdlib::sar::SoundArchive& archive, const Job& job)
+{
+    std::string labels;
+    for (const uint32_t sound : job.Sounds())
+    {
+        labels += (labels.empty() ? "" : ", ") + archive.Sounds()[sound].name;
+    }
+
+    return labels;
 }
 
 // The item id of a job's sound: the item type of sounds (1) in the top byte, and the sound's index.
@@ -289,17 +441,69 @@ bool WriteLibrary(const fs::path& out_dir, const std::string& lib_name, const st
     return true;
 }
 
-// Rips one sound archive in archive mode, adding the number of sounds --only picked to `matched`. Returns the number of
-// .mini3sf files written, or -1 on an error.
-int RipArchive(const fs::path& out_dir, rip::FileNames& names, const std::string& lib_base,
-               const std::string& archive_path, const std::vector<uint8_t>& archive_bytes,
-               const std::string& firmware_path, const std::vector<uint8_t>& firmware, const std::string& game_name,
-               const Options& o, std::size_t& matched)
+// The files that a library holds of a sound archive and its group files (see KeepLibraryFiles).
+struct LibraryFiles
 {
+    std::vector<uint8_t> archive;
+    std::vector<rip::FileChunk> groups;
+};
+
+// The part of `archive` that the library of `jobs` holds: the files that their sequences play, and the group files of
+// `groups` that hold copies of them, cut down to those copies (ntdlib::rip::KeepSequenceData and KeepGroupCopies).
+// `archive` is the archive of `archive_file`, with the group files of `groups` added. Archive mode's model reads
+// nothing else. After a warning, the library holds the whole archive and every group file when the files can't be cut
+// out of the archive. It holds the whole group files that hold copies when only the copies can't be cut out of them.
+LibraryFiles KeepLibraryFiles(const ntdlib::sar::SoundArchive& archive, const rip::FileChunk& archive_file,
+                              const std::vector<rip::FileChunk>& groups, const std::vector<Job>& jobs)
+{
+    std::vector<uint32_t> sounds;
+    for (const Job& job : jobs)
+    {
+        const std::vector<uint32_t> played = job.Sounds();
+        sounds.insert(sounds.end(), played.begin(), played.end());
+    }
+
+    std::optional<ntdlib::rip::LibraryArchive> kept = ntdlib::rip::KeepSequenceData(archive, sounds);
+    if (!kept)
+    {
+        std::fprintf(stderr,
+                     "warning: the files that the sequences play can't be cut out of %s. The library holds the whole "
+                     "archive\n",
+                     archive_file.path.c_str());
+        return {archive_file.data, groups};
+    }
+
+    const std::optional<std::vector<std::vector<uint8_t>>> cut = ntdlib::rip::KeepGroupCopies(archive, *kept, sounds);
+    if (!cut)
+    {
+        std::fprintf(stderr,
+                     "warning: the copies that the sequences play can't be cut out of the group files. The library "
+                     "holds the group files that hold them whole\n");
+    }
+
+    LibraryFiles files{std::move(kept->archive), {}};
+    for (std::size_t i = 0; i < kept->group_files.size(); i++)
+    {
+        const rip::FileChunk& group = groups[kept->group_files[i]];
+        files.groups.push_back({group.path, cut ? (*cut)[i] : group.data});
+    }
+
+    return files;
+}
+
+// Rips one sound archive in archive mode, with the group files `groups` that the game keeps beside it and the game's
+// `effects` on the aux buses, adding the number of sounds --only picked to `matched`. Returns the number of .mini3sf
+// files written, or -1 on an error.
+int RipArchive(const fs::path& out_dir, rip::FileNames& names, const std::string& lib_base,
+               const rip::FileChunk& archive_file, const std::vector<rip::FileChunk>& groups,
+               const std::string& firmware_path, const std::vector<uint8_t>& firmware, const std::string& game_name,
+               const nnsnd::AuxEffectLists& effects, const Options& o, std::size_t& matched)
+{
+    const std::string& archive_path = archive_file.path;
     std::optional<ntdlib::sar::SoundArchive> archive;
     try
     {
-        archive = ntdlib::sar::SoundArchive::Load(archive_bytes, kSarOptions);
+        archive = ntdlib::sar::SoundArchive::Load(archive_file.data, kSarOptions);
     }
     catch (const std::exception& e)
     {
@@ -313,7 +517,20 @@ int RipArchive(const fs::path& out_dir, rip::FileNames& names, const std::string
                      archive_path.c_str());
     }
 
-    std::vector<Job> jobs = SelectSounds(*archive, o, false);
+    for (const rip::FileChunk& group : groups)
+    {
+        try
+        {
+            archive->AddGroupFile(group.data);
+        }
+        catch (const std::exception& e)
+        {
+            std::fprintf(stderr, "error: %s: %s\n", group.path.c_str(), e.what());
+            return -1;
+        }
+    }
+
+    std::vector<Job> jobs = SelectArchiveSounds(*archive, o);
     matched += jobs.size();
 
     std::size_t wave_sounds = 0;
@@ -323,31 +540,29 @@ int RipArchive(const fs::path& out_dir, rip::FileNames& names, const std::string
     }
 
     const std::size_t skipped = DropIncomplete(jobs, *archive);
-    const std::size_t silent = AnalyzeAndDropSilent(jobs, *archive, archive_bytes, firmware, o.variables, o);
+    const std::size_t silent = AnalyzeAndDropSilent(jobs, *archive, {archive_file.data, archive->GroupFiles(), effects},
+                                                    firmware, o.variables, o);
     if (jobs.empty())
     {
         std::fprintf(stderr, "%s: nothing to rip%s\n", archive_path.c_str(), SkippedText(skipped, silent).c_str());
         return 0;
     }
 
-    // The library holds only the files that the sequences play. Archive mode's model reads nothing else.
-    std::vector<uint32_t> sounds;
+    // A set whose minis play several sounds gets version 2 of the archive descriptor. Players of 3SF 1.3.3 and older
+    // refuse it.
+    uint32_t version = ArchiveDescriptor::kVersion;
     for (const Job& job : jobs)
     {
-        sounds.push_back(job.index);
-    }
-    const std::optional<ntdlib::rip::LibraryArchive> kept = ntdlib::rip::KeepSequenceData(*archive, sounds);
-    if (!kept)
-    {
-        std::fprintf(stderr,
-                     "warning: the files that the sequences play can't be cut out of %s. The library holds the whole "
-                     "archive\n",
-                     archive_path.c_str());
+        if (job.sounds.size() > 1)
+        {
+            version = ArchiveDescriptor::kListVersion;
+        }
     }
 
+    const LibraryFiles kept = KeepLibraryFiles(*archive, archive_file, groups, jobs);
     const Tags common = xsflib::cli::RipTags(o, game_name, "3sf", "archive");
-    const auto lib =
-        rip::BuildArchiveLibrary(archive_path, kept ? kept->archive : archive_bytes, firmware_path, firmware, common);
+    const auto lib = rip::BuildArchiveLibrary(archive_path, kept.archive, firmware_path, firmware, common, kept.groups,
+                                              version, effects);
     const std::string lib_name = names.LibraryIn(out_dir, lib_base, lib);
     if (!WriteLibrary(out_dir, lib_name, lib))
     {
@@ -360,9 +575,15 @@ int RipArchive(const fs::path& out_dir, rip::FileNames& names, const std::string
         mini_tags["3sf_var"] = FormatVariables(o.variables);
     }
 
-    const auto build_mini = [&](const Job& job, const Tags& tags)
+    // The 3sf_sound tag of a piece lists the labels of its sequences.
+    const auto build_mini = [&](const Job& job, Tags tags)
     {
-        return rip::BuildArchiveMini(SoundId(job), lib_name, tags);
+        if (job.sounds.size() > 1)
+        {
+            tags["3sf_sound"] = SoundLabels(*archive, job);
+        }
+
+        return rip::BuildArchiveMini(SoundIds(job), lib_name, std::move(tags));
     };
     const int count = xsflib::cli::WriteMinis(out_dir, names, jobs, mini_tags, "3sf_sound", build_mini);
     if (count >= 0)
@@ -424,6 +645,55 @@ std::optional<FirmwareFile> LooseArchiveFirmware(const std::string& input, const
     return FindFirmware(candidates, ReadWholeFile);
 }
 
+// The group file `name` in `folder` or a folder below it, found by its file name in any case, or nothing. The group
+// file is kept at its path from `folder`, with a slash between folders. The search passes over an entry whose type
+// can't be read, such as a broken symbolic link.
+std::optional<rip::FileChunk> FindGroupIn(const fs::path& folder, const std::string& name)
+{
+    std::error_code ec;
+    for (fs::recursive_directory_iterator it(folder, ec), end; !ec && it != end; it.increment(ec))
+    {
+        std::error_code type_error;
+        if (!it->is_regular_file(type_error) ||
+            !ntdlib::sar::IsGroupFileName(xsflib::Utf8(it->path().filename()), name, ntdlib::sar::Flavor::kCtr))
+        {
+            continue;
+        }
+
+        rip::FileChunk group;
+        for (const fs::path& part : it->path().lexically_relative(folder))
+        {
+            group.path += (group.path.empty() ? "" : "/") + xsflib::Utf8(part);
+        }
+
+        if (xsflib::ReadFile(it->path(), group.data))
+        {
+            return group;
+        }
+    }
+
+    return std::nullopt;
+}
+
+// The group file `name` anywhere in the game's RomFS, found by its file name in any case, at its RomFS path, or
+// nothing.
+std::optional<rip::FileChunk> FindGameGroup(const rip::GameFiles& game, const std::string& name)
+{
+    for (const std::string& path : game.romfs_files)
+    {
+        // The file name follows the last slash, or is the whole path.
+        const std::string file_name = path.substr(path.rfind('/') + 1);
+        rip::FileChunk group{path, {}};
+        if (ntdlib::sar::IsGroupFileName(file_name, name, ntdlib::sar::Flavor::kCtr) &&
+            game.read_romfs(path, group.data))
+        {
+            return group;
+        }
+    }
+
+    return std::nullopt;
+}
+
 // The file name a rip gives the DSP firmware it carries, unless it's a file from the game's RomFS, which keeps its path
 // there.
 constexpr char kFirmwareName[] = "dspaudio.cdc";
@@ -454,8 +724,9 @@ constexpr char kUsage[] =
     "after it with \"_3sf\" added. An input is a decrypted 3DS game (.3ds, .cci, .cxi or .cia), an\n"
     "extracted game folder or a sound archive (.bcsar). A sound archive needs a DSP firmware file\n"
     "(.cdc): give one along with the archive, or put one in the archive's folder. Files can also be\n"
-    "dropped on the program. Sounds that make no sound, and sequences whose data isn't all in the\n"
-    "archive, are listed and skipped.\n"
+    "dropped on the program. An archive's group files (.bcgrp) are found in the game, or in the\n"
+    "archive's folder and the folders below it. Sounds that make no sound, and sequences whose data\n"
+    "isn't all in the archive and its group files, are listed and skipped.\n"
     "\n"
     "options:\n"
     "  -o, --output DIR     put the rips in DIR\n"
@@ -542,8 +813,8 @@ int RipLooseArchive(const std::string& input, const fs::path& out_dir, const Opt
         return 2;
     }
 
-    std::vector<uint8_t> archive_bytes;
-    if (!ReadWholeFile(input, archive_bytes))
+    rip::FileChunk archive_file{file_name, {}};
+    if (!ReadWholeFile(input, archive_file.data))
     {
         std::fprintf(stderr, "error: can't read %s\n", input.c_str());
         return 1;
@@ -573,12 +844,21 @@ int RipLooseArchive(const std::string& input, const fs::path& out_dir, const Opt
 
     std::fprintf(stderr, "firmware: %s\n", firmware->path.c_str());
 
+    // The group files are found by their names in the archive's folder or a folder below it.
+    const fs::path folder = InputPath(input).parent_path();
+    const auto find_group = [&folder](const std::string& name)
+    {
+        return FindGroupIn(folder, name);
+    };
+    const std::vector<rip::FileChunk> groups =
+        ntdlib::rip::FindGroups<rip::FileChunk>(archive_file.data, find_group, kSarOptions);
+
     std::fprintf(stderr, "%s", kArchiveModeNotice);
 
     const std::string game_name = GameName(o, input, nullptr);
     std::size_t matched = 0;
-    const int count = RipArchive(out_dir, names, game_name, file_name, archive_bytes, kFirmwareName, firmware->bytes,
-                                 game_name, o, matched);
+    const int count = RipArchive(out_dir, names, game_name, archive_file, groups, kFirmwareName, firmware->bytes,
+                                 game_name, {}, o, matched);
     if (count < 0)
     {
         return 1;
@@ -638,6 +918,14 @@ int RipGameInArchiveMode(const std::string& input, const rip::GameFiles& game, c
         return 1;
     }
 
+    // The effects that the game puts on the aux buses go into each rip (rip::FindGameEffects).
+    const rip::GameEffects* found_effects = rip::FindGameEffects(game);
+    const nnsnd::AuxEffectLists effects = found_effects ? found_effects->buses : nnsnd::AuxEffectLists{};
+    if (found_effects)
+    {
+        std::fprintf(stderr, "aux effects of %s: %s\n", found_effects->game, rip::DescribeEffects(effects).c_str());
+    }
+
     const std::string game_name = GameName(o, input, profile);
     int total = 0;
     std::size_t matched = 0;
@@ -649,18 +937,24 @@ int RipGameInArchiveMode(const std::string& input, const rip::GameFiles& game, c
             continue;
         }
 
-        std::vector<uint8_t> archive_bytes;
-        if (!game.read_romfs(path, archive_bytes))
+        rip::FileChunk archive_file{path, {}};
+        if (!game.read_romfs(path, archive_file.data))
         {
             std::fprintf(stderr, "error: can't read %s\n", path.c_str());
             failed = true;
             continue;
         }
 
+        const auto find_group = [&game](const std::string& name)
+        {
+            return FindGameGroup(game, name);
+        };
+        const std::vector<rip::FileChunk> groups =
+            ntdlib::rip::FindGroups<rip::FileChunk>(archive_file.data, find_group, kSarOptions);
         const std::string lib_base =
             archives.size() == 1 ? game_name : game_name + " " + fs::path(path).stem().string();
-        const int n =
-            RipArchive(out_dir, names, lib_base, path, archive_bytes, firmware_path, firmware, game_name, o, matched);
+        const int n = RipArchive(out_dir, names, lib_base, archive_file, groups, firmware_path, firmware, game_name,
+                                 effects, o, matched);
         if (n < 0)
         {
             failed = true;
@@ -682,6 +976,51 @@ int RipGameInArchiveMode(const std::string& input, const rip::GameFiles& game, c
     }
 
     return failed ? 1 : 0;
+}
+
+// Game mode with a reverb (rip::GameProfile::reverb): the reverb rings on after each sequence that sends to it. The
+// model doesn't play the reverb. Each such job gets the timing of a render of the library `lib` as a player plays it
+// (rip::RingOut). The renders spread over several threads.
+void RingOutReverb(std::vector<Job>& jobs, const ntdlib::sar::SoundArchive& archive, const std::vector<uint8_t>& lib,
+                   unsigned threads)
+{
+    struct Ring
+    {
+        Job* job;
+        std::string label; // for the warning of a failed render
+        std::optional<rip::Timing> timing;
+    };
+
+    std::vector<Ring> rings;
+    for (Job& job : jobs)
+    {
+        if (job.sequence && job.timing && rip::SendsToBusA(archive, archive.Sounds()[job.index]))
+        {
+            rings.push_back({&job, job.label, std::nullopt});
+        }
+    }
+
+    if (rings.empty())
+    {
+        return;
+    }
+
+    std::fprintf(stderr, "reverb: rendering %zu sounds that send to aux bus A, for their lengths\n", rings.size());
+    const auto ring_out = [&lib](Ring& ring)
+    {
+        ring.timing = rip::RingOut(lib, SoundId(*ring.job), *ring.job->timing);
+
+        return true;
+    };
+    xsflib::cli::AnalysisSettings settings;
+    settings.progress_every = 10;
+    settings.progress = "rendered";
+    xsflib::cli::AnalyzeLengths(rings, threads, ring_out, settings);
+
+    for (const Ring& ring : rings)
+    {
+        ring.job->timing = ring.timing;
+    }
 }
 
 // Rips the archive a game's driver profile names, running the game's sound code. Returns the exit code.
@@ -714,7 +1053,8 @@ int RipGameInGameMode(const std::string& input, const rip::GameFiles& game, cons
         return NoSoundMatches(o);
     }
 
-    const std::size_t silent = AnalyzeAndDropSilent(jobs, archive, archive_bytes, firmware, {}, o);
+    const std::size_t silent =
+        AnalyzeAndDropSilent(jobs, archive, {archive_bytes, archive.GroupFiles()}, firmware, {}, o);
     const std::string input_name = InputPath(input).filename().string();
     if (jobs.empty())
     {
@@ -741,6 +1081,11 @@ int RipGameInGameMode(const std::string& input, const rip::GameFiles& game, cons
     if (!WriteLibrary(out_dir, lib_name, *lib))
     {
         return 1;
+    }
+
+    if (o.lengths && profile.reverb.start != 0)
+    {
+        RingOutReverb(jobs, archive, *lib, o.jobs);
     }
 
     const auto build_mini = [&](const Job& job, const Tags& tags)

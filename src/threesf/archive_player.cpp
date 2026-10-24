@@ -4,6 +4,7 @@
 
 #include "threesf/archive_player.h"
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <memory>
@@ -12,6 +13,7 @@
 #include <vector>
 
 #include "ntdlib/sar/formats.h"
+#include "ntdlib/sar/set_archive.h"
 #include "xsflib/player/archive_source.h"
 
 #include "common/sar_options.h"
@@ -39,13 +41,13 @@ struct Model
     std::vector<int16_t> pending;
 };
 
-// What Prepare finds in the set.
+// What Prepare finds in the set: the descriptor, the firmware, and the sequences to play by their indices in the
+// archive, in the order in which they start.
 struct Found
 {
     const ArchiveDescriptor* descriptor = nullptr;
-    const std::vector<uint8_t>* archive = nullptr;
     const std::vector<uint8_t>* firmware = nullptr;
-    uint32_t index = 0;
+    std::vector<uint32_t> sounds;
 };
 
 // 3SF's steps of archive mode (xsflib::player::ArchiveSource).
@@ -68,8 +70,7 @@ struct Traits
 
         const ArchiveDescriptor& d = *set.archive;
         found.descriptor = &d;
-        found.archive = set.File(d.archive_path);
-        if (!found.archive)
+        if (!set.File(d.archive_path))
         {
             return "the sound archive (" + d.archive_path + ") is missing";
         }
@@ -80,21 +81,38 @@ struct Traits
             return "the DSP firmware (" + d.firmware_path + ") is missing";
         }
 
-        if (!set.sound || ntdlib::sar::ItemType(*set.sound) != ntdlib::sar::kSoundItem)
+        const auto is_sound = [](uint32_t id)
+        {
+            return ntdlib::sar::ItemType(id) == ntdlib::sar::kSoundItem;
+        };
+        const std::vector<uint32_t> sounds = SoundsToPlay(set);
+        if (sounds.empty() || !std::ranges::all_of(sounds, is_sound))
         {
             return "no sequence selected";
         }
 
-        found.index = ntdlib::sar::ItemNumber(*set.sound);
+        if (sounds.size() > kMaxSounds)
+        {
+            return std::to_string(sounds.size()) + " sounds selected; a set plays at most " +
+                   std::to_string(kMaxSounds) + " together";
+        }
+
+        found.sounds.clear();
+        for (const uint32_t id : sounds)
+        {
+            found.sounds.push_back(ntdlib::sar::ItemNumber(id));
+        }
 
         return std::nullopt;
     }
 
-    static std::optional<std::string> LoadArchive(const LoadedSet&, const Found& found, std::optional<Archive>& archive)
+    // The archive, with the group files beside it that the descriptor lists.
+    static std::optional<std::string> LoadArchive(const LoadedSet& set, const Found& found,
+                                                  std::optional<Archive>& archive)
     {
-        archive = ntdlib::sar::SoundArchive::Load(*found.archive, kSarOptions);
+        const ArchiveDescriptor& d = *found.descriptor;
 
-        return std::nullopt;
+        return ntdlib::sar::LoadSetArchive(set, d.archive_path, d.group_paths, kSarOptions, archive);
     }
 
     static std::unique_ptr<Model> MakeModel(const Found&, Archive&)
@@ -111,9 +129,12 @@ struct Traits
         return model;
     }
 
+    // The descriptor's effects go on the aux buses (docs/3sf.md, "Effects on the aux buses"). Its Check has made sure
+    // that the libraries take them.
     static std::optional<std::string> StartModel(Model& model, Archive& archive, const Found& found)
     {
-        if (!model.model.Start(*found.firmware, archive, static_cast<uint8_t>(found.descriptor->output_mode)))
+        const ArchiveDescriptor& d = *found.descriptor;
+        if (!model.model.Start(*found.firmware, archive, static_cast<uint8_t>(d.output_mode), d.aux_effects))
         {
             return "the DSP firmware didn't start";
         }
@@ -121,21 +142,25 @@ struct Traits
         return std::nullopt;
     }
 
+    // Every sequence starts before the first frame, in the list's order (docs/3sf.md, "Sounds that play together").
     static std::optional<std::string> StartSequence(Model& model, const LoadedSet& set, const Found& found)
     {
-        nwsnd::SequenceSoundPlayer* player = model.model.engine->StartSequence(found.index);
-        if (!player)
-        {
-            return "sound " + std::to_string(found.index) + " isn't a sequence, or its data isn't in the archive";
-        }
-
-        // The 3sf_var tag sets variables before the sequence's first tick. A tag that doesn't parse is ignored.
+        // The 3sf_var tag sets variables before each sequence's first tick. A tag that doesn't parse is ignored.
         const auto tag = set.tags.find("3sf_var");
         const std::optional<Variables> variables =
             tag != set.tags.end() ? ParseVariables(tag->second) : std::optional<Variables>();
-        for (const auto& [number, value] : variables.value_or(Variables{}))
+        for (const uint32_t index : found.sounds)
         {
-            player->SetVariable(*model.model.engine, number, value);
+            nwsnd::SequenceSoundPlayer* player = model.model.engine->StartSequence(index);
+            if (!player)
+            {
+                return "sound " + std::to_string(index) + " isn't a sequence, or its data isn't in the archive";
+            }
+
+            for (const auto& [number, value] : variables.value_or(Variables{}))
+            {
+                player->SetVariable(*model.model.engine, number, value);
+            }
         }
 
         return std::nullopt;

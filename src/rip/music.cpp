@@ -74,6 +74,21 @@ bool IsNumberedWord(std::string_view word, std::string_view name)
     return std::all_of(rest.begin(), rest.end(), [](char c) { return c >= '0' && c <= '9'; });
 }
 
+// The shape of a sequence sound's commands (WalkSequence), or nothing when the sequence doesn't parse.
+std::optional<SequenceShape> ShapeOf(const ntdlib::sar::SoundArchive& archive, const ntdlib::sar::SoundInfo& sound)
+{
+    try
+    {
+        const ntdlib::sar::Sequence sequence =
+            ntdlib::sar::Sequence::Parse(archive.FileData(sound.file_id), kSarOptions);
+        return WalkSequence(sequence.data, sound.start_offset);
+    }
+    catch (const std::exception&)
+    {
+        return std::nullopt;
+    }
+}
+
 } // namespace
 
 SequenceShape WalkSequence(std::span<const uint8_t> data, uint32_t start)
@@ -101,6 +116,11 @@ SequenceShape WalkSequence(std::span<const uint8_t> data, uint32_t start)
             const ntdlib::commands::Command& c = read->command;
             shape.notes += c.kind == Kind::kNote ? 1 : 0;
             shape.tracks += c.kind == Kind::kOpenTrack ? 1 : 0;
+            if (c.kind == Kind::kSend && c.index < shape.aux_sends.size() &&
+                (c.value.source != ntdlib::commands::Source::kValue || c.value.value != 0))
+            {
+                shape.aux_sends[c.index] = true;
+            }
             if (ntdlib::commands::HasTarget(c.kind))
             {
                 todo.push_back(c.target);
@@ -151,17 +171,19 @@ bool IsMusic(const ntdlib::sar::SoundArchive& archive, const ntdlib::sar::SoundI
     }
 
     // A sequence that doesn't parse isn't music here; ripping it reports the problem.
-    try
-    {
-        const ntdlib::sar::Sequence sequence =
-            ntdlib::sar::Sequence::Parse(archive.FileData(sound.file_id), kSarOptions);
-        const SequenceShape shape = WalkSequence(sequence.data, sound.start_offset);
-        return shape.tracks >= kMusicMinTracks && shape.notes >= kMusicMinNotes;
-    }
-    catch (const std::exception&)
+    const std::optional<SequenceShape> shape = ShapeOf(archive, sound);
+    return shape && shape->tracks >= kMusicMinTracks && shape->notes >= kMusicMinNotes;
+}
+
+bool SendsToBusA(const ntdlib::sar::SoundArchive& archive, const ntdlib::sar::SoundInfo& sound)
+{
+    if (sound.type != ntdlib::sar::SoundType::kSequence)
     {
         return false;
     }
+
+    const std::optional<SequenceShape> shape = ShapeOf(archive, sound);
+    return shape && shape->aux_sends[0];
 }
 
 } // namespace threesf::rip
