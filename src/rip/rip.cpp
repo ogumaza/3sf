@@ -391,7 +391,8 @@ std::vector<uint8_t> BuildMini(uint32_t sound_id, const std::string& lib_name, T
 std::vector<uint8_t> BuildArchiveLibrary(const std::string& archive_path, const std::vector<uint8_t>& archive,
                                          const std::string& firmware_path, const std::vector<uint8_t>& firmware,
                                          const Tags& tags, const std::vector<FileChunk>& groups, uint32_t version,
-                                         const nnsnd::AuxEffectLists& effects)
+                                         const nnsnd::AuxEffectLists& effects, bool timed_starts,
+                                         const std::vector<nnsnd::AuxEffectLists>& effect_sets)
 {
     ArchiveDescriptor descriptor;
     descriptor.version = version;
@@ -402,10 +403,21 @@ std::vector<uint8_t> BuildArchiveLibrary(const std::string& archive_path, const 
         descriptor.flags |= kFlagGroupFiles;
     }
 
-    if (!effects[0].empty() || !effects[1].empty())
+    // Effect sets go with the effects, in version 3 (docs/3sf.md, "Effect sets").
+    if (!effects[0].empty() || !effects[1].empty() || !effect_sets.empty())
     {
         descriptor.flags |= kFlagAuxEffects;
         descriptor.aux_effects = effects;
+    }
+    if (!effect_sets.empty())
+    {
+        descriptor.version = ArchiveDescriptor::kEffectSetsVersion;
+        descriptor.effect_sets = effect_sets;
+    }
+
+    if (timed_starts)
+    {
+        descriptor.flags |= kFlagTimedStarts;
     }
 
     ProgramBuilder program;

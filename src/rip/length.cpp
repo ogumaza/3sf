@@ -15,6 +15,7 @@
 #include <utility>
 #include <vector>
 
+#include "ntdlib/nwsnd/length_model.h"
 #include "ntdlib/nwsnd/sequence.h"
 #include "ntdlib/sar/formats.h"
 #include "xsflib/psf/psf.h"
@@ -91,8 +92,15 @@ public:
         audible_ = false;
         const bool ran = engine_.RunFrame();
         silent_frames_ = audible_ ? 0 : silent_frames_ + 1;
+        ++frames_;
 
         return ran;
+    }
+
+    // The frames that the analysis has run.
+    uint64_t Frames() const
+    {
+        return frames_;
     }
 
     bool Sounded() const
@@ -211,22 +219,36 @@ private:
     bool& audible_;
     bool effects_;
     uint64_t silent_frames_ = 0;                            // the frames since the output last made a sound
+    uint64_t frames_ = 0;                                   // the frames run
     std::array<int, ntdlib::nwsnd::kTrackCount> passes_{};  // each track's passes that changed the sound
     std::array<bool, ntdlib::nwsnd::kTrackCount> opened_{}; // whether an open-track command has opened the track
 };
 
 // Plays a sequence on the model until it loops twice, ends, falls silent for good or reaches kMaxSeconds
-// (xsflib::rip::MeasureLength). docs/3sf.md, "Lengths", gives the rules.
+// (xsflib::rip::MeasureLength). docs/3sf.md, "Lengths", gives the rules. The counted loops in `endless_loops` loop for
+// ever. A sequence can repeat its music in a counted loop that the game plays for longer than the limit. When the
+// measure reaches the limit inside counted loops, it runs again on a new model with each track's outermost counted loop
+// endless (ntdlib::nwsnd::OutermostCountedLoops). ntdlib's length analysis does the same. Those loops' passes then
+// count as loops of the sequence. An inner loop that runs at the limit still ends, and repeats in each pass of the
+// outer loop.
 std::optional<Timing> MeasureSequence(const ntdlib::sar::SoundArchive& archive, const std::vector<uint8_t>& firmware,
                                       const Variables& variables, const nnsnd::AuxEffectLists& effects,
-                                      uint32_t sound_index)
+                                      uint32_t sound_index, const SequenceStart& start,
+                                      const ntdlib::nwsnd::CountedLoopSet& endless_loops = {})
 {
-    // The model, and whether the frame being run has made a sound, from the DSP's output.
+    // The model, and whether the frame being run has made a sound, from the DSP's output. The set's volume tag scales
+    // the output by the start's volume. A sample is sound if it's audible at that volume.
     nwsnd::ArchiveModel model;
     bool audible = false;
-    const auto listen = [&audible](std::array<int16_t, 2> sample)
+    const float volume = start.volume;
+    const auto listen = [&audible, volume](std::array<int16_t, 2> sample)
     {
-        audible = audible || xsflib::rip::Audible(sample);
+        const auto heard = [volume](int16_t s)
+        {
+            return std::abs(static_cast<float>(s)) * volume > static_cast<float>(xsflib::rip::kSilenceLevel);
+        };
+
+        audible = audible || heard(sample[0]) || heard(sample[1]);
     };
     model.dsp.SetSampleSink(listen);
 
@@ -236,7 +258,8 @@ std::optional<Timing> MeasureSequence(const ntdlib::sar::SoundArchive& archive, 
     }
 
     nwsnd::Engine& engine = *model.engine;
-    nwsnd::SequenceSoundPlayer* player = engine.StartSequence(sound_index);
+    engine.SetEndlessLoops(endless_loops);
+    nwsnd::SequenceSoundPlayer* player = engine.StartSequence(sound_index, start.banks);
     if (!player)
     {
         return std::nullopt;
@@ -247,9 +270,22 @@ std::optional<Timing> MeasureSequence(const ntdlib::sar::SoundArchive& archive, 
         player->SetVariable(engine, number, value);
     }
 
+    nwsnd::ApplySequenceStart(engine, *player, start);
+
     const bool rings = !effects[0].empty() || !effects[1].empty();
     LengthModel length_model(model, *player, audible, rings);
-    return xsflib::rip::MeasureLength(length_model, LengthRules());
+    const xsflib::rip::LengthRules rules = LengthRules();
+    const std::optional<Timing> timing = xsflib::rip::MeasureLength(length_model, rules);
+    if (timing && endless_loops.empty() && length_model.Frames() >= rules.max_frames)
+    {
+        if (const ntdlib::nwsnd::CountedLoopSet running = ntdlib::nwsnd::OutermostCountedLoops(*player);
+            !running.empty())
+        {
+            return MeasureSequence(archive, firmware, variables, effects, sound_index, start, running);
+        }
+    }
+
+    return timing;
 }
 
 } // namespace
@@ -275,11 +311,13 @@ LengthAnalyzer::LengthAnalyzer(const std::vector<uint8_t>& archive_bytes, const 
 
 LengthAnalyzer::~LengthAnalyzer() = default;
 
-std::optional<Timing> LengthAnalyzer::Analyze(uint32_t sound_index) const
+std::optional<Timing> LengthAnalyzer::Analyze(uint32_t sound_index, const SequenceStart& start,
+                                              const nnsnd::AuxEffectLists* effects) const
 {
-    const auto measure = [this, sound_index]
+    const nnsnd::AuxEffectLists& buses = effects ? *effects : impl_->effects;
+    const auto measure = [this, sound_index, &start, &buses]
     {
-        return MeasureSequence(impl_->archive, impl_->firmware, impl_->variables, impl_->effects, sound_index);
+        return MeasureSequence(impl_->archive, impl_->firmware, impl_->variables, buses, sound_index, start);
     };
     return xsflib::rip::TryMeasure(measure);
 }

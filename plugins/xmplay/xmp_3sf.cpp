@@ -36,8 +36,8 @@ struct Traits
     static constexpr uint8_t kPsfVersion = threesf::kPsfVersion3sf;
     static constexpr uint64_t kMaxFileSize = 256u << 20; // largest file read into memory
 
-    // The sequence's variables, which a rip of an archive may set.
-    static constexpr std::array<const char*, 1> kPlaybackTags = {"3sf_var"};
+    // The tags that set how a set plays. A rip of an archive may hold them. The Message info window leaves them out.
+    static constexpr std::array<const char*, threesf::kPlaybackTags.size()> kPlaybackTags = threesf::kPlaybackTags;
 
     static constexpr const char* kVersion = THREESF_VERSION;
     static constexpr const char* kAbout =

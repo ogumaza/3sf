@@ -140,6 +140,50 @@ static_assert(sizeof(SourceReport) == 12);
 static_assert(offsetof(SourceReport, position) == 4);
 static_assert(offsetof(SourceReport, current_buffer) == 8);
 
+// The firmware's delay on an aux bus, as nn::snd's DSP delay writes it (Luigi's Mansion of 2018, code.bin 0x26c2cc).
+// MixerParams holds one for each bus. The delay line lies in FCRAM.
+struct FirmwareDelayParams
+{
+    uint16_t dirty;  // bit 0: enable; bit 1: buffer; bit 2: the fields from channels to damping_b
+    uint16_t enable; // 1: the delay runs
+    uint16_t unused_04;
+    uint16_t channels;  // 2, or 4 with surround
+    DspU32 buffer;      // physical address of the delay line: frames × channels × 160 32-bit samples
+    uint16_t frames;    // the delay in frames of 160 samples
+    uint16_t feedback;  // × 128
+    uint16_t damping_a; // (1 - damping) × 128
+    uint16_t damping_b; // damping × 128
+};
+
+static_assert(sizeof(FirmwareDelayParams) == 20);
+static_assert(offsetof(FirmwareDelayParams, buffer) == 0x08);
+static_assert(offsetof(FirmwareDelayParams, frames) == 0x0C);
+
+// The firmware's reverb on an aux bus. nn::snd's DSP reverb writes this record (StreetPass Mii Plaza's update v14.6.0,
+// code.bin 0x2eeda8 and 0x161848). MixerParams holds one for each bus. The five lines lie in FCRAM, one after another.
+struct FirmwareReverbParams
+{
+    uint16_t dirty;  // bit 0: enable; bit 1: lines; bit 2: channels and the fields from frames on
+    uint16_t enable; // 1: the reverb runs
+    uint16_t unused_04;
+    uint16_t channels;      // 2
+    DspU32 lines[5];        // physical addresses: early reflections, pre-delay, comb filters 0 and 1, all-pass
+    uint16_t frames[5];     // each line's length in frames of 160 samples, in the same order
+    uint16_t early_gain;    // × 128
+    uint16_t fused_gain;    // × 128
+    uint16_t all_pass_gain; // the coloration × 128
+    int16_t comb_gains[2];  // 10^(-3·length/(fused time·32728)) × 128
+    int16_t damping_a;      // (1 - damping) × 128, negated with the high-pass damping
+    int16_t damping_b;      // damping × 128, negated with the high-pass damping
+};
+
+static_assert(sizeof(FirmwareReverbParams) == 0x34);
+static_assert(offsetof(FirmwareReverbParams, lines) == 0x08);
+static_assert(offsetof(FirmwareReverbParams, frames) == 0x1C);
+static_assert(offsetof(FirmwareReverbParams, early_gain) == 0x26);
+static_assert(offsetof(FirmwareReverbParams, comb_gains) == 0x2C);
+static_assert(offsetof(FirmwareReverbParams, damping_b) == 0x32);
+
 // Output-stage parameters, written by the ARM11.
 struct MixerParams
 {
@@ -157,7 +201,8 @@ struct MixerParams
     uint16_t rear_ratio;
     uint16_t aux_bypass[2];
     uint16_t aux_enable[2];
-    uint8_t effects[0x90]; // delay and reverb settings (nn::snd leaves them alone)
+    FirmwareDelayParams delay[2];   // the firmware's delays on buses A and B (dirty bits 10 and 11)
+    FirmwareReverbParams reverb[2]; // the firmware's reverbs on buses A and B (dirty bits 12 and 13)
     uint16_t sync_mode;
     uint16_t unused_be;
     uint32_t dirty2;
@@ -173,6 +218,8 @@ static_assert(offsetof(MixerParams, surround_depth) == 0x1C);
 static_assert(offsetof(MixerParams, rear_ratio) == 0x22);
 static_assert(offsetof(MixerParams, aux_bypass) == 0x24);
 static_assert(offsetof(MixerParams, aux_enable) == 0x28);
+static_assert(offsetof(MixerParams, delay) == 0x2C);
+static_assert(offsetof(MixerParams, reverb) == 0x54);
 static_assert(offsetof(MixerParams, sync_mode) == 0xBC);
 static_assert(offsetof(MixerParams, dirty2) == 0xC0);
 

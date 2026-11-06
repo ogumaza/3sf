@@ -18,6 +18,7 @@
 
 #include "common/sar_options.h"
 #include "dsp/teakra_dsp.h"
+#include "nnsnd/aux_effects.h"
 #include "nwsnd/engine.h"
 #include "nwsnd/sequence.h"
 #include "threesf/format.h"
@@ -41,13 +42,14 @@ struct Model
     std::vector<int16_t> pending;
 };
 
-// What Prepare finds in the set: the descriptor, the firmware, and the sequences to play by their indices in the
-// archive, in the order in which they start.
+// What Prepare finds in the set: the descriptor, the firmware, the sequences to play by their indices in the archive,
+// in the order in which they start, and the effects on the aux buses from the set's 3sf_aux tag.
 struct Found
 {
     const ArchiveDescriptor* descriptor = nullptr;
     const std::vector<uint8_t>* firmware = nullptr;
     std::vector<uint32_t> sounds;
+    const nnsnd::AuxEffectLists* effects = nullptr;
 };
 
 // 3SF's steps of archive mode (xsflib::player::ArchiveSource).
@@ -103,6 +105,16 @@ struct Traits
             found.sounds.push_back(ntdlib::sar::ItemNumber(id));
         }
 
+        // The 3sf_aux tag picks one of the descriptor's effect sets (docs/3sf.md, "Effect sets").
+        const uint32_t effect_set = EffectSetOf(set.tags);
+        found.effects = EffectSet(d, effect_set);
+        if (!found.effects)
+        {
+            return "the 3sf_aux tag gives effect set " + std::to_string(effect_set) +
+                   ", and the archive descriptor gives " + std::to_string(d.effect_sets.size()) +
+                   " effect sets beside set 0";
+        }
+
         return std::nullopt;
     }
 
@@ -129,12 +141,12 @@ struct Traits
         return model;
     }
 
-    // The descriptor's effects go on the aux buses (docs/3sf.md, "Effects on the aux buses"). Its Check has made sure
-    // that the libraries take them.
+    // The effects of the set's effect set go on the aux buses (docs/3sf.md, "Effects on the aux buses"). The
+    // descriptor's Check has made sure that the libraries take them.
     static std::optional<std::string> StartModel(Model& model, Archive& archive, const Found& found)
     {
         const ArchiveDescriptor& d = *found.descriptor;
-        if (!model.model.Start(*found.firmware, archive, static_cast<uint8_t>(d.output_mode), d.aux_effects))
+        if (!model.model.Start(*found.firmware, archive, static_cast<uint8_t>(d.output_mode), *found.effects))
         {
             return "the DSP firmware didn't start";
         }
@@ -145,13 +157,18 @@ struct Traits
     // Every sequence starts before the first frame, in the list's order (docs/3sf.md, "Sounds that play together").
     static std::optional<std::string> StartSequence(Model& model, const LoadedSet& set, const Found& found)
     {
-        // The 3sf_var tag sets variables before each sequence's first tick. A tag that doesn't parse is ignored.
+        // The 3sf_var tag sets variables before each sequence's first tick, and 3sf_var_change sets them in later
+        // frames. A tag that doesn't parse is ignored. The masks, the seed, the tempo ratio, the pitch and the sends
+        // follow. The 3sf_banks tag gives each sequence its banks as it starts.
         const auto tag = set.tags.find("3sf_var");
         const std::optional<Variables> variables =
             tag != set.tags.end() ? ParseVariables(tag->second) : std::optional<Variables>();
+        const std::vector<SequenceVariable> changes = VariableChangesOf(set.tags);
+        const SequenceStart start = SequenceStartOf(set.tags);
+        nwsnd::Engine& engine = *model.model.engine;
         for (const uint32_t index : found.sounds)
         {
-            nwsnd::SequenceSoundPlayer* player = model.model.engine->StartSequence(index);
+            nwsnd::SequenceSoundPlayer* player = engine.StartSequence(index, start.banks);
             if (!player)
             {
                 return "sound " + std::to_string(index) + " isn't a sequence, or its data isn't in the archive";
@@ -159,8 +176,22 @@ struct Traits
 
             for (const auto& [number, value] : variables.value_or(Variables{}))
             {
-                player->SetVariable(*model.model.engine, number, value);
+                player->SetVariable(engine, number, value);
             }
+
+            for (const SequenceVariable& change : changes)
+            {
+                if (change.frame == 0)
+                {
+                    player->SetVariable(engine, change.index, change.value);
+                }
+                else
+                {
+                    engine.ScheduleVariable(*player, change.index, change.value, change.frame);
+                }
+            }
+
+            nwsnd::ApplySequenceStart(engine, *player, start);
         }
 
         return std::nullopt;

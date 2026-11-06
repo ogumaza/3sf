@@ -20,6 +20,8 @@
 #include "xsflib/testing/sets.h"
 
 #include "common/sar_options.h"
+#include "nnsnd/aux_effects.h"
+#include "rip/effects.h"
 #include "rip/game.h"
 #include "rip/music.h"
 #include "threesf/format.h"
@@ -157,7 +159,7 @@ static void TestGameFirmware()
 static void TestMusicLabels()
 {
     for (const char* label : {"AB_BGM_C", "BGM_X", "SEQ_S_BGM1", "ab_bgm_c", "SEQ_JIN_X", "X_JINGLE2", "SQ_FANFARE_A",
-                              "SEQ_M_X", "seq-m-x"})
+                              "SEQ_M_X", "seq-m-x", "MGBTL_JG_RANKUP", "SEQ_JNG_NEW_RECORD", "X_JG2"})
     {
         Check(rip::LabelMarksMusic(label), std::string(label) + " is music");
     }
@@ -316,6 +318,34 @@ static void TestArchiveSets()
     Check(rip::BuildArchiveMini(0x01000013, "lib", {}) ==
               rip::BuildArchiveMini(std::vector<uint32_t>{0x01000013}, "lib", {}),
           "a mini of one sound is the same either way");
+
+    // A library with effect sets has version 3 and bit 2 of the flags. A mini's 3sf_aux tag picks a set (docs/3sf.md,
+    // "Effect sets").
+    nnsnd::AuxEffect delay;
+    delay.kind = nnsnd::AuxEffect::Kind::kDelay;
+    delay.delay = {.delay_time = 100, .feedback = 0.5f, .damping = 0.0f};
+    const std::vector<nnsnd::AuxEffectLists> kSets = {{{{delay}, {}}}};
+    files["a/sets.3sflib"] = rip::BuildArchiveLibrary("Sound.bcsar", kArchive, "dspaudio.cdc", kFirmware, {}, {},
+                                                      ArchiveDescriptor::kVersion, {}, false, kSets);
+    files["a/club.mini3sf"] = rip::BuildArchiveMini(0x01000013, "sets.3sflib", {{"3sf_aux", "1"}});
+    const FileReader set_reader = xsflib::testing::MapReader(files);
+    LoadedSet club;
+    const auto club_error = LoadSet("a/club.mini3sf", set_reader, club);
+
+    Check(!club_error && club.archive && club.archive->version == ArchiveDescriptor::kEffectSetsVersion &&
+              club.archive->flags == (kFlagDspRequired | kFlagAuxEffects) && !club.archive->Check() &&
+              club.archive->effect_sets.size() == 1 && club.archive->effect_sets[0][0].size() == 1 &&
+              club.archive->aux_effects[0].empty() && club.archive->aux_effects[1].empty(),
+          "a set with effect sets has version 3");
+    Check(EffectSetOf(club.tags) == 1 && EffectSet(*club.archive, EffectSetOf(club.tags)) != nullptr,
+          "a mini's 3sf_aux tag picks its effect set");
+
+    // New Leaf's DJ K.K. plays with the game's effect 0, set 1 of a rip. Other sequences play set 0.
+    const rip::ArchiveEffects* new_leaf = rip::FindArchiveEffects("54f0fbc801c85ea2035219923aa4cd955e6f4cc7");
+    Check(new_leaf && rip::EffectSetOf(new_leaf, 0) == 1 &&
+              rip::EffectSetOf(new_leaf, ntdlib::ctr::snd::SequenceStart::kArchiveEffects) == 0 &&
+              rip::EffectSetOf(nullptr, 0) == 0,
+          "New Leaf's effect 0 is effect set 1");
 }
 
 int main()

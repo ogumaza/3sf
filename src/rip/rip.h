@@ -99,11 +99,16 @@ using FileChunk = xsflib::psf::FileChunk;
 // as FILE chunks at the given paths, with an archive descriptor. The descriptor lists the group files, with
 // kFlagGroupFiles, when there are any. It gives `effects` on the aux buses, with kFlagAuxEffects, when there are any.
 // The descriptor has version `version`: ArchiveDescriptor::kListVersion when a mini of the set plays several sounds.
+// With `timed_starts`, it has kFlagTimedStarts: a mini of the set holds a tag that players of 3SF 1.4 can't play
+// (3sf_var_change, 3sf_seed, 3sf_tempo, 3sf_pitch, 3sf_banks, 3sf_fx_send, 3sf_track_volume, or 3sf_var with a track
+// variable). With `effect_sets`, the descriptor has version 3 (ArchiveDescriptor::kEffectSetsVersion) and
+// kFlagAuxEffects, and gives them as effect sets 1 on. A mini's 3sf_aux tag picks one.
 std::vector<uint8_t> BuildArchiveLibrary(const std::string& archive_path, const std::vector<uint8_t>& archive,
                                          const std::string& firmware_path, const std::vector<uint8_t>& firmware,
                                          const Tags& tags, const std::vector<FileChunk>& groups = {},
                                          uint32_t version = ArchiveDescriptor::kVersion,
-                                         const nnsnd::AuxEffectLists& effects = {});
+                                         const nnsnd::AuxEffectLists& effects = {}, bool timed_starts = false,
+                                         const std::vector<nnsnd::AuxEffectLists>& effect_sets = {});
 
 // Archive mode: a .mini3sf that plays `sound_id` (a sequence) from `lib_name`.
 std::vector<uint8_t> BuildArchiveMini(uint32_t sound_id, const std::string& lib_name, Tags tags);

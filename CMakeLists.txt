@@ -3,7 +3,7 @@
 cmake_minimum_required(VERSION 3.20)
 # Shared version for 3sfrip, 3sfplay, the foobar2000 component, the XMPlay plugin, Windows file properties and macOS
 # bundles (THREESF_VERSION_ARGS below). For a release, update it here and add notes in docs/release-notes/.
-project(threesf VERSION 1.4.0 LANGUAGES CXX)
+project(threesf VERSION 1.5.0 LANGUAGES CXX)
 
 # xsflib is a library for players and rippers of the PSF family. It's a submodule. Its XsflibProject.cmake sets what a
 # project built on it starts with: C++20, a release build by default, the static C runtime, the options that keep the
@@ -83,7 +83,7 @@ add_library(threesf_nwsnd STATIC
     src/nwsnd/voice.cpp
     src/nwsnd/voice.h
 )
-target_link_libraries(threesf_nwsnd PUBLIC threesf_nnsnd ntdlib::nwsnd ntdlib::sar)
+target_link_libraries(threesf_nwsnd PUBLIC threesf_nnsnd ntdlib::ctr_starting_tracks ntdlib::nwsnd ntdlib::sar)
 target_compile_options(threesf_nwsnd PRIVATE ${THREESF_WARNINGS})
 
 # ARM11 (ARMv6K + VFPv2) user-mode interpreter that runs the game's sound code.

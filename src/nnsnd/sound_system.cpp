@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <optional>
 #include <span>
 #include <utility>
 #include <vector>
@@ -108,8 +109,10 @@ void SoundSystem::WriteDspDefaults(const DspDefaults& defaults)
     c.sync_mode = 1; // MixerParams +0xbc: nn::snd writes the system sound mode here
     c.dirty2 |= 1u << 16;
 
-    // The voices get what the output leaves of the frame's cycles (0x18b380). The firmware's effects on the aux buses
-    // (0x18d2f4) take none: the model has none. The effects on the ARM11 take no DSP cycles. When its voice manager's
+    // The voices get what the output leaves of the frame's cycles (0x18b380). nn::snd counts 10,000 cycles for each
+    // channel of the firmware's delay and 40,000 for each channel of its reverb (0x18d2f4), from bytes at 0x50c0c0 in
+    // Luigi's Mansion of 2018. In an Azahar run of that game, those bytes stay 0 with the delay on, and the count is 0
+    // (0x2305a0). The model counts none either. The effects on the ARM11 take no DSP cycles. When its voice manager's
     // flag at +0xe is set, nn::snd also takes off the cycles over 655,300 that the DSP last reported. The game doesn't
     // set the flag.
     voice_cycles_ = kFrameCycles - OutputCycles(defaults.output_mode, defaults.clipping_mode);
@@ -218,7 +221,8 @@ bool SoundSystem::WaitForDspSync()
     return true;
 }
 
-void SoundSystem::SetAuxEffects(AuxEffects effects)
+void SoundSystem::SetAuxEffects(AuxEffects effects, const std::array<uint32_t, kAuxBusCount>& delay_lines,
+                                const std::array<uint32_t, kAuxBusCount>& reverb_buffers)
 {
     aux_effects_ = std::move(effects);
 
@@ -230,6 +234,37 @@ void SoundSystem::SetAuxEffects(AuxEffects effects)
             c.aux_return[bus] = 1.0f;
             c.aux_enable[bus] = 1;
             c.dirty |= (1u << (24 + bus)) | (1u << (8 + bus));
+        }
+
+        // nn::snd's DSP delay sends its line, then its parameters, then its enable (0x22d6e4, 0x22d8cc and 0x22d774 in
+        // Luigi's Mansion of 2018). Each goes into the bus's record with its dirty bit, and the record's dirty bit goes
+        // into the mixer's (0x26c2cc).
+        const std::optional<FirmwareDelay>& delay = aux_effects_.FirmwareDelayOf(bus);
+        if (delay)
+        {
+            MixerParams& c = link_.Mixer();
+            FirmwareDelayParams& p = c.delay[bus];
+            p.buffer = delay_lines[static_cast<std::size_t>(bus)];
+            p.channels = delay->channels;
+            p.frames = static_cast<uint16_t>(delay->frames);
+            p.feedback = delay->feedback;
+            p.damping_a = delay->damping_a;
+            p.damping_b = delay->damping_b;
+            p.enable = 1;
+            p.dirty |= 7;
+            c.dirty |= 1u << (10 + bus);
+        }
+
+        // nn::snd's DSP reverb sends its lines and its parameters together, then its enable (0x2eeda8 and 0x2eed1c in
+        // StreetPass Mii Plaza's update v14.6.0), in the same way (0x161848).
+        const std::optional<FirmwareReverb>& reverb = aux_effects_.FirmwareReverbOf(bus);
+        if (reverb)
+        {
+            MixerParams& c = link_.Mixer();
+            const uint16_t dirty = c.reverb[bus].dirty;
+            c.reverb[bus] = reverb->Record(reverb_buffers[static_cast<std::size_t>(bus)]);
+            c.reverb[bus].dirty |= dirty;
+            c.dirty |= 1u << (12 + bus);
         }
     }
 }

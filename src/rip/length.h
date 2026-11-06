@@ -39,9 +39,13 @@ public:
     // A looping sequence gets two loops and a 10 s fade. Any other sequence runs to its last sound and a tail of 0.5 s.
     // The analysis stops at 600 s. With effects, the last sound can come from them after the sequence has ended. A
     // sequence with effects ends once its output has been silent for a second. docs/3sf.md, "Lengths", has the rules.
-    // Returns nullopt when the length can't be worked out. No length tag is written then. Throws std::bad_alloc when
-    // memory runs out.
-    std::optional<Timing> Analyze(uint32_t sound_index) const;
+    // The analyzer starts the sequence as `start` gives (nwsnd::ApplySequenceStart). A mini's tags start it the same
+    // way. The start's banks replace the archive's banks. The start's volume scales the output. With `effects`, the
+    // sequence plays with those effects on the aux buses in place of the analyzer's effects. The 3sf_aux tag picks such
+    // an effect set. Returns nullopt when the length can't be worked out. No length tag is written then. Throws
+    // std::bad_alloc when memory runs out.
+    std::optional<Timing> Analyze(uint32_t sound_index, const SequenceStart& start = {},
+                                  const nnsnd::AuxEffectLists* effects = nullptr) const;
 
 private:
     struct Impl;

@@ -36,6 +36,11 @@
 // make no sound: those whose volume in the archive is 0, and the sequences that the length analysis finds never sound.
 // The inputs are ripped one after another, and one that fails doesn't stop the rest. Dropping files on the program
 // gives it the files as inputs.
+//
+// Some games' code changes a sequence as it starts. It quiets tracks or sets variables, the tempo, the pitch, the banks
+// or the sends. Archive mode finds those games by the SHA-1 of the sound archive and the sounds by their labels
+// (ntdlib::ctr::snd::StartingSequenceTracks). It writes the start in the mini's tags (WriteSequenceStart), and the
+// length analysis plays the sequence so.
 
 #include <algorithm>
 #include <array>
@@ -48,16 +53,19 @@
 #include <optional>
 #include <regex>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <utility>
 #include <vector>
 
+#include "ntdlib/ctr/snd/starting_tracks.h"
 #include "ntdlib/rip/archive.h"
 #include "ntdlib/sar/formats.h"
 #include "xsflib/ascii.h"
 #include "xsflib/cli/rip.h"
 #include "xsflib/files.h"
 #include "xsflib/rip/tool.h"
+#include "xsflib/sha1.h"
 #include "xsflib/text.h"
 
 #include "common/quiet_stdout.h"
@@ -141,6 +149,10 @@ struct Job
     // game plays as separate sequences has all of them (see rip::FindPieces), the first at `index`. Empty in game mode.
     std::vector<uint32_t> sounds;
 
+    // Archive mode: the start of a later state of the sequence, in place of the sequence's start (see AddArrangements).
+    // Empty for the sequence itself.
+    std::optional<SequenceStart> start = std::nullopt;
+
     // The sounds that the mini plays: `index` alone in game mode.
     std::vector<uint32_t> Sounds() const
     {
@@ -155,11 +167,50 @@ struct ArchiveData
     const std::vector<uint8_t>& archive;
     const std::vector<std::vector<uint8_t>>& groups;
     nnsnd::AuxEffectLists effects = {};
+
+    // Archive mode: the archive's SHA-1 in lowercase hex. StartOf finds how a known game starts each sequence by it.
+    // Empty in game mode. Game mode's players ignore the tags of a start.
+    std::string archive_sha1 = {};
+
+    // Archive mode: the known archive's entry, whose game effects some sequences play with in place of `effects`.
+    const rip::ArchiveEffects* known = nullptr;
+
+    // The effect set that a sequence started as `start` plays (rip::EffectSetOf).
+    uint32_t EffectSet(const SequenceStart& start) const
+    {
+        return rip::EffectSetOf(known, start.game_effect);
+    }
+
+    // The effects of effect set `set`.
+    const nnsnd::AuxEffectLists& EffectsOf(uint32_t set) const
+    {
+        return set == 0 ? effects : known->game_effects[set - 1].buses;
+    }
 };
 
+// How a known game starts sound `sound` of `archive`, by the archive's SHA-1 `archive_sha1`. The archive's start for an
+// empty SHA-1.
+SequenceStart StartOf(const ntdlib::sar::SoundArchive& archive, std::string_view archive_sha1, uint32_t sound)
+{
+    if (archive_sha1.empty())
+    {
+        return {};
+    }
+
+    return ntdlib::ctr::snd::StartingSequenceTracks(archive_sha1, archive.Sounds()[sound].name);
+}
+
+// How `job` starts its sound `sound`: as the job's later state does, or else as StartOf gives.
+SequenceStart StartOf(const Job& job, const ntdlib::sar::SoundArchive& archive, std::string_view archive_sha1,
+                      uint32_t sound)
+{
+    return job.start ? *job.start : StartOf(archive, archive_sha1, sound);
+}
+
 // Length analysis runs every selected sequence through the nw::snd model and the DSP firmware, with `variables` set
-// before each starts. The sounds are independent, and the analysis spreads them over several threads. Each sequence of
-// a piece is measured alone. The piece then gets the latest end and the longest fade (rip::TimingOfPiece).
+// before each starts, and with the start that StartOf gives. The sounds are independent, and the analysis spreads them
+// over several threads. Each sequence of a piece is measured alone. The piece then gets the latest end and the longest
+// fade (rip::TimingOfPiece).
 void AnalyzeLengths(std::vector<Job>& jobs, const ntdlib::sar::SoundArchive& archive, const ArchiveData& data,
                     const std::vector<uint8_t>& firmware, const Variables& variables, unsigned threads)
 {
@@ -168,7 +219,9 @@ void AnalyzeLengths(std::vector<Job>& jobs, const ntdlib::sar::SoundArchive& arc
         uint32_t index;
         bool sequence;
         std::string label; // for the warning of a failed analysis
+        SequenceStart start;
         std::optional<rip::Timing> timing;
+        uint32_t effect_set = 0;
     };
 
     std::vector<Measure> measures;
@@ -178,19 +231,20 @@ void AnalyzeLengths(std::vector<Job>& jobs, const ntdlib::sar::SoundArchive& arc
         for (const uint32_t sound : sounds)
         {
             const std::string& label = sounds.size() > 1 ? archive.Sounds()[sound].name : job.label;
-            measures.push_back({sound, job.sequence, label, std::nullopt});
+            const SequenceStart start = StartOf(job, archive, data.archive_sha1, sound);
+            measures.push_back({sound, job.sequence, label, start, std::nullopt, data.EffectSet(start)});
         }
     }
 
     const rip::LengthAnalyzer analyzer(data.archive, firmware, variables, data.groups, data.effects);
-    const auto analyze = [&analyzer](Measure& measure)
+    const auto analyze = [&analyzer, &data](Measure& measure)
     {
         if (!measure.sequence)
         {
             return false;
         }
 
-        measure.timing = analyzer.Analyze(measure.index);
+        measure.timing = analyzer.Analyze(measure.index, measure.start, &data.EffectsOf(measure.effect_set));
 
         return true;
     };
@@ -394,6 +448,51 @@ std::vector<Job> SelectArchiveSounds(const ntdlib::sar::SoundArchive& archive, c
     return jobs;
 }
 
+// Archive mode: adds a job after each sequence's job for each later state that a known game moves the sequence to
+// (ntdlib::ctr::snd::SequenceArrangements), then for each state in which the game gives it other banks
+// (ntdlib::ctr::snd::BankArrangements). Its label is the sequence's label followed by the state's suffix. A state of
+// other banks keeps the rest of the sequence's start. A piece of several sequences gets none.
+void AddArrangements(std::vector<Job>& jobs, const ntdlib::sar::SoundArchive& archive, std::string_view archive_sha1)
+{
+    std::vector<Job> all;
+    for (Job& job : jobs)
+    {
+        const bool alone = job.sounds.size() <= 1;
+        const std::string name = archive.Sounds()[job.index].name;
+        all.push_back(std::move(job));
+        if (!alone)
+        {
+            continue;
+        }
+
+        const Job piece = all.back();
+        for (const auto& arrangement : ntdlib::ctr::snd::SequenceArrangements(archive_sha1, name))
+        {
+            Job state = piece;
+            state.label += arrangement.suffix;
+            state.start = arrangement.start;
+            all.push_back(std::move(state));
+        }
+
+        const std::vector<uint32_t>& banks = archive.Sounds()[piece.index].banks;
+        if (banks.empty())
+        {
+            continue;
+        }
+
+        for (const auto& arrangement : ntdlib::ctr::snd::BankArrangements(archive_sha1, banks.front()))
+        {
+            Job state = piece;
+            state.label += arrangement.suffix;
+            state.start = StartOf(archive, archive_sha1, piece.index);
+            state.start->banks = arrangement.start.banks;
+            all.push_back(std::move(state));
+        }
+    }
+
+    jobs = std::move(all);
+}
+
 // The item IDs of the sounds that a job's mini plays: the item type of sounds (1) in the top byte, and each sound's
 // index.
 std::vector<uint32_t> SoundIds(const Job& job)
@@ -448,22 +547,32 @@ struct LibraryFiles
     std::vector<rip::FileChunk> groups;
 };
 
-// The part of `archive` that the library of `jobs` holds: the files that their sequences play, and the group files of
-// `groups` that hold copies of them, cut down to those copies (ntdlib::rip::KeepSequenceData and KeepGroupCopies).
-// `archive` is the archive of `archive_file`, with the group files of `groups` added. Archive mode's model reads
-// nothing else. After a warning, the library holds the whole archive and every group file when the files can't be cut
-// out of the archive. It holds the whole group files that hold copies when only the copies can't be cut out of them.
+// The part of `archive` that the library of `jobs` holds: the files that their sequences play, with the banks that
+// their starts give them (StartOf, by the archive's SHA-1 `archive_sha1`), and the group files of `groups` that hold
+// copies of them, cut down to those copies (ntdlib::rip::KeepSequenceData and KeepGroupCopies). `archive` is the
+// archive of `archive_file`, with the group files of `groups` added. Archive mode's model reads nothing else. After a
+// warning, the library holds the whole archive and every group file when the files can't be cut out of the archive. It
+// holds the whole group files that hold copies when only the copies can't be cut out of them.
 LibraryFiles KeepLibraryFiles(const ntdlib::sar::SoundArchive& archive, const rip::FileChunk& archive_file,
-                              const std::vector<rip::FileChunk>& groups, const std::vector<Job>& jobs)
+                              const std::vector<rip::FileChunk>& groups, const std::vector<Job>& jobs,
+                              std::string_view archive_sha1)
 {
     std::vector<uint32_t> sounds;
+    std::vector<uint32_t> start_banks;
     for (const Job& job : jobs)
     {
         const std::vector<uint32_t> played = job.Sounds();
         sounds.insert(sounds.end(), played.begin(), played.end());
+        for (const uint32_t sound : played)
+        {
+            if (const SequenceStart start = StartOf(job, archive, archive_sha1, sound); start.banks)
+            {
+                start_banks.insert(start_banks.end(), start.banks->begin(), start.banks->end());
+            }
+        }
     }
 
-    std::optional<ntdlib::rip::LibraryArchive> kept = ntdlib::rip::KeepSequenceData(archive, sounds);
+    std::optional<ntdlib::rip::LibraryArchive> kept = ntdlib::rip::KeepSequenceData(archive, sounds, start_banks);
     if (!kept)
     {
         std::fprintf(stderr,
@@ -473,7 +582,8 @@ LibraryFiles KeepLibraryFiles(const ntdlib::sar::SoundArchive& archive, const ri
         return {archive_file.data, groups};
     }
 
-    const std::optional<std::vector<std::vector<uint8_t>>> cut = ntdlib::rip::KeepGroupCopies(archive, *kept, sounds);
+    const std::optional<std::vector<std::vector<uint8_t>>> cut =
+        ntdlib::rip::KeepGroupCopies(archive, *kept, sounds, start_banks);
     if (!cut)
     {
         std::fprintf(stderr,
@@ -540,8 +650,29 @@ int RipArchive(const fs::path& out_dir, rip::FileNames& names, const std::string
     }
 
     const std::size_t skipped = DropIncomplete(jobs, *archive);
-    const std::size_t silent = AnalyzeAndDropSilent(jobs, *archive, {archive_file.data, archive->GroupFiles(), effects},
-                                                    firmware, o.variables, o);
+    const std::string sha1 = xsflib::Sha1::Hex(xsflib::Sha1::Of(archive_file.data));
+    AddArrangements(jobs, *archive, sha1);
+
+    // A known archive has its game's effects, found by its SHA-1. They take the place of those of the game that holds
+    // the archive. Another build of a known archive gets a note. The tables of effects don't hold its settings.
+    nnsnd::AuxEffectLists buses = effects;
+    const rip::ArchiveEffects* known = rip::FindArchiveEffects(sha1);
+    if (known)
+    {
+        buses = known->buses;
+        std::fprintf(stderr, "aux effects of %s: %s\n", known->game, rip::DescribeEffects(buses).c_str());
+    }
+    else if (const rip::ArchiveEffects* other = rip::FindOtherBuild(*archive, sha1))
+    {
+        std::fprintf(stderr,
+                     "note: %s looks like the sound archive of %s, but not the build that 3sfrip knows (%s). Its rips "
+                     "play without that game's effects. A sequence that 3sfrip has no start for in this build plays "
+                     "every track\n",
+                     archive_path.c_str(), other->game, other->build);
+    }
+
+    const ArchiveData data = {archive_file.data, archive->GroupFiles(), buses, sha1, known};
+    const std::size_t silent = AnalyzeAndDropSilent(jobs, *archive, data, firmware, o.variables, o);
     if (jobs.empty())
     {
         std::fprintf(stderr, "%s: nothing to rip%s\n", archive_path.c_str(), SkippedText(skipped, silent).c_str());
@@ -549,20 +680,40 @@ int RipArchive(const fs::path& out_dir, rip::FileNames& names, const std::string
     }
 
     // A set whose minis play several sounds gets version 2 of the archive descriptor. Players of 3SF 1.3.3 and older
-    // refuse it.
+    // refuse it. A set whose minis change a variable in a later frame, set a track variable, set the random generator,
+    // set a tempo ratio or pitch, give a sequence other banks, give sends or set tracks' volumes gets flag bit 4
+    // (NeedsTimedStarts). Players of 3SF 1.4 refuse it. A set with a sequence that the game plays with an effect for
+    // some sequences alone gets the game's effects as effect sets, in version 3 (docs/3sf.md, "Effect sets").
     uint32_t version = ArchiveDescriptor::kVersion;
+    bool timed_starts = false;
+    bool sets = false;
     for (const Job& job : jobs)
     {
         if (job.sounds.size() > 1)
         {
             version = ArchiveDescriptor::kListVersion;
         }
+        for (const uint32_t sound : job.Sounds())
+        {
+            const SequenceStart start = StartOf(job, *archive, sha1, sound);
+            timed_starts = timed_starts || NeedsTimedStarts(start);
+            sets = sets || data.EffectSet(start) != 0;
+        }
     }
 
-    const LibraryFiles kept = KeepLibraryFiles(*archive, archive_file, groups, jobs);
+    std::vector<nnsnd::AuxEffectLists> effect_sets;
+    if (sets)
+    {
+        for (const rip::GameEffect& game_effect : known->game_effects)
+        {
+            effect_sets.push_back(game_effect.buses);
+        }
+    }
+
+    const LibraryFiles kept = KeepLibraryFiles(*archive, archive_file, groups, jobs, sha1);
     const Tags common = xsflib::cli::RipTags(o, game_name, "3sf", "archive");
     const auto lib = rip::BuildArchiveLibrary(archive_path, kept.archive, firmware_path, firmware, common, kept.groups,
-                                              version, effects);
+                                              version, buses, timed_starts, effect_sets);
     const std::string lib_name = names.LibraryIn(out_dir, lib_base, lib);
     if (!WriteLibrary(out_dir, lib_name, lib))
     {
@@ -575,12 +726,43 @@ int RipArchive(const fs::path& out_dir, rip::FileNames& names, const std::string
         mini_tags["3sf_var"] = FormatVariables(o.variables);
     }
 
-    // The 3sf_sound tag of a piece lists the labels of its sequences.
+    // The 3sf_sound tag of a piece lists the labels of its sequences. The tag of a later state holds the sequence's
+    // label, without the state's suffix. The 3sf_mute and 3sf_silence tags apply to every sequence of a piece, and so
+    // does the 3sf_aux tag of the effect set. A piece whose sequences start in different ways gets none of them.
     const auto build_mini = [&](const Job& job, Tags tags)
     {
-        if (job.sounds.size() > 1)
+        if (job.sounds.size() > 1 || job.start)
         {
             tags["3sf_sound"] = SoundLabels(*archive, job);
+        }
+
+        const std::vector<uint32_t> sounds = job.Sounds();
+        const SequenceStart start = StartOf(job, *archive, sha1, sounds.front());
+        const auto same = [&](uint32_t sound)
+        {
+            return StartOf(job, *archive, sha1, sound) == start;
+        };
+        if (std::all_of(sounds.begin(), sounds.end(), same))
+        {
+            WriteSequenceStart(start, tags);
+            if (const uint32_t set = data.EffectSet(start); set != 0)
+            {
+                tags["3sf_aux"] = std::to_string(set);
+            }
+        }
+        else
+        {
+            std::fprintf(
+                stderr,
+                "warning: %s: the sequences of %s start in different ways. Its mini starts each of them as the "
+                "archive does\n",
+                archive_path.c_str(), job.label.c_str());
+        }
+
+        if (const char* comment = rip::SoundComment(sha1, archive->Sounds()[sounds.front()].name);
+            comment && sounds.size() == 1)
+        {
+            tags["comment"] = comment;
         }
 
         return rip::BuildArchiveMini(SoundIds(job), lib_name, std::move(tags));

@@ -30,7 +30,8 @@ struct SequenceShape
 SequenceShape WalkSequence(std::span<const uint8_t> data, uint32_t start);
 
 // Whether a sound's label marks it as music: its first two words (the runs of ASCII letters and digits in it, in any
-// case) are SEQ and M, or one of its words starts with BGM, or is JIN, JINGLE or FANFARE with or without a number.
+// case) are SEQ and M, or one of its words starts with BGM, or is JIN, JINGLE, JNG, JG or FANFARE with or without a
+// number.
 bool LabelMarksMusic(std::string_view label);
 
 // Whether a sound is music, as 3sfrip's --bgm picks: its label marks it as music, or it's a sequence that opens at

@@ -119,9 +119,12 @@ memory size of 0 or greater than 0x0B200000 (178 MiB, the maximum available to a
 
 ```
 0x00  u32  magic "3SFA"
-0x04  u32  descriptor version (1 or 2)
+0x04  u32  descriptor version (1, 2 or 3)
 0x08  u32  flags: bit 0 = the DSP is required; bit 1 = the set holds group files;
-           bit 2 = the set gives effects on the aux buses
+           bit 2 = the set gives effects on the aux buses; bit 3 is reserved;
+           bit 4 = the set's files may hold the 3sf_var_change, 3sf_seed,
+           3sf_tempo, 3sf_pitch, 3sf_banks, 3sf_fx_send and 3sf_track_volume
+           tags, and track variables in 3sf_var
 0x0C  u32  output mode: 1 stereo (this version plays stereo only)
 0x10  u16  length of the sound archive's path, then the path (UTF-8)
       u16  length of the DSP firmware's path, then the path (UTF-8)
@@ -131,6 +134,9 @@ memory size of 0 or greater than 0x0B200000 (178 MiB, the maximum available to a
       with bit 2 of the flags: the effects of aux bus A, then those of aux bus B
       u16  the number of the bus's effects
            then for each: u32 its kind, then its parameters (see "Effects on the aux buses")
+      with bit 2 of the flags and version 3: the effect sets after set 0 (see "Effect sets")
+      u16  the number of further sets
+           then for each: the effects of aux bus A, then those of aux bus B, as above
       zeros to a multiple of 4
 ```
 
@@ -139,10 +145,14 @@ DSP1 image) and the group files (`.bcgrp`). A group file holds copies of some of
 files. A game can keep groups outside its sound archive, in group files that it loads itself.
 The player adds the group files to the archive in the list's order. It reads a file that the
 archive lacks from the first group file that holds a copy of it. A player rejects archive
-descriptors with another version, without bit 0 of the flags, with a flag above bit 2, with an
-output mode other than 1, or with effects that it can't play (see "Effects on the aux buses").
-Output modes 0 (mono) and 2 (surround) are reserved for a later
-version. Reproducing the console's surround output requires configuration data that rips don't
+descriptors with another version, without bit 0 of the flags, with bit 3 or a flag above bit 4,
+with an output mode other than 1, or with effects that it can't play (see "Effects on the aux
+buses"). Bit 4 marks a set in which a `.mini3sf` may hold the `3sf_var_change`, `3sf_seed`,
+`3sf_tempo`, `3sf_pitch`, `3sf_banks`, `3sf_fx_send` or `3sf_track_volume` tag, or a `3sf_var` tag
+that sets a track variable (see "Tags"). A player that supports bit 4 reads those tags in every set.
+3SF 1.4's players refuse a set with bit 4 for its flags. They would otherwise play its sounds
+without those tags. Output modes 0 (mono) and 2 (surround) are reserved for a later version.
+Reproducing the console's surround output requires configuration data that rips don't
 contain.
 
 Version 2 has the layout of version 1. It marks a set in which a `.mini3sf` selects several
@@ -155,6 +165,12 @@ the message "the archive descriptor's flags are 0x3; version 1 requires only bit
 required) to be set". They refuse a set with effects the same way, with flags of 0x5 or 0x7.
 They would otherwise play the first sound of each list alone, play without the group files'
 copies, or play without the effects.
+
+Version 3 gives effect sets after the effects of bit 2 (see "Effect sets"). It requires bit 2 of
+the flags. It also plays version 2's lists of sounds. A set with no effect sets keeps version 1
+or 2, byte for byte. Players of 3SF 1.4 and older refuse version 3 with the message "archive
+descriptor version 3; this player supports versions 1 and 2". They would otherwise play every
+sound with the effects of bit 2.
 
 ## The emulated system (game mode)
 
@@ -270,7 +286,7 @@ descriptor"). A player then plays the sounds together:
 
 - Every listed sound starts before the first frame, in the list's order. Each sound has a
   sequence player of its own. In each frame, the players run in the order in which they started.
-- `3sf_var` applies to every sound of the list (see "Tags").
+- `3sf_var`, `3sf_mute` and `3sf_silence` apply to every sound of the list (see "Tags").
 - The sounds have finished when every sequence has ended and no voice is sounding.
 - A list holds at most 16 sounds. A player refuses a longer one.
 
@@ -296,6 +312,13 @@ order. It does so before it writes the next frame's parameters, as `nn::snd`'s s
 | 2 | `nn::snd`'s FxReverb, as games from 2013 on link it | a reverb's |
 | 3 | `nn::snd`'s FxReverb, as Ocarina of Time 3D links it (2011) | a reverb's |
 | 4 | FxDelay, `nw::snd`'s or `nn::snd`'s: the two compute the same | a delay's |
+| 5 | the DSP firmware's delay, which `nn::snd` sets up | a delay's |
+| 6 | `nw::snd`'s FxReverb, as StreetPass Mii Plaza links it (2011) | a reverb's |
+| 7 | the reverb that `nn::snd` sets up in the DSP firmware | a reverb's |
+
+Kind 6 computes as kind 1, with the damping filter of kind 3. Players of 3SF 1.4 take kinds 1 to
+4. They refuse kinds 5 to 7. For kind 6, the message is "the archive descriptor gives aux bus A
+an effect of kind 6; this player supports kinds 1 to 4".
 
 A reverb's parameters, 44 bytes, in the order of `nw::snd`'s `FxReverb::Param`:
 
@@ -309,8 +332,8 @@ u32  the lengths of the first comb filter, the second comb filter and the all-pa
      samples, three values: a whole number of frames of 160 samples each, one frame at least
 f32  early gain: 0 to 1
 f32  fused gain: 0 to 1
-u32  flags: bit 0 = all four channels (kind 1 alone); bit 1 = the damping filter keeps the
-     highs in place of the lows (not kind 3, whose filter always keeps the highs)
+u32  flags: bit 0 = all four channels (kinds 1 and 6 alone); bit 1 = the damping filter keeps
+     the highs in place of the lows (not kinds 3 and 6, whose filters always keep the highs)
 ```
 
 A delay's parameters, 16 bytes, in the order of `nw::snd`'s `FxDelay::Param`:
@@ -332,6 +355,84 @@ each buffer in whole frames. Each of a reverb's buffers holds one frame at least
 A player rejects an effect of another kind, flags that the effect doesn't have, parameters that
 its library refuses, and effects whose buffers would take more than the 178 MiB that a 3DS gives
 a program.
+
+### The firmware's delay
+
+The DSP firmware runs kind 5, not the player. A bus has one at most. Its place in the bus's list
+doesn't matter. Before the sound's first frame, the player gives it a delay line in FCRAM and
+writes its settings into the firmware's mixer parameters, as `nn::snd`'s DSP delay does (Luigi's
+Mansion of 2018, `code.bin` 0x22d6e4, 0x22d8cc and 0x22d774). The line holds frames × channels ×
+160 32-bit samples, in silence. The settings are a record of 20 bytes for each bus, at offset
+0x2C + 20 × bus of the mixer parameters:
+
+```
+u16  dirty: bit 0 = enable, bit 1 = the line, bit 2 = the fields from channels on (7)
+u16  enable (1)
+u16  not written
+u16  channels: 2, or 4 with bit 0 of the flags
+u32  the line's physical address, high half first
+u16  frames: the delay time in µs over 4,888, rounded down, and 1 at least
+u16  feedback × 128
+u16  (1 − damping) × 128
+u16  damping × 128
+```
+
+Each product is in single precision and rounds toward zero. A damping above 0.95 counts as 0.95.
+The player sets bit 10 + bus of the mixer parameters' dirty word. A bus with the delay is on and
+returns at full volume, as a bus with any other effect does. A player rejects a feedback or a
+damping below 0 or above 1, and lines of more than 16 MiB in all.
+
+### The firmware's reverb
+
+The DSP firmware runs kind 7 too. A bus has one at most, beside one of the firmware's delays. Before
+the sound's first frame, the player gives the reverb five lines in FCRAM, one after another. The
+player then writes the reverb's settings into the firmware's mixer parameters. `nn::snd`'s DSP
+reverb does the same (StreetPass Mii Plaza's update v14.6.0, `code.bin` 0x2eeda8, 0x2eed1c and
+0x161848). The lines are the early reflections, the pre-delay, the two comb filters and the all-pass
+filter. Each holds its frames × 2 channels × 160 32-bit samples, in silence. The reverb has no
+surround. The settings are a record of 52 bytes for each bus, at offset 0x54 + 52 × bus of the mixer
+parameters:
+
+```
+u16  dirty: bit 0 = enable, bit 1 = the lines, bit 2 = channels and the fields from the frames
+     on (7)
+u16  enable (1)
+u16  not written
+u16  channels: 2
+u32  the physical address of each line, high half first, five values in the order above
+u16  the frames of each line, five values: the early reflection time and the pre-delay time
+     in µs over 4,888, rounded down, and 1 at least, then each filter's length over 160
+u16  early gain × 128
+u16  fused gain × 128
+u16  coloration × 128
+s16  the gain of each comb filter, two values: 10^(−3 × length / (fused time × 32.728)) × 128,
+     with the length in samples and the time in ms
+s16  (1 − damping) × 128, or (damping − 1) × 128 with bit 1 of the flags
+s16  damping × 128, or −damping × 128 with bit 1 of the flags
+```
+
+The products and the comb filters' gains are in single precision, in the mode above, and round
+toward zero. The power is the ARM11 C library's `powf` (`ntdlib/ctr_fx/vfp.h`). A damping above 0.95
+counts as 0.95. The player sets bit 12 + bus of the mixer parameters' dirty word. A bus with the
+reverb is on and returns at full volume. A player rejects bit 0 of the flags, a coloration, a
+damping or a gain below 0 or above 1, a filter that isn't a whole number of frames, and lines of
+more than 16 MiB in all. The 16 MiB counts the lines of the firmware's delays too.
+
+## Effect sets
+
+A game can change the effects on the aux buses as it goes, for a scene or for some of its sounds.
+**Animal Crossing: New Leaf** puts no effect on its buses in the town. In the club, it starts a
+reverb on bus A, and DJ K.K.'s music sends to it. One set of effects for the whole archive can't
+play both.
+
+Version 3 of the archive descriptor gives further sets of effects after the effects of bit 2
+(see "Archive descriptor"). The effects of bit 2 are set 0, and the others are sets 1 on, in
+their order. A `.mini3sf`'s `3sf_aux` tag picks the set that its sounds play with (see "Tags").
+Without the tag, they play set 0. Every sound of a `.mini3sf` plays the same set. Each set has
+set 0's layout: the effects of bus A, then those of bus B. A player checks each set as it checks
+set 0 (see "Effects on the aux buses"). It rejects a descriptor with a set that it can't play,
+even one that no file picks. The 178 MiB limit holds for each set alone, and so does the
+16 MiB limit of the firmware's lines. A sound plays one set. A player rejects a `.mini3sf` whose `3sf_aux` tag gives a set that the descriptor lacks.
 
 ## Driver (game mode)
 
@@ -387,7 +488,11 @@ ends of the sound:
 ## Tags
 
 The standard PSF tags apply: `title`, `artist`, `game`, `year`, `genre`, `comment`,
-`copyright`, `length`, `fade`, `volume`, `_lib`, `_libN`. `3sfby` credits the ripper. The ripper
+`copyright`, `length`, `fade`, `volume`, `_lib`, `_libN`. `volume` scales the output. 3sfrip
+writes it for a sequence that a known game plays at another volume through the sound's handle
+(`SoundHandle::SetVolume`). The value is the factor, as the shortest decimal that reads back as
+the same single-precision float: `volume=0.55`. Players of every version apply it. A set with
+it needs no flag. `3sfby` credits the ripper. The ripper
 also writes `3sf_sound` and `3sf_mode`. `3sf_sound` holds the sound's label from the sound archive
 (for example `SEQ_BGM_TITLE`), or the labels of a piece's sounds separated by ", ". `3sf_mode` is
 `game` or `archive`. Players and listeners can tell the modes apart by it.
@@ -402,15 +507,121 @@ finished, or to a default length.
 `3sf_var` sets sequence variables before a sequence starts. Some sequences play nothing until
 the game sets one of their variables. The value is one or more assignments `N=V`, separated by
 commas or white space. Line breaks count as white space. A tag on several lines therefore works
-too. N is 0 to 15 for the sound's player variables, and 16 to 31 for the global variables
-(global variable N − 16). V is −32,768 to 32,767. Each number is decimal, or hex with a `0x`
+too. N is 0 to 15 for the sound's player variables, 16 to 31 for the global variables
+(global variable N − 16), and 32 to 47 for the track variables: N sets track variable N − 32 of
+every track of the sequence. V is −32,768 to 32,767. Each number is decimal, or hex with a `0x`
 prefix, and may have a minus sign. A later assignment to the same variable wins. In archive
-mode, a player sets the variables after it sets up the sequence and before the sequence's first
-tick. A player ignores the whole tag if any part of it is malformed or out of range. Game mode
+mode, a player sets the variables after it sets up the sequence and its tracks and before the
+sequence's first tick. A player ignores the whole tag if any part of it is malformed or out of
+range. Players of 3SF 1.4 and older take N up to 31. They ignore a tag that sets a track
+variable. A set whose `.mini3sf` sets a track variable therefore has bit 4 of the archive
+descriptor's flags. Game mode
 ignores the tag: version 1's driver can't set variables. A set whose `.mini3sf` lists several
-sounds sets the variables of each of them. `3sfrip --var N=V` writes the tag,
-with the assignments in increasing order of N, in decimal, separated by ", ":
-`3sf_var=0=1, 17=-1`.
+sounds sets the variables of each of them. 3sfrip writes the tag for `--var N=V`, and for a
+sequence that a known game starts with a variable set. The game's value then takes the place of
+`--var`'s for that variable. The tag holds the assignments in increasing order of N, in decimal,
+separated by ", ": `3sf_var=0=1, 17=-1`.
+
+`3sf_var_change` changes sequence variables in later sound frames. A game can do that through
+the sound's handle, or through another sound that plays with the sequence. One sequence can wait
+for a variable that another sequence changes. The value is one or more changes `F:N=V`,
+separated by commas or white space. At the start of sound frame F, before the frame's ticks,
+variable N takes the value V. Frame 0 is the frame of the sequence's first tick. N and V are as in
+`3sf_var`. F is 0 to 4,294,967,295. Each number is decimal, or hex with a `0x` prefix. V may have a
+minus sign. A change of frame 0 applies after `3sf_var`. Changes of the same frame apply in the
+tag's order. A player ignores the whole tag if any part of it is malformed or out of range. A set
+whose `.mini3sf` lists several sounds changes the variables of each of them. Game mode ignores the
+tag. 3sfrip writes the changes in the order of their frames, separated by ", ", for a sequence
+that a known game starts so: `3sf_var_change=1:16=1`. A set with the tag has bit 4 of the archive
+descriptor's flags.
+
+`3sf_seed` gives the state of nw::snd's random number generator at the sequence's first tick:
+0 to 4,294,967,295, in decimal or in hex with a `0x` prefix, with white space around it allowed.
+The generator steps x = x × 0x19660D + 0x3C6EF35F, modulo 2³², and each number that it gives is
+x's top 16 bits. The sequence's first random command draws the number after the given state. A
+player sets the generator after the masks of `3sf_mute` and `3sf_silence`, before the first tick.
+A player ignores a tag that doesn't parse. A set whose `.mini3sf` lists several sounds sets the
+generator as the last of them starts. Game mode ignores the tag. 3sfrip writes the tag, as `0x`
+and eight hex digits, for an effect that a known game plays only on some draws of its random
+numbers. The rip takes a draw on which the effect sounds, and the file's `comment` tag says how
+often the game plays it. A set with the tag has bit 4 of the archive descriptor's flags.
+
+`3sf_tempo` gives the tempo ratio that the game sets through the sound's handle
+(`SequenceSoundHandle::SetTempoRatio`). The sequence's ticks come at its tempo times the ratio.
+nw::snd computes a sequence's ticks in a millisecond as the timebase times the tempo, as an
+unsigned 32-bit product converted to a float, times the ratio, times 1/60000, in that order and in
+single precision. `3sf_pitch` gives the pitch that the game sets through the sound's handle
+(`SoundHandle::SetPitch`), as a ratio of frequencies. Every channel of the sequence plays at its
+pitch times the ratio. Each value is a ratio from 0.0625 to 16: decimal digits, with an optional
+`.` and more digits, such as `1.3` or `1.1625`. White space around it is allowed. A player reads
+the value as the nearest single-precision float. A player sets the ratios after the masks and
+the seed, before the first tick. A player ignores a tag that doesn't parse, and plays the
+sequence at a ratio of 1. A set whose `.mini3sf` lists several sounds sets the ratios of each of
+them. Game mode ignores both tags. 3sfrip writes a ratio other than 1 as the shortest decimal
+that reads back as the same float, for a state in which a known game plays a piece faster or
+higher: `3sf_tempo=1.3`. A set with either tag has bit 4 of the archive descriptor's flags.
+
+`3sf_banks` gives the banks that the game gives a sequence as it starts it, in place of the
+archive's: nw::snd's `SeqSoundInfo`, which the sound's `StartInfo` holds with flag 0x10. The
+value is one to four item IDs for bank slots 0 to 3, in order, separated by commas or white
+space. Each ID is decimal, or hex with a `0x` prefix: a bank's item ID (`0x03000000` to
+`0x03FFFFFF`), or `0xFFFFFFFF` for an empty slot. The slots after the last ID are empty. The
+tag replaces all four of the sequence's slots, as nw::snd does. A player loads the banks as the
+sequence starts. A slot whose bank the archive lacks plays no notes. A player ignores a tag
+that doesn't parse, and plays the archive's banks. A set whose `.mini3sf` lists several sounds
+gives the banks to each of them. Game mode ignores the tag. 3sfrip writes each ID as `0x` and
+eight hex digits, up to the last slot with a bank, separated by ", ": `3sf_banks=0x03000001`.
+A set with the tag has bit 4 of the archive descriptor's flags. 3SF 1.4's players would
+otherwise play the sequence with the archive's banks.
+
+`3sf_fx_send` gives the sends on aux buses A and B that the game gives the sound, through the
+sound's handle and its sound player (`BasicSound::SetFxSend` and `SoundPlayer::SetFxSend`). The
+value is bus A's send, a comma and bus B's send, such as `0.4,0`. A single value gives bus A's
+send, and bus B's is then 0. Each send is 0 to 1: decimal digits, with an optional `.` and more
+digits. White space around each is allowed. A player reads each as the nearest single-precision
+float. nw::snd adds the sound's send on a bus to each track's send on it
+(`SequenceTrack::UpdateChannelParam`). Each voice sends the sum, clamped to 0 to 1. A player
+sets the sends with the ratios, before the first tick. A player ignores a tag that doesn't
+parse, and plays the sequence with sends of 0. A set whose `.mini3sf` lists several sounds gives
+the sends to each of them. Game mode ignores the tag. 3sfrip writes both sends, each as the
+shortest decimal that reads back as the same float, for a sequence that a known game plays with
+a send: `3sf_fx_send=0.4,0`. A set with the tag has bit 4 of the archive descriptor's flags.
+
+`3sf_track_volume` gives the volumes that the game gives a sequence's tracks through the sound's
+handle (`SequenceSoundHandle::SetTrackVolume`), as factors of amplitude. The value is one or more
+entries `N=V`, separated by commas or white space. N is a track, 0 to 15, in decimal or in hex with
+a `0x` prefix. V is its volume, from 0 to 16: decimal digits, with an optional `.` and more digits.
+A player reads V as the nearest single-precision float. A track that the tag leaves out plays at 1.
+nw::snd multiplies a track's volume into the volume of each of the track's channels
+(`SequenceTrack::UpdateChannelParam`). A track at 0 plays as a track that `3sf_silence` silences. A
+player sets the volumes with the masks, before the first tick. A player ignores a tag that doesn't
+parse, and plays every track at 1. A set whose `.mini3sf` lists several sounds gives the volumes to
+each of them. Game mode ignores the tag. 3sfrip writes each volume other than 1, as the shortest
+decimal that reads back as the same float, for a state in which a known game plays some tracks
+quieter: `3sf_track_volume=8=0.8, 9=0.8`. A set with the tag has bit 4 of the archive descriptor's
+flags.
+
+`3sf_aux` picks the effect set that the sounds of a `.mini3sf` play with (see "Effect sets"). The
+value is 0 to 65,535, in decimal, with white space around it allowed. Set 0 is the effects of
+bit 2 of the archive descriptor's flags. A player ignores a tag that doesn't parse, and plays set
+0. It refuses a `.mini3sf` whose tag gives a set that the archive descriptor doesn't have. Game
+mode ignores the tag. 3sfrip writes the tag for a sequence that a known game plays with an effect
+that it runs for some sequences alone, such as DJ K.K.'s music in New Leaf's club: `3sf_aux=1`. A
+set with the tag has version 3 of the archive descriptor.
+
+`3sf_mute` and `3sf_silence` quiet tracks of a sequence as it starts. Some games' code does
+that through the sound's handle, to play one arrangement of a piece or one mix of a part. Each
+tag holds a mask of tracks: bit N stands for track N. The value is 0 to 65,535, in decimal or in
+hex with a `0x` prefix. White space around it is allowed. In archive mode, a player applies the
+masks after `3sf_var` and before the sequence's first tick. It mutes each track that `3sf_mute`
+sets, in the mode that keeps the track's channels sounding (`SEQ_MUTE_NO_STOP`). A muted track
+runs its commands and starts no note. The player silences each track that `3sf_silence` sets,
+with no fade. A silenced track's notes start at a volume of 0 and take their voices. A game that
+sets a track's volume to 0 plays the track the same way. A track in neither mask plays as usual.
+A player ignores a tag that doesn't parse. Game mode ignores both tags. A set whose `.mini3sf`
+lists several sounds applies the masks to each of them. Players of earlier versions ignore both
+tags and play every track. `3sfrip` writes each mask as `0x` and four hex digits, and leaves out
+a tag whose mask is 0: `3sf_mute=0xfff0`.
 
 ## Ripping
 
@@ -462,21 +673,107 @@ sequence with a `SND ` chunk, or the sequences of a piece that the game plays to
 come from the same analysis as in game mode. `--var` sets variables for every sequence ripped,
 in the analysis and in the `3sf_var` tag.
 
+The ripper knows the tracks that some games' code quiets as a sequence starts. It finds a game
+by the SHA-1 of its sound archive, and a sequence by its label. It writes the tracks in the
+`3sf_mute` and `3sf_silence` tags, and the length analysis plays the sequence with them quiet.
+The list gives one state of each piece: the one in which the piece starts, or the one in which
+the game plays it most. A piece whose sequences start in different ways gets none of the tags of
+a start, and the ripper warns. For some sequences, the list also gives the later states that the game's code
+moves the sequence to. The ripper writes the sequence once more for each of them, with that
+state's tags, after the sequence itself. The file's title is the sequence's label followed by
+the state's name, such as `SEQ_BGM_REELING_NORMAL_tension_2`. Its `3sf_sound` holds the label
+alone.
+
+The list also gives the variables that some games set for a sequence, and when. Some sounds of
+StreetPass Mii Plaza wait for a global variable that another sound changes. Others play another
+pitch for each value of a count that other sounds keep. The ripper writes the game's values of
+frame 0 in `3sf_var` and the later changes in `3sf_var_change`, and the length analysis plays the
+sequence with them. For an effect that the game plays only on some draws of its random numbers,
+the list gives a state of the generator on which the effect sounds. The ripper writes it in
+`3sf_seed`, and a sentence in the `comment` tag says how often the game plays the effect. Some
+games play a piece faster or higher in a state of play, such as the last seconds of a battle.
+The list gives the state's tempo ratio and pitch, and the ripper writes them in `3sf_tempo` and
+`3sf_pitch`. A game can also give a sequence sends on the aux buses through its sound player. The
+list gives them, and the ripper writes them in `3sf_fx_send`. Some games give some tracks a volume
+between 0 and full. The list gives those volumes, and the ripper writes them in `3sf_track_volume`.
+A set with any of these six tags has bit 4 of the archive descriptor's flags. For some sequences the
+list gives the volume at which the game plays them, and the ripper writes it in the `volume` tag.
+Some games start a sequence with other banks than the archive gives it, by the bank in the
+sequence's slot 0. Super Mario 3D Land gives Mario's voice sequences Luigi's banks. For each
+sequence with such a bank, the ripper writes one more file after the sequence's states, with the
+game's banks in `3sf_banks` and the rest of the sequence's start. Its title ends in the state's
+name, such as `SePvJumpS_Luigi`.
+
 The ripper knows the effects that some games put on the aux buses (see "Effects on the aux
 buses"). It finds a game by its program ID, and gives the game's effects in the descriptor of
-each rip of the game. A loose `.bcsar` gets none.
+each rip of the game. It finds the archives of StreetPass Mii Plaza and its add-on games, and the
+archive of Super Mario 3D Land, by their SHA-1, in a game's RomFS or as loose `.bcsar` files.
+Those effects take the place of the effects of the game that holds the archive. It finds the
+archives of Luigi's Mansion (2018) and of six system titles the same way. Another loose `.bcsar`
+gets none. An archive that holds a sound that only one of these archives holds, with another
+SHA-1, is another build of it. The ripper prints a note, and its rips get none of that archive's
+settings.
 
 | Game | Program ID | Bus A | Bus B |
 |---|---|---|---|
 | Pokemon X | `0004000000055D00` | kind 1: 0, 4600, 1, 0.5, 0.91, {1120, 1440, 4960}, 0.3, 0.73 | none |
-| WarioWare Gold (North America) | `00040000001D1C00` | kind 1: 60, 800, 100, 0.5, 0.4, {3040, 3680, 2080}, 0.6, 0.4 | kind 1: 40, 4000, 150, 0.25, 0.4, {2720, 3680, 2080}, 0.6, 0.4 |
-| The Legend of Zelda: Ocarina of Time 3D (North America) | `0004000000033500` | kind 3: 60, 4000, 100, 0.5, 0.4, {3040, 3680, 2080}, 0.6, 0.4 | kind 4: 128, 0.01875, 0.2, all four channels |
-| The Legend of Zelda: Majora's Mask 3D (North America) | `0004000000125500` | none | kind 4: 80, 0.625, 0.2, all four channels |
+| WarioWare Gold (every region) | `00040000001D1C00` | kind 1: 60, 800, 100, 0.5, 0.4, {3040, 3680, 2080}, 0.6, 0.4 | kind 1: 40, 4000, 150, 0.25, 0.4, {2720, 3680, 2080}, 0.6, 0.4 |
+| The Legend of Zelda: Ocarina of Time 3D (North America, Europe, Japan) | `0004000000033500`, `0004000000033600`, `0004000000033400` | kind 3: 60, 4000, 100, 0.5, 0.4, {3040, 3680, 2080}, 0.6, 0.4 | kind 4: 96, 0.2475, 0.2, all four channels |
+| The Legend of Zelda: Majora's Mask 3D (North America, Europe, Japan) | `0004000000125500`, `0004000000125600`, `00040000000D6E00` | none | kind 4: 24, 0.01875, 0.2, all four channels |
+| Mario Party: Island Tour (North America) | `00040000000F8100` | kind 4: 165, 0.45, 0.45, all four channels | none |
+| Mario Party: Star Rush (North America) | `000400000019BD00` | none | kind 4: 70, 0.2, 0.8, no surround |
+
+The Plaza's archives are those of its update v14.6.0 and of its add-on content v0.2.0. The European
+add-on content holds the same files. The archive of the Plaza's European system title gets the
+Plaza's row. Super Mario 3D Land's archive is that of the USA release's Rev 1. Kind 6 is the Plaza's
+`nw::snd` FxReverb, and kinds 5 and 7 are the DSP's delay and reverb. Each reverb of the Plaza and of
+the system titles has the filter sizes {3040, 3680, 2080}. Mii Force, Slot Car Rivals, Market
+Crashers and Battleground Z read their effects from files that give the reverb bus A. Their code
+puts every effect of those files on bus B. The ripper follows the code.
+
+| Game | Bus A | Bus B |
+|---|---|---|
+| StreetPass Mii Plaza | kind 6: 60, 4000, 100, 0.5, 0.55, 0.6, 0.4 | none |
+| Ultimate Angler | kind 6: 60, 4000, 100, 0.5, 0.4, 0.6, 0.4 | none |
+| Flower Town | kind 7: 60, 4000, 100, 0.5, 0.4, 0.6, 0.4 | none |
+| Monster Manor | kind 6: 60, 2000, 100, 0.5, 0.4, 0.6, 0.4 | none |
+| Feed Mii, Ninja Launcher | kind 6: 60, 2500, 50, 0.5, 0.6, 0.5, 0.3 | none |
+| Warrior's Way | none | kind 7: 5, 1300, 5, 0.6, 0.5, 0.0, 0.3 |
+| Mii Force | none | kind 7: 25, 1400, 5, 0.6, 0.4, 0.3, 0.3, then kind 5: 170, 0.4, 0.75, all four channels |
+| Slot Car Rivals | none | kind 7: 25, 2000, 5, 0.6, 0.4, 0.4, 0.4, then kind 5: 170, 0.4, 0.5, all four channels |
+| Market Crashers, Battleground Z | none | kind 7: 25, 2000, 5, 0.6, 0.4, 0.4, 0.4, then kind 5: 170, 0.4, 0.75, all four channels |
+| Mii Trek | none | none |
+| Luigi's Mansion (2018, North America) | kind 5: 270, 0.4, 0.9 | none |
+| System Settings (both European titles), Mii Maker, Activity Log (the European builds) | kind 3: 60, 4000, 100, 0.5, 0.4, 0.6, 0.4 | none |
+| Swapnote (the European build) | kind 1: 60, 4000, 100, 0.5, 0.4, 0.6, 0.4 | none |
+| Nintendo eShop (the European build) | kind 1: 60, 2500, 100, 0.5, 0.4, 0.6, 0.4 | none |
+| Super Mario 3D Land | kind 4: 200, 0.4, 0.5, no surround | none |
 
 The values are the parameters in their order above. The reverbs have neither flag. Pokemon X
 starts its reverb in the field. Ocarina of Time 3D and Majora's Mask 3D pick bus B's delay from 18
-presets for each scene. The ripper keeps one for every sound: the preset that the game picks when
-it starts.
+presets for each scene. The ripper keeps one for every sound: the preset that
+normal play picks most often. Super Mario 3D Land picks bus A's delay for each stage. Most stages
+take the delay above. The stage of the title screen is one of them. The ripper keeps it for every
+sound. Island Tour also picks its effects for each scene. 119 of its 120 scenes put the delay on
+bus A, and 3 put the DSP's delay on bus B. The ripper keeps the delay on bus A and nothing on bus B.
+Many of Star Rush's scenes pick a delay for bus B from five presets. The ripper keeps the preset
+that most of them pick for every sound.
+
+Some games run an effect for some of their sequences alone (see "Effect sets"). The list of
+starts gives such a sequence the game's number for the effect. The ripper finds the effect in its
+table by the archive's SHA-1, and gives it to the set as an effect set. Each `.mini3sf` of the
+sequence gets that set's `3sf_aux` tag, and the length analysis plays the sequence with the set.
+A set without such a sequence has no effect sets. New Leaf's sound archive has no effect for the
+archive. DJ K.K.'s 188 sequences play only in the club, where the game runs its
+effect 0 on bus A: kind 2: 10, 1200, 40, 0.1, 0.6, 0.5, 0.4. The game sends each of them to it at
+0.4 (`3sf_fx_send=0.4,0`).
+Happy Home Designer's sound archive has no effect for the archive either. The player
+picks a room's ambient sound. "Ringing" starts the game's effect 0 on bus A, the firmware's reverb:
+kind 7: 50, 8000, 60, 0.85, 0.91, 0.75, 1. "Echoes" starts effect 1, the firmware's delay: kind 5:
+285, 0.68, 0.15, all four channels. The game sends the room's music to either at 0.38
+(`3sf_fx_send=0.38,0`). The archive's 364 pieces of music each get two more `.mini3sf` files:
+`_ringing` with set 1 and `_echoes` with set 2. The piece's file itself plays the room's default,
+"silence", with no effect.
 
 A sound archive doesn't contain the firmware that plays it. For a game, the ripper uses the
 game's: a DSP1 `.cdc` file in the RomFS, or else a DSP1 image linked into the game's code,
@@ -523,16 +820,21 @@ sequences. Only a set with such a piece has version 2 of the archive descriptor.
 
 Tags written by `3sfrip`: `title` (the sound's label, or a piece's name), `3sf_sound` (the sound's
 label, or the labels of a piece's sequences, separated by ", "), `game`, `length` and `fade`
-(sequences only), `3sf_mode`, `3sfby`, `utf8=1`, and optionally `3sf_var`, `artist`, `year` and
-`copyright`.
+(sequences only), `3sf_mode`, `3sfby`, `utf8=1`, and optionally `3sf_var`, `3sf_var_change`,
+`3sf_seed`, `3sf_tempo`, `3sf_pitch`, `3sf_banks`, `3sf_fx_send`, `3sf_track_volume`, `3sf_aux`,
+`3sf_mute`, `3sf_silence`, `volume`, `comment`, `artist`, `year` and `copyright`.
 
 ### Lengths
 
 `3sfrip` works out a sequence's length by playing it on 3SF's model of the sound player (see
 "Archive mode") with the rip's DSP firmware. A looping sequence gets two loops and a
 10-second fade. A sequence that ends plays until half a second after its last sound. Any
-silence before the sequence ends is cut. A sequence still playing at 600 seconds gets a length
-of 600 seconds and the fade. Sound means a sample louder than 8 of 32,767 (−72 dB). In either
+silence before the sequence ends is cut. A sequence can repeat its music in a counted loop that
+the game plays for longer than that limit. When the analysis reaches 600 seconds inside counted
+loops, it measures the sequence again with each track's outermost counted loop endless. Those
+loops' passes then count as the sequence's loops. An inner loop still ends, and repeats in each
+pass of the outer loop. A sequence still playing at 600 seconds otherwise gets a length of 600
+seconds and the fade. Sound means a sample louder than 8 of 32,767 (−72 dB). In either
 mode, the ripper lists and skips the sounds that make no sound: a sequence that the analysis
 finds never sounds, and a sound whose volume in the archive is 0. The sound library multiplies
 everything a sound plays by that volume.
@@ -549,14 +851,16 @@ while it holds a held note or a note of length 0 on a looping wave at its sustai
 track's pass is what the track plays from the command it jumps back to until the jump. A pass
 changes the sound when the track plays a note, changes a setting of the track or the player, or
 opens a track. A tie or a monophonic note that continues the newest note at the same key and
-volume, with no sweep, changes nothing. A pass that changes nothing is idle. A track that only
-polls or counts a variable makes idle passes. An idle pass is never a loop. Any other pass of the
-first track is a loop. A pass of a later track is a loop if the track played a note during it
-and is the main track. A pass that played no note is a loop too while the track holds a held
-note or a note of length 0 on a looping wave at its sustain level and every other track still
-playing rests. A track rests when it waits forever, or when its last pass was idle and it has
-changed nothing since. A track is the main track when no earlier track still playing has loops
-that would count. The first track's loops count unless its last pass was idle or it waits
+velocity, with no sweep, changes nothing. The first such note after a new note drops the
+region's volume from the note, as the 3DS does. That doesn't change the pass. A steady sequence
+counts its voices' loops from there (see below). A pass that changes nothing is idle. A track
+that only polls or counts a variable makes idle passes. An idle pass is never a loop. Any other
+pass of the first track is a loop. A pass of a later track is a loop if the track played a note
+during it and is the main track. A pass that played no note is a loop too while the track holds
+a held note or a note of length 0 on a looping wave at its sustain level and every other track
+still playing rests. A track rests when it waits forever, or when its last pass was idle and it
+has changed nothing since. A track is the main track when no earlier track still playing has
+loops that would count. The first track's loops count unless its last pass was idle or it waits
 forever. A later track's loops count only if its last pass played a note and wasn't idle, and
 the track doesn't wait forever. Two loops count together only if they come from the same track
 and go back to the same command. A loop of another track, or one that goes back elsewhere,

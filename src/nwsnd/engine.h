@@ -13,6 +13,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <set>
 #include <span>
 #include <utility>
 #include <vector>
@@ -50,6 +51,15 @@ public:
         ntdlib::sar::WaveArchive archive;
     };
 
+    // A variable that a player takes at the start of a later frame, before the frame's work (ScheduleVariable).
+    struct ScheduledVariable
+    {
+        std::size_t player = 0; // the player's place in the engine's list
+        int index = 0;
+        int16_t value = -1;
+        uint64_t frame = 0; // the engine's frame count at which the variable changes
+    };
+
     // The engine's state, for a snapshot of the model (see ArchiveModel::Snapshot): a copy of the voices' pool, the
     // channels, the players and the caches. It keeps alive everything it points at.
     struct Snapshot
@@ -62,6 +72,8 @@ public:
         std::map<uint32_t, std::shared_ptr<const LoadedWarc>> warcs;
         std::map<std::pair<uint32_t, uint32_t>, std::optional<WaveInfo>> waves;
         std::array<int16_t, 16> global_vars{};
+        uint64_t frames = 0;
+        std::vector<ScheduledVariable> scheduled;
     };
 
     // More channels than can ever be in use at once. Each channel holds one of the 23 voices. A new note takes a
@@ -102,8 +114,10 @@ public:
     }
 
     // Starts a sequence sound by its index in the archive's sound table. Returns the player, or nullptr if there's no
-    // such sequence or its file isn't in the archive. Throws if the sequence's data is malformed.
-    SequenceSoundPlayer* StartSequence(uint32_t index);
+    // such sequence or its file isn't in the archive. Throws if the sequence's data is malformed. `banks` gives the
+    // sequence's four bank slots in place of the archive's, as a game's StartInfo can (SequenceStart::banks).
+    SequenceSoundPlayer* StartSequence(uint32_t index,
+                                       const std::optional<std::array<uint32_t, 4>>& banks = std::nullopt);
 
     // Bank::NoteOn (code.bin 0x48f954) for the bank in slot `bank_index` of a player's `bank_items`: finds the velocity
     // region, loads its wave and starts a channel for it.
@@ -112,8 +126,15 @@ public:
     // A channel's callback, for its owner: track `track` of player `player`.
     void ChannelEvent(int player, int track, Channel& channel, Channel::CallbackStatus status);
 
-    // One sound frame: nn::snd receive, FrameProcess, nn::snd send. Returns false if the DSP stopped answering.
+    // One sound frame: nn::snd receive, the scheduled variables of the frame, FrameProcess, nn::snd send. Returns false
+    // if the DSP stopped answering.
     bool RunFrame();
+
+    // Sets variable `index` of `player` (SequenceSoundPlayer::SetVariable) to `value` at the start of frame `frame`
+    // of the player, before the frame's ticks. Frame 0 is the frame of the player's first tick: the next frame that
+    // RunFrame runs once the player has started. A game changes a variable so through the sound's handle, or through
+    // another sound that plays with it. `player` has to be one of the engine's players.
+    void ScheduleVariable(const SequenceSoundPlayer& player, int index, int16_t value, uint64_t frame);
 
     // True while any sequence player is active or any channel is sounding.
     bool IsBusy() const;
@@ -123,6 +144,18 @@ public:
     std::array<int16_t, 16>& GlobalVariables()
     {
         return global_vars_;
+    }
+
+    // The counted loops that the length analysis makes endless, each a track and its loop's body. ntdlib's
+    // SequenceTrack calls LoopsForEver at the end of each pass of a counted loop.
+    void SetEndlessLoops(std::set<std::pair<int, uint32_t>> loops)
+    {
+        endless_loops_ = std::move(loops);
+    }
+
+    bool LoopsForEver(const SequenceSoundPlayer&, int track, uint32_t address) const
+    {
+        return endless_loops_.contains({track, address});
     }
 
     // Between frames.
@@ -156,6 +189,11 @@ private:
     std::map<std::pair<uint32_t, uint32_t>, std::optional<WaveInfo>> waves_;
 
     std::array<int16_t, 16> global_vars_;
+    std::set<std::pair<int, uint32_t>> endless_loops_;
+
+    // The frames that RunFrame has run, and the variables that change in later frames.
+    uint64_t frames_ = 0;
+    std::vector<ScheduledVariable> scheduled_;
 };
 
 // The FCRAM that archive mode gives the DSP (docs/3sf.md, "Archive mode").

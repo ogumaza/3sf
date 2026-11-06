@@ -76,8 +76,11 @@ public:
     bool WaitForDspSync();
 
     // Puts `effects` on the aux buses, as a game does once nn::snd has started. A bus with an effect is turned on and
-    // returns at full volume (0x17940c and 0x179624). nn::snd then runs its effects in each frame's send step.
-    void SetAuxEffects(AuxEffects effects);
+    // returns at full volume (0x17940c and 0x179624). nn::snd then runs its effects in each frame's send step. The
+    // firmware runs its delays and reverbs. A delay's line lies in FCRAM at the physical address in `delay_lines`, and
+    // a reverb's lines from the one in `reverb_buffers`, one for each bus.
+    void SetAuxEffects(AuxEffects effects, const std::array<uint32_t, kAuxBusCount>& delay_lines = {},
+                       const std::array<uint32_t, kAuxBusCount>& reverb_buffers = {});
 
     // Runs the effects on the aux buses, writes all voice and DSP parameters and commits the frame.
     void SendParameterToDsp();

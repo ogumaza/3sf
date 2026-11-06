@@ -149,7 +149,7 @@ bool LabelMarksMusic(std::string_view label)
     for (const std::string& word : words)
     {
         if (word.starts_with("BGM") || IsNumberedWord(word, "JIN") || IsNumberedWord(word, "JINGLE") ||
-            IsNumberedWord(word, "FANFARE"))
+            IsNumberedWord(word, "JNG") || IsNumberedWord(word, "JG") || IsNumberedWord(word, "FANFARE"))
         {
             return true;
         }

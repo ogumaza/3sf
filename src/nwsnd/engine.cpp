@@ -3,6 +3,7 @@
 #include "nwsnd/engine.h"
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -232,14 +233,21 @@ void Engine::ChannelEvent(int player, int track, Channel& channel, Channel::Call
     }
 }
 
-SequenceSoundPlayer* Engine::StartSequence(uint32_t index)
+SequenceSoundPlayer* Engine::StartSequence(uint32_t index, const std::optional<std::array<uint32_t, 4>>& banks)
 {
     if (index >= archive_.Sounds().size())
     {
         return nullptr;
     }
 
-    const ntdlib::sar::SoundInfo& info = archive_.Sounds()[index];
+    // With a StartInfo's SeqSoundInfo, the sequence's prepare (0x2bcaf0 and 0x2bcc10 in Super Mario 3D Land) takes all
+    // four bank IDs from the StartInfo.
+    ntdlib::sar::SoundInfo info = archive_.Sounds()[index];
+    if (banks)
+    {
+        info.banks.assign(banks->begin(), banks->end());
+    }
+
     if (info.type != ntdlib::sar::SoundType::kSequence)
     {
         return nullptr;
@@ -285,10 +293,33 @@ bool Engine::RunFrame()
         return false;
     }
 
+    for (const ScheduledVariable& change : scheduled_)
+    {
+        if (change.frame == frames_)
+        {
+            players_[change.player].SetVariable(*this, change.index, change.value);
+        }
+    }
+
     FrameProcess();
     snd_.SendParameterToDsp();
+    ++frames_;
 
     return true;
+}
+
+void Engine::ScheduleVariable(const SequenceSoundPlayer& player, int index, int16_t value, uint64_t frame)
+{
+    for (std::size_t i = 0; i < players_.size(); i++)
+    {
+        if (&players_[i] == &player)
+        {
+            scheduled_.push_back({.player = i, .index = index, .value = value, .frame = frames_ + frame});
+            return;
+        }
+    }
+
+    throw std::invalid_argument("a scheduled variable for a player the engine doesn't have");
 }
 
 bool Engine::IsBusy() const
@@ -315,6 +346,8 @@ Engine::Snapshot Engine::Save() const
     snapshot.warcs = warcs_;
     snapshot.waves = waves_;
     snapshot.global_vars = global_vars_;
+    snapshot.frames = frames_;
+    snapshot.scheduled = scheduled_;
 
     return snapshot;
 }
@@ -343,6 +376,8 @@ void Engine::Restore(const Snapshot& snapshot)
     warcs_ = snapshot.warcs;
     waves_ = snapshot.waves;
     global_vars_ = snapshot.global_vars;
+    frames_ = snapshot.frames;
+    scheduled_ = snapshot.scheduled;
 }
 
 ArchiveModel::Snapshot ArchiveModel::Save(const Snapshot* previous)
@@ -378,7 +413,29 @@ bool ArchiveModel::Start(std::span<const uint8_t> firmware, const ntdlib::sar::S
         return false;
     }
 
-    snd.SetAuxEffects(std::move(models));
+    // The game gives each of the firmware's delays a line in its memory, in silence (0x22d5d8 and 0x22d9ec in Luigi's
+    // Mansion of 2018). Each of the firmware's reverbs gets its lines in one buffer (0x80cef0 to 0x80cf2c in StreetPass
+    // Mii Plaza's update v14.6.0). The rips give that buffer in silence too.
+    std::array<uint32_t, nnsnd::kAuxBusCount> delay_lines{};
+    std::array<uint32_t, nnsnd::kAuxBusCount> reverb_buffers{};
+    for (int bus = 0; bus < nnsnd::kAuxBusCount; bus++)
+    {
+        const std::optional<nnsnd::FirmwareDelay>& delay = models.FirmwareDelayOf(bus);
+        if (delay)
+        {
+            const std::vector<uint8_t> silence(delay->LineBytes());
+            delay_lines[static_cast<std::size_t>(bus)] = fcram.Store(silence.data(), silence.size());
+        }
+
+        const std::optional<nnsnd::FirmwareReverb>& reverb = models.FirmwareReverbOf(bus);
+        if (reverb)
+        {
+            const std::vector<uint8_t> silence(reverb->BufferBytes());
+            reverb_buffers[static_cast<std::size_t>(bus)] = fcram.Store(silence.data(), silence.size());
+        }
+    }
+
+    snd.SetAuxEffects(std::move(models), delay_lines, reverb_buffers);
 
     EngineOptions options;
     options.output_mode = output_mode;

@@ -16,7 +16,10 @@ each build plays.
 
 - Tags are shown as metadata, as in kode54's PSF-family components: `game` as album, `year` as
   date, and `replaygain_*` as ReplayGain. Tags can be edited: the tag area is rewritten, and
-  `_lib`, `length`, `fade`, `volume`, `utf8` and `3sf_var` are kept.
+  `_lib`, `length`, `fade`, `volume`, `utf8` and the `3sf_` tags that set how a sound plays are
+  kept. Those are `3sf_var`, `3sf_var_change`, `3sf_seed`, `3sf_tempo`, `3sf_pitch`, `3sf_banks`,
+  `3sf_fx_send`, `3sf_track_volume`, `3sf_aux`, `3sf_mute` and `3sf_silence`. foobar2000 doesn't
+  show them.
 - Length and fade come from the `length` and `fade` tags. Files without a length tag play
   for the default length and fade and stop early when the sound ends by itself.
 - Advanced preferences › Decoding › 3SF decoder: default length and fade, endless playback, and

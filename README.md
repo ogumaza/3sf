@@ -34,18 +34,117 @@ library does:
 
 - Pokémon X: a reverb on bus A. The game starts it in the field. Some of the field's sound
   effects send to it.
-- WarioWare Gold (North America, the first release and Rev 1): a reverb on each bus.
-- The Legend of Zelda: Ocarina of Time 3D (North America): a reverb on bus A and a delay on bus B.
-- The Legend of Zelda: Majora's Mask 3D (North America): a delay on bus B.
+- WarioWare Gold (the first release and Rev 1): a reverb on each bus.
+- The Legend of Zelda: Ocarina of Time 3D (North America, Europe and Japan): a reverb on bus A
+  and a delay on bus B.
+- The Legend of Zelda: Majora's Mask 3D (North America, Europe and Japan): a delay on bus B.
+- Mario Party: Island Tour (North America): a delay on bus A.
+- Mario Party: Star Rush (North America): a delay on bus B.
+- StreetPass Mii Plaza and its add-on games: a reverb on bus A for the Plaza and five of the games.
+  Warrior's Way puts a reverb on bus B. Mii Force, Slot Car Rivals, Market Crashers and Battleground
+  Z put a reverb and a delay on bus B. Mii Trek puts no effect on either bus. The DSP's firmware
+  runs the reverbs of Flower Town, Warrior's Way and those four games. The firmware also runs the
+  four games' delays.
+- Luigi's Mansion (2018, North America): a delay on bus A, which the DSP's firmware runs.
+- Six of the 3DS's system titles, the European builds: both System Settings titles, Mii Maker,
+  Nintendo eShop, the Activity Log and Swapnote. Each puts a reverb on bus A. Swapnote has it on
+  while its music plays.
+- Super Mario 3D Land: a delay on bus A.
+- Animal Crossing: New Leaf (North America): a reverb on bus A in DJ K.K.'s club. The game sends
+  his music to it. Its other sequences play with no effect. In a dream, the game puts a delay on
+  bus A in the town and its shops. Their music is streamed. 3SF rips no streams. A rip plays each
+  sequence as it sounds outside a dream.
+- Animal Crossing: Happy Home Designer (North America): a reverb or a delay on bus A, by the room's
+  ambient sound. "Ringing" gives the reverb. "Echoes" gives the delay. The DSP's firmware runs
+  both. The game sends the room's music to them. A room starts with "silence". That sound puts no
+  effect on the buses.
 
 Ocarina of Time 3D and Majora's Mask 3D pick bus B's delay from 18 presets for each scene. A rip
-plays every sound with the preset that the game picks when it starts. In one of its modes,
-WarioWare Gold also puts a pitch shifter on bus A. The rips leave it out. `3sfrip` finds a game
-by its program ID. Other regions' releases of WarioWare Gold, Ocarina of Time 3D and Majora's
-Mask 3D have other IDs. Their rips get no effects until someone reads their code. Rips of a loose
-`.bcsar` or of any other game get none. Some games use effects that the DSP runs. Archive mode
-doesn't play those. Rips with effects require a player newer than 3SF 1.3.3. 3SF 1.3.3 refuses
-them. `docs/3sf.md` describes the effects under "Effects on the aux buses".
+plays every sound with the preset that normal play picks most often. Super Mario 3D Land picks
+bus A's delay for each stage. A rip plays every sound with the delay that most stages take. The
+stage of the title screen is one of them. Island Tour picks its effects for each scene too. A rip
+plays every sound with the delay that 119 of its 120 scenes put on bus A. Many of Star Rush's
+scenes pick bus B's delay from five presets, and some of them pick none. A rip plays every sound
+with the preset that most of them pick. About 470 of its 4,115 sounds play in scenes that pick
+another preset or none. 268 of them play only in such scenes. In one of its modes, WarioWare Gold
+also puts a pitch shifter on bus A. The rips leave it out. `3sfrip` finds a game by its program ID.
+WarioWare Gold has one ID in every region. Any other release of Ocarina of Time 3D, Majora's Mask
+3D, Island Tour or Star Rush with another ID gets no effects until someone reads its code. `3sfrip`
+finds the Plaza's sound archives by their SHA-1, from its update v14.6.0, its add-on content v0.2.0
+and its European system title. It finds Luigi's Mansion's archive, the system titles' archives and
+the archive of Super Mario 3D Land's USA release, Rev 1, the same way. It prints a note for another
+build of one. Rips of another loose `.bcsar` or of any other game get none. Rips with effects
+require a player newer than 3SF 1.3.3. 3SF 1.3.3 refuses them. The Plaza and four of its add-on
+games link an earlier version of `nw::snd`'s reverb, with another damping filter. Rips with that
+reverb or with the firmware's delay or reverb require a player newer than 3SF 1.4. 3SF 1.4 refuses
+them. A rip of DJ K.K.'s music holds the club's reverb as an effect set, beside the effects of the
+rest of the archive. Happy Home Designer's 364 pieces of music rip as they play in a room with
+"silence". Each piece gets two more files, named with `_ringing` and `_echoes`. They play the piece
+with the room's reverb or delay, held as effect sets. Players of 3SF 1.4 and older refuse these
+rips. `docs/3sf.md` describes the effects
+under "Effects on the aux buses" and "Effect sets".
+
+Some games' code also changes how a sequence plays. It quiets some tracks as a piece starts, or
+moves the piece to other groups of tracks as the game goes on. In StreetPass Mii Plaza, some sounds
+wait for a variable that another sound sets. `3sfrip` covers these cases for Ocarina of Time 3D,
+WarioWare Gold, Mario Party: Island Tour, Mario Party: Star Rush, Animal Crossing: New Leaf and Happy
+Home Designer, Tomodachi Life, Super Mario 3D Land, Mario Kart 7, StreetPass Mii Plaza and its add-on
+games, and three of the 3DS's system titles: System Settings, the Activity Log and Mii Maker. A rip plays each such sequence
+as the game starts it. The game's later states get files of their own, named after the sequence and
+the state, such as `SEQ_BGM_REELING_NORMAL_tension_2`. The Plaza's seven pieces that follow a new
+Mii's jingle wait for the jingle's next beat. Their rips start them at once. The Plaza's European system title plays them
+the same way without the update. Rips of its archive start them at once too. System Settings and the
+Activity Log each play three pieces from one sequence. Each piece keeps a group of the sequence's
+tracks, and its rip plays that group. Mii Maker's first screen plays tracks 0 to 7 of its music. Two
+later states play other mixes of it, with some tracks at lower volumes.
+Two of Ultimate Angler's catch sounds draw a random number as they start, and the game plays them
+only on some draws. Their rips take a draw that plays the sound, and their comment tag says how
+often the game does. Flower Town turns its watering music down step by step as the Mii walks. The
+rips play it at full volume, as it starts. Ninja Launcher speeds its battle music up for the last 10
+seconds of a battle. The Plaza plays its music faster and higher in its quick mode. Each of those
+pieces gets one more file in that state, named with `_hurry` or `_quick`. Mii Force's game-over
+music, SD_BGM_D01, loops until the game tells it to end. It gets two more files that play the
+ending, named with `_ending` and `_ending_early`.
+Super Mario 3D Land plays a melody as the player collects the notes of a trail, one beat for
+each note. Its seven melodies, such as `SS_NOTE_OBJ_CHIKA`, rip as they sound when the player
+collects every note in time: as written, at their tempo. With each note, the game also sets the
+melody's tempo to between 0.4 and 2 times the written one. The rips keep the written tempo.
+The game plays the melodies and the Toad House gift fanfares more quietly than the archive
+says. Their rips have a `volume` tag with the game's level, such as 0.55.
+Some of the game's effects change pitch with the game's state. The red coins' notes rise as
+the player collects them, and the note blocks play in the key of the music. The rips play nine
+of these effects at the pitch of their first play.
+The game gives Luigi his voice by playing Mario's voice sequences with Luigi's banks. Each of
+those sequences gets one more file with Luigi's voice, named with `_Luigi`.
+
+Mario Kart 7 plays a beat sequence beside the streamed music of three courses: Music Park,
+Airship Fortress and Waluigi Pinball. Each beat rips at the tempo of its course's stream. Music
+Park's beat rips as the race starts, with its four instruments muted. Its other states, such as
+`SEQ_SYNC_BEAT_MUSIC_PARK_track_0` and `_final_lap`, get files of their own. Of the game's
+effects, 22 rip with a value that the game starts them with, such as `SE_KT_FALL_WATER` with the
+value for the player's kart. Each driver's horn takes the kart's body. The rips play the horns of
+the first body. The other 29 courses share one beat, `SEQ_SYNC_BEAT_120`. It rips at Toad Circuit's
+tempo, and its other states, such as `_glide_lake` and `_glide_lake_final_lap`, take each course's
+tempo. Each beat's drum loop sounds only while the player leads the race, and it grows louder as
+the lead grows. The rips play the loop at full volume.
+
+Animal Crossing: New Leaf's café job music starts with track 7 muted. Its rip plays the start.
+`SEQ_BGM_IND_CAFEARBEIT_track_7` plays the state after the café unmutes the track. Each of DJ
+K.K.'s songs waits at its start for a value that the game writes. The rips start each song and
+interlude with the game's value. Two of the interludes, `SEQ_BGM_DJ_HS_MURAMELO` and
+`SEQ_BGM_DJ_FC_MURAMELO`, play the town's tune. The game plays the tune that the player's save
+holds. The rips play the first of the game's four default tunes instead, in the key of most of DJ
+K.K.'s songs. New Leaf and Animal Crossing: Happy Home Designer play a town's
+tune one note at a time. Each note starts one of 417 `SE_MELODY_` sounds again, such as a
+villager's voice or a door's chime. The rips play each of these sounds once, at the tune's C, in
+the key that the game gives the sound. The game stops each note after a length that the sound
+gives. The rips hold the note for the length that the sequence gives it. `SE_TV_12_RUN` rips at
+the count of the start of the TV show's run. Tomodachi Life's apartment music gets a file for
+each of the Mii's other states, such as `BGM_MANSION_AND_ROOM_track_15`. A Mii's guitar
+(`SE_MII_PLAY_GUITAR_S`, `_M` and `_L`) rips in the first chord of the apartment's music.
+Rips that change a variable after the start, set a track's variable, set the random numbers,
+change the tempo or pitch, give a sequence other banks, give it sends on the aux buses or set its
+tracks' volumes require a player newer than 3SF 1.4. 3SF 1.4 refuses them.
 
 ## Tools
 
