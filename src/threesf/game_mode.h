@@ -9,7 +9,8 @@
 #include <cstdint>
 #include <memory>
 
-#include "dsp/teakra_dsp.h"
+#include "ntdlib/ctr/dsp/teakra_dsp.h"
+
 #include "horizon/kernel.h"
 #include "horizon/system.h"
 #include "threesf/format.h"
@@ -26,8 +27,8 @@ constexpr uint64_t kGameBootTimeout = 10 * horizon::kArmClock;
 // Makes the system for the process that `set` describes: its process descriptor, MEM chunks and FILE chunks. A FILE
 // chunk replaces an earlier one with the same path. The descriptor gives the kernel's application memory. `config`
 // gives the kernel's other settings. The kernel drops the guest's debug output. `upstream` gives the DSP upstream
-// Teakra's behaviour where 3SF's copy departs from it.
+// Teakra's behaviour where ntdlib's copy departs from it.
 std::unique_ptr<horizon::System> MakeGameSystem(const LoadedSet& set, horizon::KernelConfig config = {},
-                                                const dsp::UpstreamTeakra& upstream = {});
+                                                const ntdlib::ctr::dsp::UpstreamTeakra& upstream = {});
 
 } // namespace threesf

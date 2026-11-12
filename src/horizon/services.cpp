@@ -16,10 +16,10 @@
 #include <utility>
 #include <vector>
 
+#include "ntdlib/ctr/dsp/dsp.h"
+#include "ntdlib/ctr/dsp/teakra_dsp.h"
 #include "xsflib/bytes.h"
 
-#include "dsp/dsp.h"
-#include "dsp/teakra_dsp.h"
 #include "horizon/ipc.h"
 #include "horizon/kernel.h"
 #include "horizon/romfs.h"
@@ -29,8 +29,8 @@ namespace threesf::horizon
 namespace
 {
 
-using ipc::CopyHandles;
-using ipc::MoveHandles;
+using ntdlib::ctr::dsp::Interrupt;
+using ntdlib::ctr::dsp::Pipe;
 
 // The services that sessions refer to. The stubs that srv: makes come after them.
 enum ServiceId : uint32_t
@@ -129,12 +129,12 @@ void Mark(std::vector<bool>& live, uint32_t object)
 
 } // namespace
 
-Services::Services(Kernel& kernel, dsp::TeakraDsp& dsp, std::vector<RomFs::File> files)
+Services::Services(Kernel& kernel, ntdlib::ctr::dsp::TeakraDsp& dsp, std::vector<RomFs::File> files)
     : kernel_(kernel), dsp_(dsp), romfs_(std::move(files))
 {
     state_.dsp_semaphore = kernel_.NewEvent(0);
     kernel_.SetSignalHook(state_.dsp_semaphore);
-    dsp_.SetInterruptHandler([this](dsp::Interrupt interrupt, dsp::Pipe pipe) { OnInterrupt(interrupt, pipe); });
+    dsp_.SetInterruptHandler([this](Interrupt interrupt, Pipe pipe) { OnInterrupt(interrupt, pipe); });
 }
 
 // The DSP's interrupt handler calls the services. The DSP can outlive them. The handler therefore goes with them.
@@ -174,7 +174,7 @@ void Services::HandleRequest(uint32_t service, uint32_t command_buffer)
             // The calling thread waits while the DSP runs during a command. The ARM11 clock runs at twice the DSP's.
             const uint64_t cycles = dsp_.Cycles();
             Dsp(command);
-            kernel_.AddPending(2 * (dsp_.Cycles() - cycles));
+            kernel_.AddPending(kArmCyclesPerDspCycle * (dsp_.Cycles() - cycles));
             break;
         }
 
@@ -243,7 +243,7 @@ void Services::Srv(ipc::CommandBuffer& command)
             state_.srv_semaphore = kernel_.NewSemaphore(0, kSrvSemaphoreMaximum);
         }
 
-        command.Reply(1, 2, {kSuccess, CopyHandles(1), kernel_.NewHandle(state_.srv_semaphore)});
+        command.Reply(1, 2, {kSuccess, ipc::CopyHandles(1), kernel_.NewHandle(state_.srv_semaphore)});
         break;
 
     case 0x0005:
@@ -284,7 +284,7 @@ void Services::GetServiceHandle(ipc::CommandBuffer& command)
         }
     }
 
-    command.Reply(1, 2, {kSuccess, MoveHandles(1), kernel_.NewHandle(kernel_.NewSession(service))});
+    command.Reply(1, 2, {kSuccess, ipc::MoveHandles(1), kernel_.NewHandle(kernel_.NewSession(service))});
 }
 
 void Services::ErrF(ipc::CommandBuffer& command)
@@ -343,7 +343,7 @@ void Services::FsUser(ipc::CommandBuffer& command)
                 break;
             }
 
-            command.Reply(1, 2, {kSuccess, MoveHandles(1), OpenRomFsFile()});
+            command.Reply(1, 2, {kSuccess, ipc::MoveHandles(1), OpenRomFsFile()});
             break;
         }
 
@@ -370,7 +370,7 @@ void Services::FsUser(ipc::CommandBuffer& command)
             break;
         }
 
-        command.Reply(1, 2, {kSuccess, MoveHandles(1), OpenRomFsFile()});
+        command.Reply(1, 2, {kSuccess, ipc::MoveHandles(1), OpenRomFsFile()});
         break;
 
     case 0x0817: // IsSdmcDetected
@@ -428,7 +428,7 @@ void Services::RomFsFile(ipc::CommandBuffer& command)
         break;
 
     case 0x080c: // OpenLinkFile
-        command.Reply(1, 2, {kSuccess, MoveHandles(1), OpenRomFsFile()});
+        command.Reply(1, 2, {kSuccess, ipc::MoveHandles(1), OpenRomFsFile()});
         break;
 
     default:
@@ -488,8 +488,8 @@ void Services::Cfg(ipc::CommandBuffer& command)
 }
 
 // The buffer gets as much of the contents of the block with the id in word 2 as the size in word 1 allows. Zeros fill
-// the rest of the size. Block copies write both. They stop at the first unmapped page. cfg:u logs the first request
-// for a missing block. The same set records both those block ids and the headers of unhandled commands.
+// the rest of the size. Block copies write both. They stop at the first unmapped page. cfg:u logs the first request for
+// a missing block. The same set records both those block ids and the headers of unhandled commands.
 void Services::GetConfigInfoBlk2(ipc::CommandBuffer& command)
 {
     const uint32_t size = command.Word(1);
@@ -526,7 +526,7 @@ void Services::Apt(ipc::CommandBuffer& command)
             state_.apt_lock = kernel_.NewMutex();
         }
 
-        command.Reply(3, 2, {kSuccess, 0, 0, CopyHandles(1), kernel_.NewHandle(state_.apt_lock)});
+        command.Reply(3, 2, {kSuccess, 0, 0, ipc::CopyHandles(1), kernel_.NewHandle(state_.apt_lock)});
         break;
 
     case 0x0002: // Initialize: the notification event and the parameter event
@@ -541,7 +541,7 @@ void Services::Apt(ipc::CommandBuffer& command)
         }
 
         command.Reply(1, 3,
-                      {kSuccess, CopyHandles(2), kernel_.NewHandle(state_.apt_notification),
+                      {kSuccess, ipc::CopyHandles(2), kernel_.NewHandle(state_.apt_notification),
                        kernel_.NewHandle(state_.apt_parameter)});
         break;
 
@@ -560,7 +560,7 @@ void Services::Apt(ipc::CommandBuffer& command)
 
     case 0x000d: // ReceiveParameter
     case 0x000e: // GlanceParameter: a wakeup from no sender, with no handle and no data
-        command.Reply(4, 4, {kSuccess, 0, 1, 0, MoveHandles(1), 0, ipc::StaticBuffer(0, 0), 0});
+        command.Reply(4, 4, {kSuccess, 0, 1, 0, ipc::MoveHandles(1), 0, ipc::StaticBuffer(0, 0), 0});
         break;
 
     default:
@@ -611,7 +611,7 @@ void Services::Dsp(ipc::CommandBuffer& command)
 
     case 0x000f: // GetPipeReadableSize
         {
-            const auto pipe = static_cast<dsp::Pipe>(command.Word(1) & 0xff);
+            const auto pipe = static_cast<Pipe>(command.Word(1) & 0xff);
             const auto readable = static_cast<uint32_t>(dsp_.PipeReadable(pipe) & 0xffff);
             command.Reply(2, 0, {kSuccess, readable});
             break;
@@ -637,7 +637,7 @@ void Services::Dsp(ipc::CommandBuffer& command)
         break;
 
     case 0x0016: // GetSemaphoreEventHandle
-        command.Reply(1, 2, {kSuccess, CopyHandles(1), kernel_.NewHandle(state_.dsp_semaphore)});
+        command.Reply(1, 2, {kSuccess, ipc::CopyHandles(1), kernel_.NewHandle(state_.dsp_semaphore)});
         break;
 
     case 0x0017: // SetSemaphoreMask
@@ -682,7 +682,7 @@ void Services::WriteProcessPipe(ipc::CommandBuffer& command)
         data[7] = 0;
     }
 
-    dsp_.WritePipe(static_cast<dsp::Pipe>(channel & 0xff), data);
+    dsp_.WritePipe(static_cast<Pipe>(channel & 0xff), data);
     command.Reply(1, 0, {kSuccess});
 }
 
@@ -690,7 +690,7 @@ void Services::WriteProcessPipe(ipc::CommandBuffer& command)
 // 0. Neither waits for data.
 void Services::ReadPipe(ipc::CommandBuffer& command)
 {
-    const auto pipe = static_cast<dsp::Pipe>(command.Word(1) & 0xff);
+    const auto pipe = static_cast<Pipe>(command.Word(1) & 0xff);
     const uint32_t size = command.Word(3) & 0xffff;
 
     std::vector<uint8_t> data;
@@ -743,8 +743,8 @@ void Services::RegisterInterruptEvents(ipc::CommandBuffer& command)
     command.Reply(1, 0, {kSuccess});
 }
 
-// The slot of the event that an interrupt signals: for reply register 0 or 1, or for a pipe below 3. Null for any
-// other interrupt or pipe.
+// The slot of the event that an interrupt signals: for reply register 0 or 1, or for a pipe below 3. Null for any other
+// interrupt or pipe.
 uint32_t* Services::InterruptEvent(uint32_t interrupt, uint32_t pipe)
 {
     if (interrupt < state_.dsp_reply_events.size())
@@ -752,7 +752,7 @@ uint32_t* Services::InterruptEvent(uint32_t interrupt, uint32_t pipe)
         return &state_.dsp_reply_events[interrupt];
     }
 
-    if (interrupt == static_cast<uint32_t>(dsp::Interrupt::kPipe) && pipe < state_.dsp_pipe_events.size())
+    if (interrupt == static_cast<uint32_t>(Interrupt::kPipe) && pipe < state_.dsp_pipe_events.size())
     {
         return &state_.dsp_pipe_events[pipe];
     }
@@ -780,16 +780,16 @@ void Services::StubRequest(Stub& stub, ipc::CommandBuffer& command)
     command.Reply(5, 0, {kSuccess, 0, 0, 0, 0});
 }
 
-// An interrupt from the DSP signals the event registered for it. Data in a reply register without an event is read
-// and dropped.
-void Services::OnInterrupt(dsp::Interrupt interrupt, dsp::Pipe pipe)
+// An interrupt from the DSP signals the event registered for it. Data in a reply register without an event is read and
+// dropped.
+void Services::OnInterrupt(Interrupt interrupt, Pipe pipe)
 {
     const uint32_t* const event = InterruptEvent(static_cast<uint32_t>(interrupt), static_cast<uint32_t>(pipe));
     if (event != nullptr && *event != kNone)
     {
         kernel_.Signal(*event);
     }
-    else if (interrupt == dsp::Interrupt::kReply0 || interrupt == dsp::Interrupt::kReply1)
+    else if (interrupt == Interrupt::kReply0 || interrupt == Interrupt::kReply1)
     {
         dsp_.ReadReply(static_cast<uint32_t>(interrupt));
     }

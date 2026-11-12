@@ -53,10 +53,10 @@ private:
     std::unique_ptr<Impl> impl_;
 };
 
-// The timing of a sound in a game-mode rip whose driver starts a reverb on aux bus A (GameProfile::reverb), for a
-// sound that sends to that bus. The reverb rings on after the sound's last note. The model doesn't play the reverb.
-// The model's timing, `model`, therefore ends too early. RingOut renders the sound in game mode as a player plays it,
-// from `library` and a .mini3sf of `sound_id`. The render stops once it has stayed silent for a second past the end of
+// The timing of a sound in a game-mode rip whose driver starts a reverb on aux bus A (GameProfile::reverb), for a sound
+// that sends to that bus. The reverb rings on after the sound's last note. The model doesn't play the reverb. The
+// model's timing, `model`, therefore ends too early. RingOut renders the sound in game mode as a player plays it, from
+// `library` and a .mini3sf of `sound_id`. The render stops once it has stayed silent for a second past the end of
 // `model`, or 30 s past that end. A sound that ends then ends at the render's last sound and a tail of 0.5 s, if that
 // comes later than `model`. A sound that loops keeps `model`: its fade ends the reverb as well. So does a sound that
 // never sounds. Returns nullopt when the render fails. Can be called from several threads at once.

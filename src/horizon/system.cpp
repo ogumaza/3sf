@@ -11,10 +11,11 @@
 #include <memory>
 #include <vector>
 
-#include "arm/cpu.h"
-#include "dsp/dsp.h"
-#include "dsp/fcram.h"
-#include "dsp/teakra_dsp.h"
+#include "ntdlib/ctr/dsp/dsp.h"
+#include "ntdlib/ctr/dsp/fcram.h"
+#include "ntdlib/ctr/dsp/teakra_dsp.h"
+
+#include "arm/memory.h"
 #include "horizon/kernel.h"
 #include "horizon/services.h"
 
@@ -100,20 +101,20 @@ struct System::Snapshot
 {
     Kernel::Snapshot kernel;
     Services::State services;
-    Fcram::Snapshot fcram;
-    dsp::TeakraDsp::Snapshot dsp;
+    ntdlib::ctr::Fcram::Snapshot fcram;
+    ntdlib::ctr::dsp::TeakraDsp::Snapshot dsp;
 };
 
-// The order of the steps fixes the mappings, the handles and the results of overlapping segments. A region mapped
-// later replaces any mapping of the same pages.
-System::System(const ProcessImage& image, const KernelConfig& config, const dsp::UpstreamTeakra& upstream)
+// The order of the steps fixes the mappings, the handles and the results of overlapping segments. A region mapped later
+// replaces any mapping of the same pages.
+System::System(const ProcessImage& image, const KernelConfig& config, const ntdlib::ctr::dsp::UpstreamTeakra& upstream)
     : fcram_(std::size_t{config.app_memory * 2}), dsp_(fcram_, upstream)
 {
     const std::vector<PageRange> program = ProgramPages(image);
     kernel_ = std::make_unique<Kernel>(WithProgramEnd(config, ProgramEnd(program, image.entry, config.program_end)));
     Kernel& kernel = *kernel_;
     arm::Memory& memory = kernel.Memory();
-    kernel.SetLinearMemory(fcram_.At(kFcramBase, fcram_.Size()), static_cast<uint32_t>(fcram_.Size()));
+    kernel.SetLinearMemory(fcram_.At(ntdlib::ctr::kFcramBase, fcram_.Size()), static_cast<uint32_t>(fcram_.Size()));
 
     // The program's pages, then its segments in the image's order: a later segment overwrites an earlier one.
     for (const PageRange& range : program)
@@ -131,8 +132,8 @@ System::System(const ProcessImage& image, const KernelConfig& config, const dsp:
     // calls ProgramWritten.
     const uint32_t stack_size = arm::Memory::RoundUpToPage(image.stack_size);
     kernel.MapNewRegion(kStackTop - stack_size, stack_size);
-    memory.Map(kDspRam, dsp_.Ram(), dsp::kRamSize);
-    memory.WatchWrites(dsp_.Ram(), dsp::kDataMemoryOffset, [this] { dsp_.ProgramWritten(); });
+    memory.Map(kDspRam, dsp_.Ram(), ntdlib::ctr::dsp::kRamSize);
+    memory.WatchWrites(dsp_.Ram(), ntdlib::ctr::dsp::kDataMemoryOffset, [this] { dsp_.ProgramWritten(); });
 
     // The services.
     services_ = std::make_unique<Services>(kernel, dsp_, image.files);
@@ -141,7 +142,7 @@ System::System(const ProcessImage& image, const KernelConfig& config, const dsp:
     // The DSP's steps with the clock.
     const auto step_dsp = [this](uint64_t ticks)
     {
-        const uint64_t target = ticks / 2;
+        const uint64_t target = ticks / kArmCyclesPerDspCycle;
         const uint64_t cycles = dsp_.Cycles();
         if (cycles < target)
         {

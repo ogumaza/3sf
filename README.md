@@ -217,8 +217,8 @@ CI (`.github/workflows/ci.yml`) builds 3SF on every push to `main` that changes 
 documentation: on Windows with clang-cl (x64, and x86 for 32-bit foobar2000 and XMPlay) and on
 macOS with Apple Clang (Apple Silicon). The Windows jobs also run `ctest`.
 
-`externals/teakra` is [Teakra](https://github.com/wwylele/teakra) at upstream commit 3d697a1 with
-3SF's changes, excluding upstream's hardware tests, Git LFS setup and CI. Compare against that
+`externals/ntdlib/externals/teakra` is [Teakra](https://github.com/wwylele/teakra) at upstream commit 3d697a1 with
+changes, excluding upstream's hardware tests, Git LFS setup and CI. Compare against that
 commit to see the changes. This version has a faster interpreter and a JIT that translates DSP
 firmware into x86-64 code as it runs, and it can save and load its state. It bounds firmware
 accesses to DSP memory, fixes delayed interrupts when the DSP is idle, and initializes the
@@ -226,14 +226,14 @@ interrupt controller and every register to a known state. Emulation failures thr
 instead of aborting, and 32-bit x86 builds are supported. Samples match upstream Teakra's, except
 that 3SF drops the zeros upstream inserts when the DSP's output runs dry for a slot.
 
-The DSP glue tests (`tests/teakra_dsp_test.cpp`) use small firmware programs to check loading,
-timeouts, pipe transfers and interrupts in `src/dsp/teakra_dsp.*`.
+ntdlib's DSP glue tests (`tests/ctr_teakra_dsp_test.cpp` there) use small firmware programs to check loading,
+timeouts, pipe transfers and interrupts in the glue (`src/ctr/dsp/teakra_dsp.*` in ntdlib).
 
 Emulating the DSP takes most of the time. On x86-64, where the system allows it, Teakra
 translates the DSP firmware into machine code as it runs, which renders the same samples faster
 than interpreting it. On Apple Silicon and in 32-bit builds Teakra interprets the firmware.
 Set `TEAKRA_JIT=0` in the environment to disable the JIT. A test runs random programs through
-both the JIT and interpreter and compares the results (`tests/teakra_jit_test.cpp`).
+both the JIT and interpreter and compares the results (ntdlib's `tests/ctr_teakra_jit_test.cpp`).
 
 During playback, the foobar2000 component and the XMPlay plugin render ahead on a separate
 thread as fast as the CPU allows. They buffer up to 10 minutes and 10 seconds of audio
@@ -247,22 +247,20 @@ Seeking back before the buffered audio restores the latest snapshot before the t
 renders from there. With rendering ahead turned off, every track uses snapshots.
 
 The save-state test runs random programs on the DSP, saves part-way through, and checks that
-restoring the state reproduces the same results (`tests/teakra_state_test.cpp`).
+restoring the state reproduces the same results (ntdlib's `tests/ctr_teakra_state_test.cpp`).
 
 ## Layout
 
 ```
 docs/3sf.md          the format
-externals/           the libraries xsflib and ntdlib, and Teakra
+externals/           the libraries xsflib and ntdlib (ntdlib holds Teakra and the DSP)
 driver/              the guest driver (ARM code, prebuilt into src/rip/driver_blob.h)
 src/arm/             ARM11 interpreter (ARMv6K, Thumb, VFPv2)
 src/horizon/         Horizon kernel HLE, services, RomFS, the emulated system
-src/dsp/             the DSP: Teakra running the game's firmware, and FCRAM
 src/threesf/         3SF format and player core, both modes (no platform audio or UI)
 src/rip/             game loading (images, RomFS, BLZ), profiles, rip building, lengths, --bgm
 src/cli/             3sfrip, 3sfplay
-src/nnsnd, nwsnd/    the nw::snd/nn::snd model (archive mode)
-src/common/          small helpers shared by the rest (quiet stdout, how 3SF reads sound archives)
+src/nnsnd/           the effects on nn::snd's aux buses (archive mode)
 plugins/foobar2000/  foobar2000 component
 plugins/xmplay/      XMPlay plugin
 tests/               ctest suites

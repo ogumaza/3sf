@@ -7,7 +7,6 @@
 #include <algorithm>
 #include <array>
 #include <bit>
-#include <charconv>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -15,12 +14,12 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
-#include <system_error>
 #include <utility>
 #include <vector>
 
 #include "ntdlib/ctr_fx/effects.h"
 #include "ntdlib/sar/formats.h"
+#include "ntdlib/shortest_decimal.h"
 #include "xsflib/bytes.h"
 #include "xsflib/psf/descriptor.h"
 #include "xsflib/psf/psf.h"
@@ -54,35 +53,6 @@ constexpr uint32_t kEffectHighPassDamping = 2;
 // The bytes of FCRAM that a player gives the lines of the firmware's delays and reverbs, all together. The archive-mode
 // model's FCRAM holds them and the wave archives.
 constexpr uint64_t kMaxFirmwareLines = 16 * 1024 * 1024;
-
-// Parses a whole number: decimal, or hex with a 0x prefix, after an optional minus sign. Returns nullopt for anything
-// else, white space included.
-std::optional<int64_t> ParseNumber(std::string_view text)
-{
-    const bool negative = text.starts_with('-');
-    if (negative)
-    {
-        text.remove_prefix(1);
-    }
-
-    int base = 10;
-    if (text.size() > 2 && text[0] == '0' && (text[1] == 'x' || text[1] == 'X'))
-    {
-        base = 16;
-        text.remove_prefix(2);
-    }
-
-    // from_chars takes no sign and no prefix for an unsigned value. Text such as "--1" or "0x-1" fails here.
-    uint64_t value = 0;
-    const char* end = text.data() + text.size();
-    const auto [stop, error] = std::from_chars(text.data(), end, value, base);
-    if (text.empty() || error != std::errc() || stop != end || value > 0xffffffffu)
-    {
-        return std::nullopt;
-    }
-
-    return negative ? -static_cast<int64_t>(value) : static_cast<int64_t>(value);
-}
 
 // `text` without the white space around it. Text of nothing but white space gives an empty view.
 std::string_view TrimSpace(std::string_view text)
@@ -267,6 +237,82 @@ bool ReadEffects(const std::vector<uint8_t>& data, std::size_t& pos, std::size_t
     }
 
     return true;
+}
+
+// Writes the variables of `start` into `tags`. The variables of frame 0 join 3sf_var. The later ones go into
+// 3sf_var_change, in the start's order.
+void WriteVariableTags(const SequenceStart& start, Tags& tags)
+{
+    Variables variables;
+    if (const auto tag = tags.find("3sf_var"); tag != tags.end())
+    {
+        variables = ParseVariables(tag->second).value_or(Variables{});
+    }
+
+    std::string changes;
+    for (const SequenceVariable& variable : start.variables)
+    {
+        if (variable.index == SequenceVariable::kNone)
+        {
+            continue;
+        }
+
+        if (variable.frame == 0)
+        {
+            variables[variable.index] = variable.value;
+            continue;
+        }
+
+        changes += (changes.empty() ? "" : ", ") + std::to_string(variable.frame) + ":" +
+                   std::to_string(variable.index) + "=" + std::to_string(variable.value);
+    }
+
+    if (!variables.empty())
+    {
+        tags["3sf_var"] = FormatVariables(variables);
+    }
+
+    if (!changes.empty())
+    {
+        tags["3sf_var_change"] = changes;
+    }
+}
+
+// Writes the 3sf_banks tag of `banks`.
+void WriteBanksTag(const std::array<uint32_t, 4>& banks, Tags& tags)
+{
+    // The slots up to the last one with a bank. Banks that are all empty write one empty slot.
+    std::size_t used = banks.size();
+    while (used > 1 && banks[used - 1] == ntdlib::ctr::snd::kNoBank)
+    {
+        used--;
+    }
+
+    std::string text;
+    for (std::size_t slot = 0; slot < used; slot++)
+    {
+        char id[12];
+        std::snprintf(id, sizeof(id), "0x%08x", static_cast<unsigned>(banks[slot]));
+        text += (slot == 0 ? "" : ", ") + std::string(id);
+    }
+    tags["3sf_banks"] = text;
+}
+
+// Writes the 3sf_track_volume tag of the volumes other than 1 in `volumes`, if there are any.
+void WriteTrackVolumesTag(const TrackVolumes& volumes, Tags& tags)
+{
+    std::string text;
+    for (std::size_t track = 0; track < volumes.size(); track++)
+    {
+        if (volumes[track] != 1.0f)
+        {
+            text += (text.empty() ? "" : ", ") + std::to_string(track) + "=" + ntdlib::ShortestDecimal(volumes[track]);
+        }
+    }
+    if (!text.empty())
+    {
+        tags["3sf_track_volume"] = text;
+    }
 }
 
 } // namespace
@@ -523,7 +569,10 @@ std::optional<std::string> ArchiveDescriptor::Check() const
 
         try
         {
-            const nnsnd::AuxEffects models(lists);
+            for (const std::vector<nnsnd::AuxEffect>& bus : lists)
+            {
+                const nnsnd::AuxEffects models(bus);
+            }
         }
         catch (const std::invalid_argument& e)
         {
@@ -594,74 +643,21 @@ const nnsnd::AuxEffectLists* EffectSet(const ArchiveDescriptor& d, uint32_t set)
 
 std::optional<uint16_t> ParseTrackMask(std::string_view text)
 {
-    text = TrimSpace(text);
-    if (text.empty())
+    // A mask takes no sign. Text such as "+1", "-1" or "0x-1" fails.
+    const std::optional<int64_t> mask = xsflib::ParseInteger(TrimSpace(text), {.minus = false});
+    if (!mask || *mask > 0xffff)
     {
         return std::nullopt;
     }
 
-    int base = 10;
-    if (text.size() > 2 && text[0] == '0' && (text[1] == 'x' || text[1] == 'X'))
-    {
-        base = 16;
-        text.remove_prefix(2);
-    }
-
-    // from_chars takes no sign and no prefix for an unsigned value. Text such as "+1", "-1" or "0x-1" fails here.
-    unsigned value = 0;
-    const char* end = text.data() + text.size();
-    const auto [stop, error] = std::from_chars(text.data(), end, value, base);
-    if (error != std::errc() || stop != end || value > 0xffff)
-    {
-        return std::nullopt;
-    }
-
-    return static_cast<uint16_t>(value);
-}
-
-std::optional<Variables> ParseVariables(std::string_view text)
-{
-    constexpr std::string_view kSeparators = ", \t\r\n";
-
-    Variables variables;
-    std::size_t at = 0;
-    while ((at = text.find_first_not_of(kSeparators, at)) != std::string_view::npos)
-    {
-        const std::size_t end = std::min(text.find_first_of(kSeparators, at), text.size());
-        const std::optional<xsflib::Assignment> assignment = xsflib::ParseAssignment(text.substr(at, end - at));
-        at = end;
-        if (!assignment || assignment->index < 0 || assignment->index > kMaxVariable || assignment->value < INT16_MIN ||
-            assignment->value > INT16_MAX)
-        {
-            return std::nullopt;
-        }
-
-        variables[static_cast<int>(assignment->index)] = static_cast<int16_t>(assignment->value);
-    }
-
-    if (variables.empty())
-    {
-        return std::nullopt;
-    }
-
-    return variables;
+    return static_cast<uint16_t>(*mask);
 }
 
 std::optional<std::vector<SequenceVariable>> ParseVariableChanges(std::string_view text)
 {
-    constexpr std::string_view kSeparators = ", \t\r\n";
     std::vector<SequenceVariable> changes;
-    while (true)
+    for (const std::string_view item : xsflib::SplitList(text))
     {
-        const std::size_t first = text.find_first_not_of(kSeparators);
-        if (first == std::string_view::npos)
-        {
-            break;
-        }
-
-        text.remove_prefix(first);
-        const std::string_view item = text.substr(0, text.find_first_of(kSeparators));
-        text.remove_prefix(item.size());
         const std::size_t colon = item.find(':');
         const std::size_t equals = item.find('=');
         if (colon == std::string_view::npos || equals == std::string_view::npos || equals < colon)
@@ -669,9 +665,9 @@ std::optional<std::vector<SequenceVariable>> ParseVariableChanges(std::string_vi
             return std::nullopt;
         }
 
-        const std::optional<int64_t> frame = ParseNumber(item.substr(0, colon));
-        const std::optional<int64_t> index = ParseNumber(item.substr(colon + 1, equals - colon - 1));
-        const std::optional<int64_t> value = ParseNumber(item.substr(equals + 1));
+        const std::optional<int64_t> frame = xsflib::ParseInteger(item.substr(0, colon));
+        const std::optional<int64_t> index = xsflib::ParseInteger(item.substr(colon + 1, equals - colon - 1));
+        const std::optional<int64_t> value = xsflib::ParseInteger(item.substr(equals + 1));
         if (!frame || !index || !value || *frame < 0 || *index < 0 || *index > kMaxVariable || *value < -32768 ||
             *value > 32767)
         {
@@ -693,13 +689,7 @@ std::optional<std::vector<SequenceVariable>> ParseVariableChanges(std::string_vi
 
 std::optional<uint32_t> ParseSeed(std::string_view text)
 {
-    text = TrimSpace(text);
-    if (text.empty())
-    {
-        return std::nullopt;
-    }
-
-    const std::optional<int64_t> seed = ParseNumber(text);
+    const std::optional<int64_t> seed = xsflib::ParseInteger(TrimSpace(text));
     if (!seed || *seed < 0)
     {
         return std::nullopt;
@@ -721,16 +711,12 @@ std::optional<float> ParseRatio(std::string_view text)
 
 std::optional<std::array<uint32_t, 4>> ParseBanks(std::string_view text)
 {
-    constexpr std::string_view kSeparators = ", \t\r\n";
     std::array<uint32_t, 4> banks;
     banks.fill(ntdlib::ctr::snd::kNoBank);
     std::size_t count = 0;
-    std::size_t at = 0;
-    while ((at = text.find_first_not_of(kSeparators, at)) != std::string_view::npos)
+    for (const std::string_view item : xsflib::SplitList(text))
     {
-        const std::size_t end = std::min(text.find_first_of(kSeparators, at), text.size());
-        const std::optional<int64_t> id = ParseNumber(text.substr(at, end - at));
-        at = end;
+        const std::optional<int64_t> id = xsflib::ParseInteger(item);
         if (count == banks.size() || !id || *id < 0 ||
             (*id >> 24 != ntdlib::sar::kBankItem && *id != ntdlib::ctr::snd::kNoBank))
         {
@@ -770,22 +756,17 @@ std::optional<std::array<float, 2>> ParseSends(std::string_view text)
 
 std::optional<TrackVolumes> ParseTrackVolumes(std::string_view text)
 {
-    constexpr std::string_view kSeparators = ", \t\r\n";
     TrackVolumes volumes = ntdlib::ctr::snd::kFullTrackVolumes;
     bool any = false;
-    std::size_t at = 0;
-    while ((at = text.find_first_not_of(kSeparators, at)) != std::string_view::npos)
+    for (const std::string_view item : xsflib::SplitList(text))
     {
-        const std::size_t end = std::min(text.find_first_of(kSeparators, at), text.size());
-        const std::string_view item = text.substr(at, end - at);
-        at = end;
         const std::size_t equals = item.find('=');
         if (equals == std::string_view::npos)
         {
             return std::nullopt;
         }
 
-        const std::optional<int64_t> track = ParseNumber(item.substr(0, equals));
+        const std::optional<int64_t> track = xsflib::ParseInteger(item.substr(0, equals));
         const std::optional<float> volume = ParsePlainDecimal(item.substr(equals + 1));
         if (!track || *track < 0 || *track >= static_cast<int64_t>(volumes.size()) || !volume ||
             !(*volume <= kMaxRatio))
@@ -872,40 +853,7 @@ void WriteSequenceStart(const SequenceStart& start, Tags& tags)
 
     write("3sf_mute", start.muted);
     write("3sf_silence", start.silenced);
-
-    // The variables of frame 0 join 3sf_var. The later ones go into 3sf_var_change, in the start's order.
-    Variables variables;
-    if (const auto tag = tags.find("3sf_var"); tag != tags.end())
-    {
-        variables = ParseVariables(tag->second).value_or(Variables{});
-    }
-
-    std::string changes;
-    for (const SequenceVariable& variable : start.variables)
-    {
-        if (variable.index == SequenceVariable::kNone)
-        {
-            continue;
-        }
-
-        if (variable.frame == 0)
-        {
-            variables[variable.index] = variable.value;
-            continue;
-        }
-
-        changes += (changes.empty() ? "" : ", ") + std::to_string(variable.frame) + ":" +
-                   std::to_string(variable.index) + "=" + std::to_string(variable.value);
-    }
-
-    if (!variables.empty())
-    {
-        tags["3sf_var"] = FormatVariables(variables);
-    }
-    if (!changes.empty())
-    {
-        tags["3sf_var_change"] = changes;
-    }
+    WriteVariableTags(start, tags);
 
     if (start.seed)
     {
@@ -914,21 +862,11 @@ void WriteSequenceStart(const SequenceStart& start, Tags& tags)
         tags["3sf_seed"] = text;
     }
 
-    // The shortest decimal that reads back as the same float, in every locale: 1.3f gives "1.3". The volume tag reads
-    // the same text.
-    const auto decimal = [](float value)
-    {
-        char text[48];
-        const auto [end, error] = std::to_chars(text, text + sizeof(text), value, std::chars_format::fixed);
-
-        return error == std::errc() ? std::string(text, end) : std::string();
-    };
-
-    const auto ratio = [&tags, &decimal](const char* name, float value)
+    const auto ratio = [&tags](const char* name, float value)
     {
         if (value != 1.0f)
         {
-            tags[name] = decimal(value);
+            tags[name] = ntdlib::ShortestDecimal(value);
         }
     };
 
@@ -938,41 +876,16 @@ void WriteSequenceStart(const SequenceStart& start, Tags& tags)
 
     if (start.banks)
     {
-        // The slots up to the last one with a bank. Banks that are all empty write one empty slot.
-        std::size_t used = start.banks->size();
-        while (used > 1 && (*start.banks)[used - 1] == ntdlib::ctr::snd::kNoBank)
-        {
-            used--;
-        }
-
-        std::string text;
-        for (std::size_t slot = 0; slot < used; slot++)
-        {
-            char id[12];
-            std::snprintf(id, sizeof(id), "0x%08x", static_cast<unsigned>((*start.banks)[slot]));
-            text += (slot == 0 ? "" : ", ") + std::string(id);
-        }
-        tags["3sf_banks"] = text;
+        WriteBanksTag(*start.banks, tags);
     }
 
     if (start.fx_send[0] != 0.0f || start.fx_send[1] != 0.0f)
     {
-        tags["3sf_fx_send"] = decimal(start.fx_send[0]) + "," + decimal(start.fx_send[1]);
+        tags["3sf_fx_send"] =
+            ntdlib::ShortestDecimal(start.fx_send[0]) + "," + ntdlib::ShortestDecimal(start.fx_send[1]);
     }
 
-    std::string volumes;
-    for (std::size_t track = 0; track < start.track_volumes.size(); track++)
-    {
-        if (start.track_volumes[track] != 1.0f)
-        {
-            volumes +=
-                (volumes.empty() ? "" : ", ") + std::to_string(track) + "=" + decimal(start.track_volumes[track]);
-        }
-    }
-    if (!volumes.empty())
-    {
-        tags["3sf_track_volume"] = volumes;
-    }
+    WriteTrackVolumesTag(start.track_volumes, tags);
 }
 
 bool NeedsTimedStarts(const SequenceStart& start)

@@ -12,15 +12,15 @@
 #include <string>
 #include <vector>
 
+#include "ntdlib/ctr/snd/engine.h"
+#include "ntdlib/ctr/snd/sar_options.h"
+#include "ntdlib/ctr/snd/sequence.h"
 #include "ntdlib/sar/formats.h"
 #include "ntdlib/sar/set_archive.h"
 #include "xsflib/player/archive_source.h"
 
-#include "common/sar_options.h"
-#include "dsp/teakra_dsp.h"
+#include "nnsnd/archive_start.h"
 #include "nnsnd/aux_effects.h"
-#include "nwsnd/engine.h"
-#include "nwsnd/sequence.h"
 #include "threesf/format.h"
 
 namespace threesf
@@ -28,17 +28,19 @@ namespace threesf
 
 struct ArchivePlayer::Snapshot
 {
-    nwsnd::ArchiveModel::Snapshot model;
+    ntdlib::ctr::snd::ArchiveModel::Snapshot model;
 };
 
 namespace
 {
 
+using ntdlib::ctr::snd::ArchiveModel;
+
 // The model, and the samples that its DSP has made and RunFrame hasn't handed over yet. The DSP's sink adds to them
 // from the moment the model exists. Samples made while the firmware starts therefore come first.
 struct Model
 {
-    nwsnd::ArchiveModel model;
+    ArchiveModel model{ntdlib::ctr::snd::DspKind::kTeakra};
     std::vector<int16_t> pending;
 };
 
@@ -124,7 +126,7 @@ struct Traits
     {
         const ArchiveDescriptor& d = *found.descriptor;
 
-        return ntdlib::sar::LoadSetArchive(set, d.archive_path, d.group_paths, kSarOptions, archive);
+        return ntdlib::sar::LoadSetArchive(set, d.archive_path, d.group_paths, ntdlib::ctr::kSarOptions, archive);
     }
 
     static std::unique_ptr<Model> MakeModel(const Found&, Archive&)
@@ -136,7 +138,7 @@ struct Traits
             pending.push_back(sample[0]);
             pending.push_back(sample[1]);
         };
-        model->model.dsp.SetSampleSink(capture);
+        model->model.dsp->SetSampleSink(capture);
 
         return model;
     }
@@ -146,7 +148,8 @@ struct Traits
     static std::optional<std::string> StartModel(Model& model, Archive& archive, const Found& found)
     {
         const ArchiveDescriptor& d = *found.descriptor;
-        if (!model.model.Start(*found.firmware, archive, static_cast<uint8_t>(d.output_mode), *found.effects))
+        if (!nnsnd::StartArchiveModel(model.model, *found.firmware, archive, static_cast<uint8_t>(d.output_mode),
+                                      *found.effects))
         {
             return "the DSP firmware didn't start";
         }
@@ -165,10 +168,10 @@ struct Traits
             tag != set.tags.end() ? ParseVariables(tag->second) : std::optional<Variables>();
         const std::vector<SequenceVariable> changes = VariableChangesOf(set.tags);
         const SequenceStart start = SequenceStartOf(set.tags);
-        nwsnd::Engine& engine = *model.model.engine;
+        ntdlib::ctr::snd::Engine& engine = *model.model.engine;
         for (const uint32_t index : found.sounds)
         {
-            nwsnd::SequenceSoundPlayer* player = engine.StartSequence(index, start.banks);
+            ntdlib::ctr::snd::SequenceSoundPlayer* player = engine.StartSequence(index, start.banks);
             if (!player)
             {
                 return "sound " + std::to_string(index) + " isn't a sequence, or its data isn't in the archive";
@@ -179,19 +182,8 @@ struct Traits
                 player->SetVariable(engine, number, value);
             }
 
-            for (const SequenceVariable& change : changes)
-            {
-                if (change.frame == 0)
-                {
-                    player->SetVariable(engine, change.index, change.value);
-                }
-                else
-                {
-                    engine.ScheduleVariable(*player, change.index, change.value, change.frame);
-                }
-            }
-
-            nwsnd::ApplySequenceStart(engine, *player, start);
+            ntdlib::ctr::snd::ApplyVariables(engine, *player, changes);
+            ntdlib::ctr::snd::ApplySequenceStart(engine, *player, start);
         }
 
         return std::nullopt;

@@ -10,7 +10,8 @@
 #include <string>
 #include <vector>
 
-#include "dsp/teakra_dsp.h"
+#include "ntdlib/ctr/dsp/teakra_dsp.h"
+
 #include "horizon/kernel.h"
 #include "horizon/system.h"
 #include "threesf/format.h"
@@ -19,7 +20,7 @@ namespace threesf
 {
 
 std::unique_ptr<horizon::System> MakeGameSystem(const LoadedSet& set, horizon::KernelConfig config,
-                                                const dsp::UpstreamTeakra& upstream)
+                                                const ntdlib::ctr::dsp::UpstreamTeakra& upstream)
 {
     const ProcessDescriptor& d = *set.descriptor;
     horizon::ProcessImage image;

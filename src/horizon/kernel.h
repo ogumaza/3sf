@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MIT
 
 // A high-level emulation of the Horizon kernel for one 3DS application process (3dbrew, "SVC" and "Kernel ABI"): the
-// address space, the threads and their scheduling on one ARM11 core, the kernel objects and the handle table, the
-// SVCs, and the clock with its timed events. The services that the process reaches through IPC are in services.h.
-// The System (system.h) joins the kernel, the services and the DSP.
+// address space, the threads and their scheduling on one ARM11 core, the kernel objects and the handle table, the SVCs,
+// and the clock with its timed events. The services that the process reaches through IPC are in services.h. The System
+// (system.h) joins the kernel, the services and the DSP.
 //
 // Time counts ARM11 cycles. Each instruction takes one cycle and each SVC a fixed number. The kernel runs the CPU in
 // slices of at most KernelConfig::slice_cycles. Each time the clock moves on, the kernel steps the DSP.
@@ -24,6 +24,7 @@
 #include "xsflib/memory_image.h"
 
 #include "arm/cpu.h"
+#include "arm/memory.h"
 
 #if defined(__clang__) || defined(__GNUC__)
 #define THREESF_PRINTF_FORMAT(format_index, first_argument) \
@@ -37,6 +38,9 @@ namespace threesf::horizon
 
 // The ARM11's clock: emulated cycles per second. The DSP runs at half of it.
 constexpr uint64_t kArmClock = 268111856;
+
+// ARM11 cycles per DSP cycle: the ARM11 runs at twice the DSP clock.
+constexpr uint64_t kArmCyclesPerDspCycle = 2;
 
 // An index that no object, thread or service has.
 constexpr uint32_t kNone = 0xffffffff;
@@ -96,8 +100,8 @@ public:
     Kernel& operator=(const Kernel&) = delete;
     ~Kernel();
 
-    // Runs the process until the time reaches `until` (kOk), the process exits (kExited) or an error stops it
-    // (kError). The time can end up past `until`.
+    // Runs the process until the time reaches `until` (kOk), the process exits (kExited) or an error stops it (kError).
+    // The time can end up past `until`.
     RunResult RunUntil(uint64_t until);
 
     // The emulated time in ARM11 cycles since the system started, without the cycles that SVCs have spent since the
@@ -185,8 +189,8 @@ private:
         uint32_t object = kNone;   // the thread's kernel object
 
         // The wait: the objects in the order given, duplicates included, whether the wait is for all of them and
-        // whether it reports an index, or the arbiter and address it waits on. The generation goes up with each wake.
-        // A timeout started before the wake is then stale.
+        // whether it reports an index, or the arbiter and address it waits on. The generation goes up with each wake. A
+        // timeout started before the wake is then stale.
         std::vector<uint32_t> wait_objects;
         bool wait_all = false;
         bool wait_reports_index = false;
@@ -336,6 +340,7 @@ private:
     void SvcSetTimer();
     void SvcCancelTimer();
     void SvcClearTimer();
+    void ClearSignal(ObjectKind kind);
     void SvcCreateMemoryBlock();
     void SvcMapMemoryBlock();
     void SvcUnmapMemoryBlock();
@@ -388,9 +393,15 @@ private:
 
     // Objects and handles.
     uint32_t NewObject(ObjectKind kind);
+    uint32_t NewEventOrTimer(ObjectKind kind, uint32_t reset_type);
     void CollectObjects();
     std::vector<HandleEntry>::const_iterator FindHandle(uint32_t handle) const;
     uint32_t LookupKind(uint32_t handle, ObjectKind kind) const;
+
+    // LookupKind for an SVC. For a handle that refers to no object of the kind, LookupForSvc sets r0 to kInvalidHandle
+    // and returns nullopt.
+    std::optional<uint32_t> LookupForSvc(uint32_t handle, ObjectKind kind);
+
     uint32_t LookupWaitable(uint32_t handle) const;
     uint32_t NewRegion(uint32_t size);
 

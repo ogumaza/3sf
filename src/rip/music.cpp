@@ -15,11 +15,10 @@
 #include <vector>
 
 #include "ntdlib/commands/sequence.h"
+#include "ntdlib/ctr/snd/sar_options.h"
 #include "ntdlib/nwsnd/commands.h"
 #include "ntdlib/nwsnd/console.h"
 #include "ntdlib/sar/formats.h"
-
-#include "common/sar_options.h"
 
 namespace threesf::rip
 {
@@ -80,7 +79,7 @@ std::optional<SequenceShape> ShapeOf(const ntdlib::sar::SoundArchive& archive, c
     try
     {
         const ntdlib::sar::Sequence sequence =
-            ntdlib::sar::Sequence::Parse(archive.FileData(sound.file_id), kSarOptions);
+            ntdlib::sar::Sequence::Parse(archive.FileData(sound.file_id), ntdlib::ctr::kSarOptions);
         return WalkSequence(sequence.data, sound.start_offset);
     }
     catch (const std::exception&)
@@ -121,6 +120,7 @@ SequenceShape WalkSequence(std::span<const uint8_t> data, uint32_t start)
             {
                 shape.aux_sends[c.index] = true;
             }
+
             if (ntdlib::commands::HasTarget(c.kind))
             {
                 todo.push_back(c.target);

@@ -12,11 +12,11 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
-#include <functional>
 #include <ios>
 #include <map>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <system_error>
 #include <utility>
@@ -29,6 +29,7 @@
 #include <zlib.h>
 
 #include "horizon/romfs.h"
+#include "rip/blz.h"
 
 namespace threesf::rip
 {
@@ -67,6 +68,56 @@ constexpr uint8_t kNoCrypto = 0x04;
 // The extended header follows the NCCH's header. The loader reads it with the access descriptor after it.
 constexpr std::size_t kExheaderSize = 0x400;
 constexpr std::size_t kExheaderAndDescriptorSize = 0x800;
+
+// The ExeFS's header (3dbrew, "ExeFS") takes 0x200 bytes. It starts with ten entries of 16 bytes. Each entry holds a
+// file's name in 8 bytes, the file's offset from the end of the header and the file's size.
+constexpr std::size_t kExeFsHeaderSize = 0x200;
+constexpr std::size_t kExeFsEntries = 10;
+constexpr std::size_t kExeFsEntrySize = 16;
+constexpr std::size_t kExeFsNameSize = 8;
+constexpr std::size_t kExeFsFileOffset = 8;
+constexpr std::size_t kExeFsFileSize = 12;
+
+// The fields of a RomFS's IVFC header that 3SF reads (3dbrew, "RomFS"): the version that marks a RomFS, the size of the
+// master hash, and the size of a level-3 block as a power of 2. Level 3 starts at the first whole block after the
+// header and the master hash. A block of more than 2^kMaxIvfcBlockLog2 bytes marks a damaged header.
+constexpr std::size_t kIvfcHeaderSize = 0x60;
+constexpr std::size_t kIvfcVersion = 0x04;
+constexpr std::size_t kIvfcMasterHashSize = 0x08;
+constexpr std::size_t kIvfcLevel3BlockLog2 = 0x4c;
+constexpr uint32_t kIvfcRomFsVersion = 0x10000;
+constexpr uint32_t kMaxIvfcBlockLog2 = 24;
+
+// The fields of a CIA's header that 3SF reads (3dbrew, "CIA"), in the header's first 0x20 bytes: the sizes of the
+// header, the certificate chain, the ticket and the TMD. The header takes kCiaHeaderBytes. The certificate chain, the
+// ticket, the TMD and the contents follow it in that order, each at a multiple of kCiaAlignment bytes.
+constexpr std::size_t kCiaHeaderFields = 0x20;
+constexpr std::size_t kCiaHeaderSize = 0x00;
+constexpr std::size_t kCiaCertificatesSize = 0x08;
+constexpr std::size_t kCiaTicketSize = 0x0c;
+constexpr std::size_t kCiaTmdSize = 0x10;
+constexpr uint32_t kCiaHeaderBytes = 0x2020;
+constexpr uint64_t kCiaAlignment = 64;
+
+// A TMD (3dbrew, "Title metadata") starts with the signature's type in 4 bytes, then the signature and its padding. The
+// sizes of a signature and of its padding depend on the signature's type: RSA-4096, RSA-2048 or ECDSA.
+constexpr std::size_t kSignatureTypeSize = 4;
+constexpr uint64_t kRsa4096SignatureSize = 0x200;
+constexpr uint64_t kRsa2048SignatureSize = 0x100;
+constexpr uint64_t kEcdsaSignatureSize = 0x3c;
+constexpr uint64_t kRsaSignaturePadding = 0x3c;
+constexpr uint64_t kEcdsaSignaturePadding = 0x40;
+
+// The TMD's header follows the signature. It gives the count of contents. The 64 content info records follow the
+// header, then a chunk record for each content. A chunk record gives the content's type, with bit 0 set for an
+// encrypted content, and the content's size.
+constexpr std::size_t kTmdHeaderSize = 0xc4;
+constexpr std::size_t kTmdContentCount = 0x9e;
+constexpr std::size_t kTmdContentInfoSize = 0x900;
+constexpr std::size_t kChunkRecordSize = 0x30;
+constexpr std::size_t kChunkType = 6;
+constexpr std::size_t kChunkSize = 8;
+constexpr uint16_t kChunkEncrypted = 1;
 
 uint64_t AlignUp(uint64_t x, uint64_t a)
 {
@@ -144,34 +195,12 @@ private:
     uint64_t size_ = 0;
 };
 
+// A name of `bytes` bytes of UTF-16LE at `p`, in UTF-8. A surrogate without its partner keeps its three bytes, so that
+// two such names stay apart.
 std::string Utf16ToUtf8(const uint8_t* p, uint32_t bytes)
 {
     std::string out;
-    for (uint32_t i = 0; i + 1 < bytes; i += 2)
-    {
-        uint32_t c = xsflib::LoadLe16(p + i);
-        if (c >= 0xd800 && c < 0xdc00 && i + 3 < bytes)
-        {
-            const uint32_t lo = xsflib::LoadLe16(p + i + 2);
-            if (lo >= 0xdc00 && lo < 0xe000)
-            {
-                c = 0x10000 + ((c - 0xd800) << 10) + (lo - 0xdc00);
-                i += 2;
-            }
-        }
-
-        // AppendUtf8 writes U+FFFD for a surrogate. A surrogate without its partner is written here as its three bytes.
-        if (c >= 0xd800 && c < 0xe000)
-        {
-            out += static_cast<char>(0xe0 | (c >> 12));
-            out += static_cast<char>(0x80 | ((c >> 6) & 0x3f));
-            out += static_cast<char>(0x80 | (c & 0x3f));
-        }
-        else
-        {
-            xsflib::AppendUtf8(out, c);
-        }
-    }
+    xsflib::AppendUtf16(out, std::span<const uint8_t>(p, bytes), {.lone_surrogate_bytes = true});
 
     return out;
 }
@@ -182,121 +211,161 @@ struct RomFsEntry
     uint64_t size;
 };
 
+// The limits of a level-3 RomFS that ListRomFs reads: the sizes of its tables of folders and files, the depth of its
+// folders, and the entries that the walk visits. A damaged RomFS can't take the walk past them.
+constexpr uint32_t kMaxDirMetaBytes = 16u << 20;
+constexpr uint32_t kMaxFileMetaBytes = 64u << 20;
+constexpr int kMaxDepth = 64;
+constexpr int kMaxEntries = 1000000;
+
+// The walk of a level-3 RomFS's tree of folders. It puts each file's path and place in `files`.
+class RomFsWalker
+{
+public:
+    // `dirs` and `filemeta` are the tables of folders and files. The files' data starts at `data_start` in the image.
+    // No file may reach past `limit`.
+    RomFsWalker(std::span<const uint8_t> dirs, std::span<const uint8_t> filemeta, uint64_t data_start, uint64_t limit,
+                std::map<std::string, RomFsEntry>& files)
+        : dirs_(dirs), filemeta_(filemeta), data_start_(data_start), limit_(limit), files_(files)
+    {
+    }
+
+    // Lists the files of folder `dir` and of the folders below it. `path` is the folder's path, with a '/' at its end,
+    // or empty for the root. `depth` counts the folders above it. The walk stops at the first damaged entry.
+    void Walk(uint32_t dir, const std::string& path, int depth)
+    {
+        using Layout = horizon::RomFsLayout;
+        if (depth > kMaxDepth || uint64_t{dir} + Layout::kDirName > dirs_.size() || ++visited_ > kMaxEntries)
+        {
+            error_ = "corrupt RomFS directory tree";
+            return;
+        }
+
+        for (uint32_t file = xsflib::LoadLe32(&dirs_[dir + Layout::kDirFirstFile]);
+             file != Layout::kNoEntry && error_.empty();)
+        {
+            if (uint64_t{file} + Layout::kFileName > filemeta_.size())
+            {
+                error_ = "corrupt RomFS file entry";
+                return;
+            }
+
+            const uint8_t* entry = &filemeta_[file];
+            const uint32_t name_len = xsflib::LoadLe32(entry + Layout::kFileNameLength);
+            if (uint64_t{file} + Layout::kFileName + name_len > filemeta_.size() || ++visited_ > kMaxEntries)
+            {
+                error_ = "corrupt RomFS file entry";
+                return;
+            }
+
+            const uint64_t off = data_start_ + xsflib::LoadLe64(entry + Layout::kFileData);
+            const uint64_t size = xsflib::LoadLe64(entry + Layout::kFileSize);
+            if (off > limit_ || size > limit_ - off)
+            {
+                error_ = "RomFS file outside the RomFS";
+                return;
+            }
+
+            files_[path + Utf16ToUtf8(entry + Layout::kFileName, name_len)] = {off, size};
+            file = xsflib::LoadLe32(entry + Layout::kFileSibling);
+        }
+
+        for (uint32_t child = xsflib::LoadLe32(&dirs_[dir + Layout::kDirFirstDir]);
+             child != Layout::kNoEntry && error_.empty();)
+        {
+            if (uint64_t{child} + Layout::kDirName > dirs_.size())
+            {
+                error_ = "corrupt RomFS directory entry";
+                return;
+            }
+
+            const uint32_t name_len = xsflib::LoadLe32(&dirs_[child + Layout::kDirNameLength]);
+            if (uint64_t{child} + Layout::kDirName + name_len > dirs_.size())
+            {
+                error_ = "corrupt RomFS directory entry";
+                return;
+            }
+
+            Walk(child, path + Utf16ToUtf8(&dirs_[child + Layout::kDirName], name_len) + "/", depth + 1);
+            child = xsflib::LoadLe32(&dirs_[child + Layout::kDirSibling]);
+        }
+    }
+
+    // Why the walk stopped early, or empty when it listed every file.
+    const std::string& Error() const
+    {
+        return error_;
+    }
+
+private:
+    std::span<const uint8_t> dirs_;
+    std::span<const uint8_t> filemeta_;
+    uint64_t data_start_;
+    uint64_t limit_;
+    std::map<std::string, RomFsEntry>& files_;
+    int visited_ = 0;
+    std::string error_;
+};
+
 // Lists the files of a level-3 RomFS image that starts at `base` in the image.
-std::optional<std::string> ListRomFs(Image& img, uint64_t base, uint64_t limit,
+std::optional<std::string> ListRomFs(Image& image, uint64_t base, uint64_t limit,
                                      std::map<std::string, RomFsEntry>& files)
 {
     using Layout = horizon::RomFsLayout;
-    uint8_t h[Layout::kHeaderSize];
-    if (!img.Read(base, h, sizeof(h)))
+    uint8_t header[Layout::kHeaderSize];
+    if (!image.Read(base, header, sizeof(header)))
     {
         return "truncated RomFS";
     }
 
-    const uint32_t dir_meta_off = xsflib::LoadLe32(h + Layout::kDirMetaOffset);
-    const uint32_t dir_meta_size = xsflib::LoadLe32(h + Layout::kDirMetaLength);
-    const uint32_t file_meta_off = xsflib::LoadLe32(h + Layout::kFileMetaOffset);
-    const uint32_t file_meta_size = xsflib::LoadLe32(h + Layout::kFileMetaLength);
-    const uint32_t data_off = xsflib::LoadLe32(h + Layout::kFileDataOffset);
-    if (xsflib::LoadLe32(h) != Layout::kHeaderSize || dir_meta_size > (16u << 20) || file_meta_size > (64u << 20))
+    const uint32_t dir_meta_off = xsflib::LoadLe32(header + Layout::kDirMetaOffset);
+    const uint32_t dir_meta_size = xsflib::LoadLe32(header + Layout::kDirMetaLength);
+    const uint32_t file_meta_off = xsflib::LoadLe32(header + Layout::kFileMetaOffset);
+    const uint32_t file_meta_size = xsflib::LoadLe32(header + Layout::kFileMetaLength);
+    const uint32_t data_off = xsflib::LoadLe32(header + Layout::kFileDataOffset);
+    if (xsflib::LoadLe32(header) != Layout::kHeaderSize || dir_meta_size > kMaxDirMetaBytes ||
+        file_meta_size > kMaxFileMetaBytes)
     {
         return "not a RomFS (bad level-3 header)";
     }
 
     std::vector<uint8_t> dirs, filemeta;
-    if (!img.Read(base + dir_meta_off, dir_meta_size, dirs) ||
-        !img.Read(base + file_meta_off, file_meta_size, filemeta))
+    if (!image.Read(base + dir_meta_off, dir_meta_size, dirs) ||
+        !image.Read(base + file_meta_off, file_meta_size, filemeta))
     {
         return "truncated RomFS metadata";
     }
 
-    std::string error;
-    int visited = 0;
-
-    std::function<void(uint32_t, const std::string&, int)> walk = [&](uint32_t dir, const std::string& path, int depth)
+    RomFsWalker walker(dirs, filemeta, base + data_off, limit, files);
+    walker.Walk(0, "", 0);
+    if (!walker.Error().empty())
     {
-        if (depth > 64 || uint64_t{dir} + Layout::kDirName > dirs.size() || ++visited > 1000000)
-        {
-            error = "corrupt RomFS directory tree";
-            return;
-        }
-
-        for (uint32_t f = xsflib::LoadLe32(&dirs[dir + Layout::kDirFirstFile]); f != Layout::kNoEntry && error.empty();)
-        {
-            if (uint64_t{f} + Layout::kFileName > filemeta.size())
-            {
-                error = "corrupt RomFS file entry";
-                return;
-            }
-
-            const uint8_t* e = &filemeta[f];
-            const uint32_t name_len = xsflib::LoadLe32(e + Layout::kFileNameLength);
-            if (uint64_t{f} + Layout::kFileName + name_len > filemeta.size() || ++visited > 1000000)
-            {
-                error = "corrupt RomFS file entry";
-                return;
-            }
-
-            const uint64_t off = base + data_off + xsflib::LoadLe64(e + Layout::kFileData);
-            const uint64_t size = xsflib::LoadLe64(e + Layout::kFileSize);
-            if (off > limit || size > limit - off)
-            {
-                error = "RomFS file outside the RomFS";
-                return;
-            }
-
-            files[path + Utf16ToUtf8(e + Layout::kFileName, name_len)] = {off, size};
-            f = xsflib::LoadLe32(e + Layout::kFileSibling);
-        }
-
-        for (uint32_t c = xsflib::LoadLe32(&dirs[dir + Layout::kDirFirstDir]); c != Layout::kNoEntry && error.empty();)
-        {
-            if (uint64_t{c} + Layout::kDirName > dirs.size())
-            {
-                error = "corrupt RomFS directory entry";
-                return;
-            }
-
-            const uint32_t name_len = xsflib::LoadLe32(&dirs[c + Layout::kDirNameLength]);
-            if (uint64_t{c} + Layout::kDirName + name_len > dirs.size())
-            {
-                error = "corrupt RomFS directory entry";
-                return;
-            }
-
-            walk(c, path + Utf16ToUtf8(&dirs[c + Layout::kDirName], name_len) + "/", depth + 1);
-            c = xsflib::LoadLe32(&dirs[c + Layout::kDirSibling]);
-        }
-    };
-
-    walk(0, "", 0);
-    if (!error.empty())
-    {
-        return error;
+        return walker.Error();
     }
 
     return std::nullopt;
 }
 
 // Reads .code from the ExeFS at `exefs` in the image. The ExeFS takes `size` media units.
-std::optional<std::string> ReadExeFsCode(Image& img, uint64_t exefs, uint32_t size, std::vector<uint8_t>& code)
+std::optional<std::string> ReadExeFsCode(Image& image, uint64_t exefs, uint32_t size, std::vector<uint8_t>& code)
 {
-    uint8_t eh[0x200];
-    if (!size || !img.Read(exefs, eh, sizeof(eh)))
+    uint8_t exefs_header[kExeFsHeaderSize];
+    if (!size || !image.Read(exefs, exefs_header, sizeof(exefs_header)))
     {
         return "the NCCH has no ExeFS";
     }
 
     bool found = false;
-    for (int i = 0; i < 10; i++)
+    for (std::size_t i = 0; i < kExeFsEntries; i++)
     {
-        const uint8_t* e = eh + i * 16;
-        if (std::memcmp(e, ".code\0\0\0", 8) != 0)
+        const uint8_t* entry = exefs_header + i * kExeFsEntrySize;
+        if (std::memcmp(entry, ".code\0\0\0", kExeFsNameSize) != 0)
         {
             continue;
         }
 
-        if (!img.Read(exefs + 0x200 + xsflib::LoadLe32(e + 8), xsflib::LoadLe32(e + 12), code))
+        if (!image.Read(exefs + kExeFsHeaderSize + xsflib::LoadLe32(entry + kExeFsFileOffset),
+                        xsflib::LoadLe32(entry + kExeFsFileSize), code))
         {
             return "truncated .code";
         }
@@ -314,61 +383,62 @@ std::optional<std::string> ReadExeFsCode(Image& img, uint64_t exefs, uint32_t si
 // Puts the paths of the RomFS's files in out.romfs_files and a reader of the files in out.read_romfs. The RomFS starts
 // at `romfs` in the image and takes `size` bytes. No file may reach past `limit`. The RomFS is an IVFC image. Its
 // level-3 file system follows the IVFC header and the master hash.
-std::optional<std::string> OpenRomFs(const std::shared_ptr<Image>& img, uint64_t romfs, uint64_t size, uint64_t limit,
+std::optional<std::string> OpenRomFs(const std::shared_ptr<Image>& image, uint64_t romfs, uint64_t size, uint64_t limit,
                                      GameFiles& out)
 {
-    uint8_t ivfc[0x60];
-    if (!size || !img->Read(romfs, ivfc, sizeof(ivfc)))
+    uint8_t ivfc[kIvfcHeaderSize];
+    if (!size || !image->Read(romfs, ivfc, sizeof(ivfc)))
     {
         return "the NCCH has no RomFS";
     }
 
-    if (std::memcmp(ivfc, "IVFC", 4) != 0 || xsflib::LoadLe32(ivfc + 4) != 0x10000)
+    if (std::memcmp(ivfc, "IVFC", 4) != 0 || xsflib::LoadLe32(ivfc + kIvfcVersion) != kIvfcRomFsVersion)
     {
         return "the RomFS has no IVFC header (is the image really decrypted?)";
     }
 
-    const uint32_t block_log2 = xsflib::LoadLe32(ivfc + 0x4c);
-    if (block_log2 > 24)
+    const uint32_t block_log2 = xsflib::LoadLe32(ivfc + kIvfcLevel3BlockLog2);
+    if (block_log2 > kMaxIvfcBlockLog2)
     {
         return "bad IVFC header";
     }
 
     const uint64_t level3 =
-        romfs + AlignUp(0x60 + static_cast<uint64_t>(xsflib::LoadLe32(ivfc + 0x08)), 1ull << block_log2);
+        romfs + AlignUp(kIvfcHeaderSize + static_cast<uint64_t>(xsflib::LoadLe32(ivfc + kIvfcMasterHashSize)),
+                        1ull << block_log2);
     auto entries = std::make_shared<std::map<std::string, RomFsEntry>>();
-    if (auto err = ListRomFs(*img, level3, std::min(limit, romfs + size), *entries))
+    if (auto err = ListRomFs(*image, level3, std::min(limit, romfs + size), *entries))
     {
         return err;
     }
 
     out.romfs_files.clear();
-    for (const auto& [path, e] : *entries)
+    for (const auto& [path, entry] : *entries)
     {
         out.romfs_files.push_back(path);
     }
 
-    out.read_romfs = [img, entries](const std::string& path, std::vector<uint8_t>& data)
+    out.read_romfs = [image, entries](const std::string& path, std::vector<uint8_t>& data)
     {
         auto it = entries->find(path);
-        return it != entries->end() && img->Read(it->second.offset, it->second.size, data);
+        return it != entries->end() && image->Read(it->second.offset, it->second.size, data);
     };
 
     return std::nullopt;
 }
 
 // An NCCH (a CXI) at `base`.
-std::optional<std::string> LoadNcch(const std::shared_ptr<Image>& img, uint64_t base, uint64_t limit, GameFiles& out)
+std::optional<std::string> LoadNcch(const std::shared_ptr<Image>& image, uint64_t base, uint64_t limit, GameFiles& out)
 {
-    uint8_t h[kImageHeaderSize];
-    if (!img->Read(base, h, sizeof(h)) || std::memcmp(h + kImageMagic, "NCCH", 4) != 0)
+    uint8_t header[kImageHeaderSize];
+    if (!image->Read(base, header, sizeof(header)) || std::memcmp(header + kImageMagic, "NCCH", 4) != 0)
     {
         char message[40];
         std::snprintf(message, sizeof(message), "no NCCH at 0x%llx", static_cast<unsigned long long>(base));
         return message;
     }
 
-    const uint8_t* flags = h + kImageFlags;
+    const uint8_t* flags = header + kImageFlags;
     if (!(flags[kFlagCrypto] & kNoCrypto))
     {
         return "the image is encrypted: decrypt it first (only decrypted images are supported)";
@@ -379,26 +449,26 @@ std::optional<std::string> LoadNcch(const std::shared_ptr<Image>& img, uint64_t 
         return "the NCCH isn't an application (CXI)";
     }
 
-    const std::optional<uint64_t> mu = MediaUnit(h);
-    if (!mu)
+    const std::optional<uint64_t> media_unit = MediaUnit(header);
+    if (!media_unit)
     {
         return "the NCCH's media unit size is invalid";
     }
 
-    const uint32_t exheader_size = xsflib::LoadLe32(h + kNcchExheaderSize);
+    const uint32_t exheader_size = xsflib::LoadLe32(header + kNcchExheaderSize);
     if (exheader_size < kExheaderSize)
     {
         return "the NCCH has no extended header";
     }
 
-    if (!img->Read(base + kImageHeaderSize, kExheaderAndDescriptorSize, out.exheader))
+    if (!image->Read(base + kImageHeaderSize, kExheaderAndDescriptorSize, out.exheader))
     {
         return "truncated extended header";
     }
 
     // Read .code from the ExeFS, and decompress it if the exheader says it's compressed.
-    const uint64_t exefs = base + xsflib::LoadLe32(h + kNcchExeFsOffset) * *mu;
-    if (auto err = ReadExeFsCode(*img, exefs, xsflib::LoadLe32(h + kNcchExeFsSize), out.code))
+    const uint64_t exefs = base + xsflib::LoadLe32(header + kNcchExeFsOffset) * *media_unit;
+    if (auto err = ReadExeFsCode(*image, exefs, xsflib::LoadLe32(header + kNcchExeFsSize), out.code))
     {
         return err;
     }
@@ -414,79 +484,169 @@ std::optional<std::string> LoadNcch(const std::shared_ptr<Image>& img, uint64_t 
         out.code = std::move(*code);
     }
 
-    return OpenRomFs(img, base + xsflib::LoadLe32(h + kNcchRomFsOffset) * *mu,
-                     xsflib::LoadLe32(h + kNcchRomFsSize) * *mu, limit, out);
+    return OpenRomFs(image, base + xsflib::LoadLe32(header + kNcchRomFsOffset) * *media_unit,
+                     xsflib::LoadLe32(header + kNcchRomFsSize) * *media_unit, limit, out);
 }
 
-std::optional<std::string> LoadCia(const std::shared_ptr<Image>& img, GameFiles& out)
+std::optional<std::string> LoadCia(const std::shared_ptr<Image>& image, GameFiles& out)
 {
-    uint8_t h[0x20];
-    if (!img->Read(0, h, sizeof(h)))
+    uint8_t header[kCiaHeaderFields];
+    if (!image->Read(0, header, sizeof(header)))
     {
         return "truncated CIA";
     }
 
-    const uint64_t cert = AlignUp(xsflib::LoadLe32(h), 64);
-    const uint64_t ticket = AlignUp(cert + xsflib::LoadLe32(h + 0x08), 64);
-    const uint64_t tmd = AlignUp(ticket + xsflib::LoadLe32(h + 0x0c), 64);
-    const uint64_t content = AlignUp(tmd + xsflib::LoadLe32(h + 0x10), 64);
+    const uint64_t cert = AlignUp(xsflib::LoadLe32(header + kCiaHeaderSize), kCiaAlignment);
+    const uint64_t ticket = AlignUp(cert + xsflib::LoadLe32(header + kCiaCertificatesSize), kCiaAlignment);
+    const uint64_t tmd = AlignUp(ticket + xsflib::LoadLe32(header + kCiaTicketSize), kCiaAlignment);
+    const uint64_t content = AlignUp(tmd + xsflib::LoadLe32(header + kCiaTmdSize), kCiaAlignment);
 
-    uint8_t sig[4];
-    if (!img->Read(tmd, sig, 4))
+    uint8_t signature_type[kSignatureTypeSize];
+    if (!image->Read(tmd, signature_type, sizeof(signature_type)))
     {
         return "truncated CIA (TMD)";
     }
 
-    uint64_t sig_size;
-    switch (xsflib::LoadBe32(sig))
+    // The types of RSA-4096, RSA-2048 and ECDSA signatures, each over a SHA-1 or a SHA-256 hash.
+    uint64_t signature_size;
+    switch (xsflib::LoadBe32(signature_type))
     {
     case 0x10000:
     case 0x10003:
-        sig_size = 0x200 + 0x3c;
+        signature_size = kRsa4096SignatureSize + kRsaSignaturePadding;
         break;
     case 0x10001:
     case 0x10004:
-        sig_size = 0x100 + 0x3c;
+        signature_size = kRsa2048SignatureSize + kRsaSignaturePadding;
         break;
     case 0x10002:
     case 0x10005:
-        sig_size = 0x3c + 0x40;
+        signature_size = kEcdsaSignatureSize + kEcdsaSignaturePadding;
         break;
     default:
         return "bad TMD signature type";
     }
 
-    const uint64_t tmd_header = tmd + 4 + sig_size;
-    uint8_t th[0xc4];
-    if (!img->Read(tmd_header, th, sizeof(th)))
+    const uint64_t tmd_header_offset = tmd + kSignatureTypeSize + signature_size;
+    uint8_t tmd_header[kTmdHeaderSize];
+    if (!image->Read(tmd_header_offset, tmd_header, sizeof(tmd_header)))
     {
         return "truncated TMD";
     }
 
-    if (xsflib::LoadBe16(th + 0x9e) == 0)
+    if (xsflib::LoadBe16(tmd_header + kTmdContentCount) == 0)
     {
         return "the CIA has no contents";
     }
 
     // The first content chunk record: the main NCCH, stored first.
-    uint8_t chunk[0x30];
-    if (!img->Read(tmd_header + 0xc4 + 0x900, chunk, sizeof(chunk)))
+    uint8_t chunk[kChunkRecordSize];
+    if (!image->Read(tmd_header_offset + kTmdHeaderSize + kTmdContentInfoSize, chunk, sizeof(chunk)))
     {
         return "truncated TMD";
     }
 
-    if (xsflib::LoadBe16(chunk + 6) & 1)
+    if (xsflib::LoadBe16(chunk + kChunkType) & kChunkEncrypted)
     {
         return "the CIA's contents are encrypted: decrypt it first (only decrypted images are supported)";
     }
 
-    const uint64_t size = xsflib::LoadBe64(chunk + 8);
-    if (content > img->Size() || size > img->Size() - content)
+    const uint64_t size = xsflib::LoadBe64(chunk + kChunkSize);
+    if (content > image->Size() || size > image->Size() - content)
     {
         return "truncated CIA contents";
     }
 
-    return LoadNcch(img, content, content + size, out);
+    return LoadNcch(image, content, content + size, out);
+}
+
+std::optional<std::string> LoadGameImage(const std::string& path, GameFiles& out)
+{
+    out = GameFiles{};
+
+    auto image = std::make_shared<Image>(path);
+    if (!image->Ok())
+    {
+        return "can't open " + path;
+    }
+
+    uint8_t header[kImageHeaderSize];
+    if (!image->Read(0, header, sizeof(header)))
+    {
+        return path + " is too small for a 3DS image";
+    }
+
+    if (std::memcmp(header + kImageMagic, "NCSD", 4) == 0)
+    {
+        // .3ds/.cci: partition 0 is the application.
+        const std::optional<uint64_t> media_unit = MediaUnit(header);
+        if (!media_unit)
+        {
+            return "the NCSD image's media unit size is invalid";
+        }
+
+        const uint64_t offset = xsflib::LoadLe32(header + kNcsdPartition0Offset) * *media_unit;
+        const uint64_t size = xsflib::LoadLe32(header + kNcsdPartition0Size) * *media_unit;
+        if (!size)
+        {
+            return "the NCSD image has no partition 0";
+        }
+
+        return LoadNcch(image, offset, offset + size, out);
+    }
+
+    if (std::memcmp(header + kImageMagic, "NCCH", 4) == 0)
+    {
+        return LoadNcch(image, 0, image->Size(), out); // .cxi
+    }
+
+    // A CIA starts with the size of its header (0x2020).
+    if (xsflib::LoadLe32(header) == kCiaHeaderBytes)
+    {
+        return LoadCia(image, out);
+    }
+
+    return path + " isn't a 3DS image (NCSD, NCCH or CIA)";
+}
+
+// Lists the files under `romfs`, an extracted RomFS folder, into `files`: their paths relative to `romfs`, with "/"
+// between folders, in sorted order. Returns false if the folder can't be listed. Folders that are symbolic links are
+// followed, but not into a folder that holds the link. That would loop. An entry that can't be read, such as a broken
+// link, is passed over. AppleDouble files are left out. macOS writes one, named "._" and the file's name, beside each
+// file that it copies to a FAT or exFAT drive.
+bool ListRomFs(const fs::path& romfs, std::vector<std::string>& files)
+{
+    std::error_code ec;
+    std::vector<fs::path> ancestors = {fs::canonical(romfs, ec)}; // the folders that hold the current entry
+    for (fs::recursive_directory_iterator it(romfs, fs::directory_options::follow_directory_symlink, ec), end;
+         !ec && it != end; it.increment(ec))
+    {
+        std::error_code entry_error;
+        if (it->is_directory(entry_error))
+        {
+            ancestors.resize(static_cast<std::size_t>(it.depth()) + 1);
+            const fs::path folder = fs::canonical(it->path(), entry_error);
+            if (entry_error || std::find(ancestors.begin(), ancestors.end(), folder) != ancestors.end())
+            {
+                it.disable_recursion_pending();
+            }
+
+            ancestors.push_back(folder);
+        }
+        else if (it->is_regular_file(entry_error) && !it->path().filename().u8string().starts_with(u8"._"))
+        {
+            files.push_back(it->path().lexically_relative(romfs).generic_string());
+        }
+    }
+
+    if (ec)
+    {
+        return false;
+    }
+
+    std::sort(files.begin(), files.end());
+
+    return true;
 }
 
 } // namespace
@@ -512,83 +672,10 @@ std::vector<std::string> GameFiles::SoundArchives() const
     for (const auto& p : romfs_files)
     {
         const std::string lower = xsflib::AsciiLower(p);
-        if (lower.size() > 6 && lower.compare(lower.size() - 6, 6, ".bcsar") == 0)
+        if (lower.size() > 6 && lower.ends_with(".bcsar"))
         {
             out.push_back(p);
         }
-    }
-
-    return out;
-}
-
-std::optional<std::vector<uint8_t>> BlzDecompress(const std::vector<uint8_t>& data)
-{
-    if (data.size() < 8)
-    {
-        return std::nullopt;
-    }
-
-    const uint32_t top_bottom = xsflib::LoadLe32(&data[data.size() - 8]);
-    const uint32_t extra = xsflib::LoadLe32(&data[data.size() - 4]);
-    const std::size_t top = top_bottom & 0xffffff, bottom = top_bottom >> 24;
-    if (bottom < 8 || bottom > 11 || top < bottom || top > data.size())
-    {
-        return std::nullopt;
-    }
-
-    const uint64_t out_size = data.size() + static_cast<uint64_t>(extra);
-    if (out_size > kMaxFileSize)
-    {
-        return std::nullopt;
-    }
-
-    // The part before `stop` is stored uncompressed; the rest is decoded from the end down.
-    std::vector<uint8_t> out(static_cast<std::size_t>(out_size));
-    std::copy(data.begin(), data.end(), out.begin());
-    const std::size_t stop = data.size() - top;
-    std::size_t src = data.size() - bottom;
-    std::size_t dst = out.size();
-    while (src > stop)
-    {
-        const uint8_t flags = data[--src];
-        for (int i = 0; i < 8 && src > stop; i++)
-        {
-            if (flags & (0x80 >> i))
-            {
-                if (src - stop < 2)
-                {
-                    return std::nullopt;
-                }
-
-                const uint8_t hi = data[--src];
-                const uint8_t lo = data[--src];
-                const std::size_t len = (hi >> 4) + 3;
-                const std::size_t offset = (((hi & 0x0f) << 8) | lo) + 3;
-                if (len > dst - stop || dst + offset > out.size())
-                {
-                    return std::nullopt;
-                }
-
-                for (std::size_t j = 0; j < len; j++)
-                {
-                    --dst;
-                    out[dst] = out[dst + offset];
-                }
-            }
-            else
-            {
-                if (dst <= stop)
-                {
-                    return std::nullopt;
-                }
-
-                out[--dst] = data[--src];
-            }
-        }
-    }
-    if (dst != stop)
-    {
-        return std::nullopt;
     }
 
     return out;
@@ -605,9 +692,15 @@ std::optional<std::string> LoadGameDirectory(const std::string& dir, GameFiles& 
         return dir + " isn't an extracted game: it has no exefs folder";
     }
 
-    if (!ReadFile(exefs / "exheader.bin", out.exheader) || out.exheader.size() < kExheaderSize)
+    const fs::path exheader = exefs / "exheader.bin";
+    if (!ReadFile(exheader, out.exheader))
     {
-        return "can't read " + (exefs / "exheader.bin").string();
+        return "can't read " + exheader.string();
+    }
+
+    if (out.exheader.size() < kExheaderSize)
+    {
+        return exheader.string() + " is too short for an extended header";
     }
 
     if (!ReadFile(exefs / "code.bin", out.code))
@@ -630,37 +723,11 @@ std::optional<std::string> LoadGameDirectory(const std::string& dir, GameFiles& 
         out.code = std::move(*code);
     }
 
-    // Folders that are symbolic links are followed, but not into a folder that holds the link. That would loop. An
-    // entry that can't be read, such as a broken link, is passed over.
     const fs::path romfs = fs::path(dir) / "romfs";
-    std::error_code ec;
-    std::vector<fs::path> ancestors = {fs::canonical(romfs, ec)}; // the folders that hold the current entry
-    for (fs::recursive_directory_iterator it(romfs, fs::directory_options::follow_directory_symlink, ec), end;
-         !ec && it != end; it.increment(ec))
-    {
-        std::error_code entry_error;
-        if (it->is_directory(entry_error))
-        {
-            ancestors.resize(static_cast<std::size_t>(it.depth()) + 1);
-            const fs::path folder = fs::canonical(it->path(), entry_error);
-            if (entry_error || std::find(ancestors.begin(), ancestors.end(), folder) != ancestors.end())
-            {
-                it.disable_recursion_pending();
-            }
-
-            ancestors.push_back(folder);
-        }
-        else if (it->is_regular_file(entry_error))
-        {
-            out.romfs_files.push_back(it->path().lexically_relative(romfs).generic_string());
-        }
-    }
-    if (ec)
+    if (!ListRomFs(romfs, out.romfs_files))
     {
         return "can't list " + romfs.string();
     }
-
-    std::sort(out.romfs_files.begin(), out.romfs_files.end());
 
     out.read_romfs = [romfs](const std::string& path, std::vector<uint8_t>& data)
     {
@@ -669,60 +736,6 @@ std::optional<std::string> LoadGameDirectory(const std::string& dir, GameFiles& 
 
     return std::nullopt;
 }
-
-namespace
-{
-
-std::optional<std::string> LoadGameImage(const std::string& path, GameFiles& out)
-{
-    out = GameFiles{};
-
-    auto img = std::make_shared<Image>(path);
-    if (!img->Ok())
-    {
-        return "can't open " + path;
-    }
-
-    uint8_t h[kImageHeaderSize];
-    if (!img->Read(0, h, sizeof(h)))
-    {
-        return path + " is too small for a 3DS image";
-    }
-
-    if (std::memcmp(h + kImageMagic, "NCSD", 4) == 0)
-    {
-        // .3ds/.cci: partition 0 is the application.
-        const std::optional<uint64_t> mu = MediaUnit(h);
-        if (!mu)
-        {
-            return "the NCSD image's media unit size is invalid";
-        }
-
-        const uint64_t offset = xsflib::LoadLe32(h + kNcsdPartition0Offset) * *mu;
-        const uint64_t size = xsflib::LoadLe32(h + kNcsdPartition0Size) * *mu;
-        if (!size)
-        {
-            return "the NCSD image has no partition 0";
-        }
-
-        return LoadNcch(img, offset, offset + size, out);
-    }
-
-    if (std::memcmp(h + kImageMagic, "NCCH", 4) == 0)
-    {
-        return LoadNcch(img, 0, img->Size(), out); // .cxi
-    }
-
-    // A CIA starts with the size of its header (0x2020).
-    if (xsflib::LoadLe32(h) == 0x2020)
-    {
-        return LoadCia(img, out);
-    }
-
-    return path + " isn't a 3DS image (NCSD, NCCH or CIA)";
-}
-
-} // namespace
 
 std::optional<std::string> LoadGame(const std::string& path, GameFiles& out)
 {

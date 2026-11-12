@@ -11,6 +11,7 @@
 #include <string_view>
 #include <vector>
 
+#include "ntdlib/ctr_fx/effects.h"
 #include "ntdlib/sar/formats.h"
 
 #include "nnsnd/aux_effects.h"
@@ -18,6 +19,17 @@
 
 namespace threesf::rip
 {
+
+// The reverb that Pokémon X's field module starts on aux bus A: nw::snd's FxReverb. Game mode's driver starts it with
+// these parameters (GameProfile::reverb in rip.cpp). Archive mode plays it for every sound of the game.
+constexpr ntdlib::ctr_fx::ReverbParam kPokemonXFieldReverb = {.early_reflection_time = 0,
+                                                              .fused_time = 4600,
+                                                              .pre_delay_time = 1,
+                                                              .coloration = 0.5f,
+                                                              .damping = 0.91f,
+                                                              .filter_sizes = {1120, 1440, 4960},
+                                                              .early_gain = 0.3f,
+                                                              .fused_gain = 0.73f};
 
 // The effects that a game puts on the aux buses.
 struct GameEffects
@@ -32,7 +44,7 @@ const GameEffects* FindGameEffects(const GameFiles& game);
 
 // An effect that a known game runs on the aux buses for some of its sequences alone, by the game's number for it
 // (ntdlib::ctr::snd::SequenceStart::game_effect).
-struct GameEffect
+struct SequenceEffect
 {
     uint8_t number;
     nnsnd::AuxEffectLists buses;
@@ -49,12 +61,12 @@ struct ArchiveEffects
 
     // The effects that the game runs for some sequences alone. A rip of such a sequence gets an effect set of the
     // archive descriptor (docs/3sf.md, "Effect sets"): set N + 1 for the entry's effect N.
-    std::vector<GameEffect> game_effects = {};
+    std::vector<SequenceEffect> game_effects = {};
 };
 
-// The effect set of the rips whose sequences the game plays with effect number `game_effect` (see GameEffect), in the
-// list of `effects`: N + 1 for its effect N, or 0 for the archive's effects. kArchiveEffects, a number that the list
-// lacks and a null `effects` give 0.
+// The effect set of the rips whose sequences the game plays with effect number `game_effect` (see SequenceEffect), in
+// the list of `effects`: N + 1 for its effect N, or 0 for the archive's effects. kArchiveEffects, a number that the
+// list lacks and a null `effects` give 0.
 uint32_t EffectSetOf(const ArchiveEffects* effects, uint8_t game_effect);
 
 // The entry of the archive whose SHA-1 is `archive_sha1`, in 40 lowercase hex digits, or nullptr.

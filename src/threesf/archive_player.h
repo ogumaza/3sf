@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 
-// Archive mode (docs/3sf.md): one sequence from a sound archive, played by 3SF's model of the SDK sound player (nw::snd
-// and nn::snd, src/nwsnd and src/nnsnd) driving the DSP firmware in Teakra. Used when a rip is made from a sound
-// archive rather than from the game's code.
+// Archive mode (docs/3sf.md): plays the sounds that a set selects from a sound archive, up to 16 together. The model of
+// the SDK sound player (nw::snd and nn::snd) in ntdlib::ctr plays them on the DSP firmware in Teakra. A rip made from a
+// sound archive, rather than from the game's code, uses archive mode.
 
 #pragma once
 
@@ -40,11 +40,15 @@ public:
     void Restore(const Snapshot& snapshot);
 
     // The DSP's output (interleaved L, R), appended by RunFrame.
-    std::vector<int16_t> output_;
+    std::vector<int16_t>& Output()
+    {
+        return output_;
+    }
 
 private:
     struct State;
 
+    std::vector<int16_t> output_;
     std::unique_ptr<State> state_;
 };
 

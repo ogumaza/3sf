@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: MIT
 
-// IPC between the process and the services (3dbrew, "IPC"): the command buffer in a thread's local storage, the
-// header word of a request or reply, and the descriptors of the handles and buffers that a reply gives.
+// IPC between the process and the services (3dbrew, "IPC"): the command buffer in a thread's local storage, the header
+// word of a request or reply, and the descriptors of the handles and buffers that a reply gives.
 
 #pragma once
 
 #include <cstdint>
 #include <initializer_list>
 
-#include "arm/cpu.h"
+#include "arm/memory.h"
 
 namespace threesf::horizon::ipc
 {

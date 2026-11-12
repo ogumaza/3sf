@@ -57,7 +57,7 @@ uint32_t Player::DriverStatus() const
 
 std::vector<int16_t>& Player::Output()
 {
-    return archive_ ? archive_->output_ : system_->output_;
+    return archive_ ? archive_->Output() : system_->Output();
 }
 
 bool Player::StartSource()

@@ -14,12 +14,13 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <span>
 #include <variant>
 #include <vector>
 
+#include "ntdlib/ctr/dsp/dsp.h"
+#include "ntdlib/ctr/nnsnd/dsp_abi.h"
 #include "ntdlib/ctr_fx/effects.h"
-
-#include "nnsnd/dsp_abi.h"
 
 namespace threesf::nnsnd
 {
@@ -27,11 +28,8 @@ namespace threesf::nnsnd
 // The aux buses, A and B.
 constexpr int kAuxBusCount = 2;
 
-// A bus's frame: four channels of 160 samples each, one channel after another (front left, front right, rear left
-// and rear right).
-constexpr std::size_t kAuxChannelSamples = 160;
-constexpr std::size_t kAuxFrameSamples = 4 * kAuxChannelSamples;
-using AuxFrame = std::array<int32_t, kAuxFrameSamples>;
+// The samples of each of a bus's four channels in a frame (front left, front right, rear left and rear right).
+constexpr std::size_t kAuxChannelSamples = ntdlib::ctr::dsp::kSamplesPerFrame;
 
 // An effect on an aux bus, and the library whose code it follows. The kinds are those of the archive descriptor.
 struct AuxEffect
@@ -69,8 +67,11 @@ struct AuxEffect
 // bus, run in the firmware wherever they stand in the list.
 using AuxEffectLists = std::array<std::vector<AuxEffect>, kAuxBusCount>;
 
+// Whether `effects` puts an effect on either bus.
+bool HasEffects(const AuxEffectLists& effects);
+
 // The firmware's delay as nn::snd's DSP delay sets it up (Luigi's Mansion of 2018, code.bin 0x22d8cc), in the fields of
-// the firmware's parameters (dsp_abi.h, FirmwareDelayParams).
+// the firmware's parameters (ntdlib's dsp_abi.h, FirmwareDelayParams).
 struct FirmwareDelay
 {
     // Sets the delay up from `param`. Throws std::invalid_argument for a feedback or a damping that nn::snd refuses.
@@ -78,6 +79,10 @@ struct FirmwareDelay
 
     // The bytes of the delay line in FCRAM: frames × channels × 160 32-bit samples.
     uint64_t LineBytes() const;
+
+    // The bus's record in the firmware's parameters for a line at physical address `line`. nn::snd leaves the same
+    // record once it has sent the line, the parameters and the enable.
+    ntdlib::ctr::nnsnd::FirmwareDelayParams Record(uint32_t line) const;
 
     uint16_t channels = 2;
     uint32_t frames = 1;
@@ -87,7 +92,7 @@ struct FirmwareDelay
 };
 
 // The firmware's reverb as nn::snd's DSP reverb sets it up (StreetPass Mii Plaza's update v14.6.0, code.bin 0x2eeda8),
-// in the fields of the firmware's parameters (dsp_abi.h, FirmwareReverbParams).
+// in the fields of the firmware's parameters (ntdlib's dsp_abi.h, FirmwareReverbParams).
 struct FirmwareReverb
 {
     // Sets the reverb up from `param`. Throws std::invalid_argument for a coloration, a damping or a gain that nn::snd
@@ -103,9 +108,9 @@ struct FirmwareReverb
     // the all-pass filter.
     std::array<uint32_t, 5> LineOffsets() const;
 
-    // The bus's record in the firmware's parameters for a buffer at physical address `buffer`. nn::snd leaves the
-    // same record once it has sent the parameters and the enable.
-    FirmwareReverbParams Record(uint32_t buffer) const;
+    // The bus's record in the firmware's parameters for a buffer at physical address `buffer`. nn::snd leaves the same
+    // record once it has sent the parameters and the enable.
+    ntdlib::ctr::nnsnd::FirmwareReverbParams Record(uint32_t buffer) const;
 
     uint16_t channels = 2;
     std::array<uint16_t, 5> frames{}; // the lines' lengths in frames of 160 samples, in the order above
@@ -117,40 +122,40 @@ struct FirmwareReverb
     int16_t damping_b = 0;
 };
 
-// The models of the effects on the buses. A copy holds the models' whole state.
+// The models of the effects on one bus. A copy holds the models' whole state.
 class AuxEffects
 {
 public:
     AuxEffects() = default;
 
-    // Sets the models of `lists` up, with their buffers in silence. Throws std::invalid_argument for a kind that
+    // Sets the models of `effects` up, with their buffers in silence. Throws std::invalid_argument for a kind that
     // isn't known and for parameters that the libraries refuse.
-    explicit AuxEffects(const AuxEffectLists& lists);
+    explicit AuxEffects(std::span<const AuxEffect> effects);
 
-    // Whether bus `bus` has an effect.
-    bool Has(int bus) const;
+    // Whether the bus has an effect.
+    bool Any() const;
 
-    // The firmware's delay on bus `bus`, if it has one.
-    const std::optional<FirmwareDelay>& FirmwareDelayOf(int bus) const
+    // The firmware's delay on the bus, if it has one.
+    const std::optional<FirmwareDelay>& FirmwareDelayOnBus() const
     {
-        return firmware_delays_[static_cast<std::size_t>(bus)];
+        return firmware_delay_;
     }
 
-    // The firmware's reverb on bus `bus`, if it has one.
-    const std::optional<FirmwareReverb>& FirmwareReverbOf(int bus) const
+    // The firmware's reverb on the bus, if it has one.
+    const std::optional<FirmwareReverb>& FirmwareReverbOnBus() const
     {
-        return firmware_reverbs_[static_cast<std::size_t>(bus)];
+        return firmware_reverb_;
     }
 
-    // Runs the effects of bus `bus` over a frame, in place.
-    void Process(int bus, AuxFrame& frame);
+    // Runs the effects over a frame of `channels`, of `samples` samples each, in place.
+    void Process(const ntdlib::ctr_fx::Channels& channels, std::size_t samples);
 
 private:
     using Model = std::variant<ntdlib::ctr_fx::Reverb, ntdlib::ctr_fx::Delay>;
 
-    std::array<std::vector<Model>, kAuxBusCount> models_;
-    std::array<std::optional<FirmwareDelay>, kAuxBusCount> firmware_delays_;
-    std::array<std::optional<FirmwareReverb>, kAuxBusCount> firmware_reverbs_;
+    std::vector<Model> models_;
+    std::optional<FirmwareDelay> firmware_delay_;
+    std::optional<FirmwareReverb> firmware_reverb_;
 };
 
 } // namespace threesf::nnsnd

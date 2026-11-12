@@ -189,16 +189,16 @@ void StoreName(uint8_t* out, const std::u16string& name)
     }
 }
 
-// The directories and files of an image, in the order of their entries. The root comes first among the directories.
-// The others come in the order that the sorted paths first name them. The files come in sorted order.
+// The directories and files of an image, in the order of their entries. The root comes first among the directories. The
+// others come in the order that the sorted paths first name them. The files come in sorted order.
 struct Tree
 {
     std::vector<DirNode> dirs;
     std::vector<FileNode> files;
 };
 
-// The tree of files sorted by path. Each part of a path before the last names a directory inside the one before it.
-// The last part names the file. Empty parts are names too.
+// The tree of files sorted by path. Each part of a path before the last names a directory inside the one before it. The
+// last part names the file. Empty parts are names too.
 Tree BuildTree(const std::vector<RomFs::File>& files)
 {
     Tree tree;
@@ -233,8 +233,8 @@ struct Lengths
     uint64_t data = 0;
 };
 
-// Gives each entry its offset in its table and each file its place in the data. Each entry then links to the next
-// entry in its directory's list. The last of each list and the root link to none.
+// Gives each entry its offset in its table and each file its place in the data. Each entry then links to the next entry
+// in its directory's list. The last of each list and the root link to none.
 Lengths PlaceEntries(Tree& tree)
 {
     Lengths lengths;

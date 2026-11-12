@@ -209,10 +209,13 @@ constexpr std::array<const char*, 11> kPlaybackTags = {
 // 31 the global ones, and 32 to 47 the track variables: N sets variable N - 32 of every track (docs/3sf.md, "Tags").
 constexpr int kMaxVariable = 47;
 
-// Parses the 3sf_var tag as xsflib::psf::ParseVariables does, with variables 0 to kMaxVariable: one or more assignments
+// Parses the 3sf_var tag with xsflib::psf::ParseVariables, with variables 0 to kMaxVariable: one or more assignments
 // N=V, separated by commas or white space. Returns nullopt if any part is malformed or out of range, or if there's no
 // assignment. Players of 3SF 1.4 and older take N up to 31. They ignore a tag with a track variable.
-std::optional<Variables> ParseVariables(std::string_view text);
+inline std::optional<Variables> ParseVariables(std::string_view text)
+{
+    return xsflib::psf::ParseVariables(text, kMaxVariable);
+}
 
 // A change of a sequence variable in a later sound frame: the 3sf_var_change tag's entries (docs/3sf.md, "Tags").
 using SequenceVariable = ntdlib::ctr::snd::SequenceVariable;

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 
-// The emulated 3DS application process of game mode: the kernel (kernel.h) with the services (services.h), FCRAM
-// and the DSP running its firmware in Teakra (dsp/teakra_dsp.h), stepped in lock-step with the ARM11.
+// The emulated 3DS application process of game mode: the kernel (kernel.h) with the services (services.h), FCRAM and
+// the DSP running its firmware in Teakra (ntdlib/ctr/dsp/teakra_dsp.h), stepped in lock-step with the ARM11.
 
 #pragma once
 
@@ -9,8 +9,9 @@
 #include <memory>
 #include <vector>
 
-#include "dsp/fcram.h"
-#include "dsp/teakra_dsp.h"
+#include "ntdlib/ctr/dsp/fcram.h"
+#include "ntdlib/ctr/dsp/teakra_dsp.h"
+
 #include "horizon/kernel.h"
 #include "horizon/romfs.h"
 
@@ -43,7 +44,8 @@ public:
     struct Snapshot;
 
     // Builds the process. `upstream` gives the DSP upstream Teakra's behaviour where 3SF's copy departs from it.
-    System(const ProcessImage& image, const KernelConfig& config, const dsp::UpstreamTeakra& upstream = {});
+    System(const ProcessImage& image, const KernelConfig& config,
+           const ntdlib::ctr::dsp::UpstreamTeakra& upstream = {});
     System(const System&) = delete;
     System& operator=(const System&) = delete;
     ~System();
@@ -57,11 +59,15 @@ public:
     void Restore(const Snapshot& snapshot);
 
     // The DSP's output: interleaved left and right samples at 268111856 / 8192 Hz.
-    std::vector<int16_t> output_;
+    std::vector<int16_t>& Output()
+    {
+        return output_;
+    }
 
 private:
-    Fcram fcram_;
-    dsp::TeakraDsp dsp_;
+    std::vector<int16_t> output_;
+    ntdlib::ctr::Fcram fcram_;
+    ntdlib::ctr::dsp::TeakraDsp dsp_;
     std::unique_ptr<Kernel> kernel_;
     std::unique_ptr<Services> services_;
 };

@@ -1,238 +1,16 @@
 // SPDX-License-Identifier: MIT
 
-// ARM11 interpreter: memory, run loop and the ARM instruction set (see cpu.h).
+// ARM11 interpreter: run loop and the ARM instruction set (see cpu.h).
 
 #include "arm/cpu.h"
 
-#include <algorithm>
 #include <bit>
 #include <cstdint>
 #include <cstdio>
-#include <cstring>
-#include <functional>
-#include <memory>
 #include <string>
-#include <utility>
-#include <vector>
 
 namespace threesf::arm
 {
-
-// --------------------------------------------------------------------------------------------- Memory
-Memory::Memory() : pages_(new uint8_t*[kPageCount]()), write_pages_(new uint8_t*[kPageCount]())
-{
-}
-
-void Memory::Map(uint32_t vaddr, uint8_t* host, uint32_t size)
-{
-    generation_ = next_generation_++;
-    for (uint32_t off = 0; off < size; off += kPageSize)
-    {
-        pages_[(vaddr + off) >> kPageBits] = host + off;
-        write_pages_[(vaddr + off) >> kPageBits] = Watched(host + off) ? nullptr : host + off;
-    }
-}
-
-void Memory::Unmap(uint32_t vaddr, uint32_t size)
-{
-    generation_ = next_generation_++;
-    for (uint32_t off = 0; off < size; off += kPageSize)
-    {
-        pages_[(vaddr + off) >> kPageBits] = nullptr;
-        write_pages_[(vaddr + off) >> kPageBits] = nullptr;
-    }
-}
-
-Memory::Snapshot Memory::Save(const Snapshot* previous) const
-{
-    Snapshot snapshot;
-    snapshot.generation = generation_;
-    snapshot.fault = fault_;
-    snapshot.fault_address = fault_address_;
-    snapshot.fault_write = fault_write_;
-
-    if (previous && previous->generation == generation_)
-    {
-        snapshot.runs = previous->runs;
-        return snapshot;
-    }
-
-    auto runs = std::make_shared<std::vector<Snapshot::Run>>();
-    for (uint32_t page = 0; page < kPageCount; page++)
-    {
-        uint8_t* host = pages_[page];
-        if (!host)
-        {
-            continue;
-        }
-
-        // Runs are at most 2 GiB, so that Restore can map each with a 32-bit size.
-        if (!runs->empty())
-        {
-            Snapshot::Run& last = runs->back();
-            const auto end = reinterpret_cast<std::uintptr_t>(last.host) + std::uintptr_t{last.pages} * kPageSize;
-            if (last.first_page + last.pages == page && end == reinterpret_cast<std::uintptr_t>(host) &&
-                last.pages < kPageCount / 2)
-            {
-                last.pages++;
-                continue;
-            }
-        }
-
-        runs->push_back({page, 1, host});
-    }
-
-    snapshot.runs = std::move(runs);
-
-    return snapshot;
-}
-
-void Memory::Restore(const Snapshot& snapshot)
-{
-    fault_ = snapshot.fault;
-    fault_address_ = snapshot.fault_address;
-    fault_write_ = snapshot.fault_write;
-
-    if (snapshot.generation == generation_)
-    {
-        return;
-    }
-
-    std::fill_n(pages_.get(), kPageCount, nullptr);
-    std::fill_n(write_pages_.get(), kPageCount, nullptr);
-    for (const Snapshot::Run& run : *snapshot.runs)
-    {
-        Map(run.first_page << kPageBits, run.host, run.pages << kPageBits);
-    }
-
-    generation_ = snapshot.generation;
-}
-
-void Memory::WatchWrites(const uint8_t* host, uint32_t size, std::function<void()> on_write)
-{
-    watch_start_ = host;
-    watch_end_ = host + size;
-    on_watched_write_ = std::move(on_write);
-    for (uint32_t page = 0; page < kPageCount; ++page)
-    {
-        if (pages_[page] && Watched(pages_[page]))
-        {
-            write_pages_[page] = nullptr;
-        }
-    }
-}
-
-void Memory::WriteSlow8(uint32_t a, uint8_t v)
-{
-    uint8_t* p = pages_[a >> kPageBits];
-    if (!p)
-    {
-        Fault(a, true);
-        return;
-    }
-
-    p[a & kPageMask] = v;
-    on_watched_write_();
-}
-
-void Memory::ReadBlock(uint32_t vaddr, void* dst, std::size_t size) const
-{
-    auto* d = static_cast<uint8_t*>(dst);
-    while (size)
-    {
-        const uint8_t* p = HostPtr(vaddr);
-        if (!p)
-        {
-            return;
-        }
-
-        const std::size_t chunk = std::min<std::size_t>(size, kPageSize - (vaddr & kPageMask));
-        std::memcpy(d, p, chunk);
-        d += chunk;
-        vaddr += static_cast<uint32_t>(chunk);
-        size -= chunk;
-    }
-}
-
-void Memory::WriteBlock(uint32_t vaddr, const void* src, std::size_t size)
-{
-    const auto* s = static_cast<const uint8_t*>(src);
-    while (size)
-    {
-        uint8_t* p = HostPtr(vaddr);
-        if (!p)
-        {
-            return;
-        }
-
-        const std::size_t chunk = std::min<std::size_t>(size, kPageSize - (vaddr & kPageMask));
-        std::memcpy(p, s, chunk);
-        if (Watched(p))
-        {
-            on_watched_write_();
-        }
-
-        s += chunk;
-        vaddr += static_cast<uint32_t>(chunk);
-        size -= chunk;
-    }
-}
-
-void Memory::ZeroBlock(uint32_t vaddr, std::size_t size)
-{
-    while (size)
-    {
-        uint8_t* p = HostPtr(vaddr);
-        if (!p)
-        {
-            return;
-        }
-
-        const std::size_t chunk = std::min<std::size_t>(size, kPageSize - (vaddr & kPageMask));
-        std::memset(p, 0, chunk);
-        if (Watched(p))
-        {
-            on_watched_write_();
-        }
-
-        vaddr += static_cast<uint32_t>(chunk);
-        size -= chunk;
-    }
-}
-
-std::string Memory::ReadCString(uint32_t vaddr, std::size_t max) const
-{
-    std::string s;
-    while (s.size() < max)
-    {
-        const uint8_t* p = HostPtr(vaddr++);
-        if (!p || *p == 0)
-        {
-            break;
-        }
-
-        s.push_back(static_cast<char>(*p));
-    }
-
-    return s;
-}
-
-std::size_t Memory::MappedLength(uint32_t vaddr, std::size_t size) const
-{
-    uint64_t mapped = 0;
-    while (mapped < size)
-    {
-        const uint32_t at = vaddr + static_cast<uint32_t>(mapped);
-        if (!HostPtr(at))
-        {
-            break;
-        }
-
-        mapped += kPageSize - (at & kPageMask);
-    }
-
-    return static_cast<std::size_t>(std::min<uint64_t>(mapped, size));
-}
 
 // --------------------------------------------------------------------------------------------- State
 uint32_t CpuState::Cpsr() const
@@ -262,7 +40,7 @@ std::string Cpu::Describe() const
 StopReason Cpu::Run(uint64_t max_instructions)
 {
     HostFpuMode fpu_guard;
-    host_rmode_ = 0xffffffff;
+    host_rmode_ = kNoHostRMode;
     UpdateHostFpu();
     reason_ = StopReason::kNone;
 
@@ -275,7 +53,7 @@ StopReason Cpu::Run(uint64_t max_instructions)
         if (state_.thumb)
         {
             const uint32_t op = mem_.Read16(pc);
-            if (mem_.fault_)
+            if (mem_.Fault())
             {
                 reason_ = StopReason::kFault;
                 stop_pc_ = pc;
@@ -288,7 +66,7 @@ StopReason Cpu::Run(uint64_t max_instructions)
         else
         {
             const uint32_t op = mem_.Read32(pc);
-            if (mem_.fault_)
+            if (mem_.Fault())
             {
                 reason_ = StopReason::kFault;
                 stop_pc_ = pc;
@@ -301,7 +79,7 @@ StopReason Cpu::Run(uint64_t max_instructions)
 
         count++;
 
-        if (mem_.fault_)
+        if (mem_.Fault())
         {
             reason_ = StopReason::kFault;
             stop_pc_ = pc;
@@ -319,6 +97,7 @@ StopReason Cpu::Run(uint64_t max_instructions)
             break;
         }
     }
+
     if (reason_ == StopReason::kNone)
     {
         reason_ = StopReason::kBudget;
@@ -577,15 +356,10 @@ bool Cpu::ArmUnconditional(uint32_t op)
     return Undefined(op);
 }
 
-bool Cpu::ArmDataProcessing(uint32_t op)
+// The operands of a data-processing instruction: `a` from Rn, and `b` from the shifter with its carry out in `carry`.
+void Cpu::ArmOperands(uint32_t op, uint32_t& a, uint32_t& b, bool& carry) const
 {
-    const uint32_t opcode = (op >> 21) & 0xf;
-    const bool s = (op >> 20) & 1;
     const uint32_t rn = (op >> 16) & 0xf;
-    const uint32_t rd = (op >> 12) & 0xf;
-    bool carry = state_.c;
-    uint32_t b;
-    uint32_t a;
     if (op & (1u << 25))
     {
         const uint32_t rot = ((op >> 8) & 0xf) * 2;
@@ -610,6 +384,17 @@ bool Cpu::ArmDataProcessing(uint32_t op)
         b = ShiftImm(Reg(op & 0xf), (op >> 5) & 3, (op >> 7) & 0x1f, carry);
         a = Reg(rn);
     }
+}
+
+bool Cpu::ArmDataProcessing(uint32_t op)
+{
+    const uint32_t opcode = (op >> 21) & 0xf;
+    const bool s = (op >> 20) & 1;
+    const uint32_t rd = (op >> 12) & 0xf;
+    bool carry = state_.c;
+    uint32_t a;
+    uint32_t b;
+    ArmOperands(op, a, b, carry);
 
     if (s && rd == 15 && (opcode < 8 || opcode > 11))
     {
@@ -723,71 +508,14 @@ int32_t Half(uint32_t value, bool top)
 
 bool Cpu::ArmMisc(uint32_t op)
 {
+    if (op & 0x80)
+    {
+        return ArmSignedMultiply16(op);
+    }
+
     const uint32_t op1 = (op >> 21) & 3;
     const uint32_t rd = (op >> 12) & 0xf;
     const uint32_t rm = op & 0xf;
-    if (op & 0x80)
-    {
-        // Signed 16-bit multiplies: op & 0x90 == 0x80 (bit 4 clear).
-        const uint32_t rdh = (op >> 16) & 0xf; // Rd (or RdHi)
-        const uint32_t ra = (op >> 12) & 0xf;  // Ra (or RdLo)
-        const uint32_t rs = (op >> 8) & 0xf;
-        const bool x = (op >> 5) & 1;
-        const bool y = (op >> 6) & 1;
-        switch (op1)
-        {
-        case 0: // SMLAxy
-            {
-                const int64_t sum = static_cast<int64_t>(Half(state_.r[rm], x)) * Half(state_.r[rs], y) +
-                                    static_cast<int32_t>(state_.r[ra]);
-                if (sum != static_cast<int32_t>(sum))
-                {
-                    state_.q = true;
-                }
-
-                state_.r[rdh] = static_cast<uint32_t>(sum);
-                return true;
-            }
-
-        case 1: // SMLAWy / SMULWy
-            {
-                const int64_t product =
-                    static_cast<int64_t>(static_cast<int32_t>(state_.r[rm])) * Half(state_.r[rs], y);
-                const int32_t top = static_cast<int32_t>(product >> 16);
-                if (!x)
-                {
-                    const int64_t sum = static_cast<int64_t>(top) + static_cast<int32_t>(state_.r[ra]);
-                    if (sum != static_cast<int32_t>(sum))
-                    {
-                        state_.q = true;
-                    }
-
-                    state_.r[rdh] = static_cast<uint32_t>(sum);
-                }
-                else
-                {
-                    state_.r[rdh] = static_cast<uint32_t>(top);
-                }
-
-                return true;
-            }
-
-        case 2: // SMLALxy: a 64-bit accumulation that wraps, done in unsigned arithmetic
-            {
-                const uint64_t acc = (static_cast<uint64_t>(state_.r[rdh]) << 32) | state_.r[ra];
-                const int64_t product = static_cast<int64_t>(Half(state_.r[rm], x)) * Half(state_.r[rs], y);
-                const uint64_t sum = acc + static_cast<uint64_t>(product);
-                state_.r[ra] = static_cast<uint32_t>(sum);
-                state_.r[rdh] = static_cast<uint32_t>(sum >> 32);
-                return true;
-            }
-
-        default: // SMULxy
-            state_.r[rdh] = static_cast<uint32_t>(Half(state_.r[rm], x) * Half(state_.r[rs], y));
-            return true;
-        }
-    }
-
     switch ((op >> 4) & 0xf)
     {
     case 0x0:
@@ -867,6 +595,69 @@ bool Cpu::ArmMisc(uint32_t op)
     }
 
     return Undefined(op);
+}
+
+// Signed 16-bit multiplies: op & 0x90 == 0x80 (bit 4 clear).
+bool Cpu::ArmSignedMultiply16(uint32_t op)
+{
+    const uint32_t op1 = (op >> 21) & 3;
+    const uint32_t rm = op & 0xf;
+    const uint32_t rdh = (op >> 16) & 0xf; // Rd (or RdHi)
+    const uint32_t ra = (op >> 12) & 0xf;  // Ra (or RdLo)
+    const uint32_t rs = (op >> 8) & 0xf;
+    const bool x = (op >> 5) & 1;
+    const bool y = (op >> 6) & 1;
+    switch (op1)
+    {
+    case 0: // SMLAxy
+        {
+            const int64_t sum = static_cast<int64_t>(Half(state_.r[rm], x)) * Half(state_.r[rs], y) +
+                                static_cast<int32_t>(state_.r[ra]);
+            if (sum != static_cast<int32_t>(sum))
+            {
+                state_.q = true;
+            }
+
+            state_.r[rdh] = static_cast<uint32_t>(sum);
+            return true;
+        }
+
+    case 1: // SMLAWy / SMULWy
+        {
+            const int64_t product = static_cast<int64_t>(static_cast<int32_t>(state_.r[rm])) * Half(state_.r[rs], y);
+            const int32_t top = static_cast<int32_t>(product >> 16);
+            if (!x)
+            {
+                const int64_t sum = static_cast<int64_t>(top) + static_cast<int32_t>(state_.r[ra]);
+                if (sum != static_cast<int32_t>(sum))
+                {
+                    state_.q = true;
+                }
+
+                state_.r[rdh] = static_cast<uint32_t>(sum);
+            }
+            else
+            {
+                state_.r[rdh] = static_cast<uint32_t>(top);
+            }
+
+            return true;
+        }
+
+    case 2: // SMLALxy: a 64-bit accumulation that wraps, done in unsigned arithmetic
+        {
+            const uint64_t acc = (static_cast<uint64_t>(state_.r[rdh]) << 32) | state_.r[ra];
+            const int64_t product = static_cast<int64_t>(Half(state_.r[rm], x)) * Half(state_.r[rs], y);
+            const uint64_t sum = acc + static_cast<uint64_t>(product);
+            state_.r[ra] = static_cast<uint32_t>(sum);
+            state_.r[rdh] = static_cast<uint32_t>(sum >> 32);
+            return true;
+        }
+
+    default: // SMULxy
+        state_.r[rdh] = static_cast<uint32_t>(Half(state_.r[rm], x) * Half(state_.r[rs], y));
+        return true;
+    }
 }
 
 bool Cpu::ArmMsrImmediate(uint32_t op)
@@ -988,34 +779,15 @@ bool Cpu::ArmMultiply(uint32_t op)
 
 bool Cpu::ArmSwapExclusive(uint32_t op)
 {
+    if (!(op & (1u << 23)))
+    {
+        return ArmSwap(op);
+    }
+
     const uint32_t rn = (op >> 16) & 0xf;
     const uint32_t rd = (op >> 12) & 0xf;
     const uint32_t rm = op & 0xf;
     const uint32_t addr = state_.r[rn];
-    if (!(op & (1u << 23)))
-    {
-        if ((op & 0x00b00ff0) != 0x00000090)
-        {
-            return Undefined(op);
-        }
-
-        // SWP / SWPB
-        if (op & (1u << 22))
-        {
-            const uint8_t old = mem_.Read8(addr);
-            mem_.Write8(addr, static_cast<uint8_t>(state_.r[rm]));
-            state_.r[rd] = old;
-        }
-        else
-        {
-            const uint32_t old = mem_.Read32(addr);
-            mem_.Write32(addr, state_.r[rm]);
-            state_.r[rd] = old;
-        }
-
-        return true;
-    }
-
     const uint32_t type = (op >> 21) & 3; // 0 word, 1 doubleword, 2 byte, 3 halfword
     const bool load = (op >> 20) & 1;
 
@@ -1089,6 +861,34 @@ bool Cpu::ArmSwapExclusive(uint32_t op)
     return true;
 }
 
+// SWP / SWPB
+bool Cpu::ArmSwap(uint32_t op)
+{
+    if ((op & 0x00b00ff0) != 0x00000090)
+    {
+        return Undefined(op);
+    }
+
+    const uint32_t rn = (op >> 16) & 0xf;
+    const uint32_t rd = (op >> 12) & 0xf;
+    const uint32_t rm = op & 0xf;
+    const uint32_t addr = state_.r[rn];
+    if (op & (1u << 22))
+    {
+        const uint8_t old = mem_.Read8(addr);
+        mem_.Write8(addr, static_cast<uint8_t>(state_.r[rm]));
+        state_.r[rd] = old;
+    }
+    else
+    {
+        const uint32_t old = mem_.Read32(addr);
+        mem_.Write32(addr, state_.r[rm]);
+        state_.r[rd] = old;
+    }
+
+    return true;
+}
+
 bool Cpu::ArmExtraLoadStore(uint32_t op)
 {
     const bool p = (op >> 24) & 1;
@@ -1103,85 +903,73 @@ bool Cpu::ArmExtraLoadStore(uint32_t op)
     const uint32_t offset_addr = u ? base + offset : base - offset;
     const uint32_t addr = p ? offset_addr : base;
     const bool wback = !p || w;
-    switch ((op >> 5) & 3)
+
+    // LDRD (2) and STRD (3) have L clear. They transfer an even-numbered register and the one after it.
+    const uint32_t kind = (op >> 5) & 3;
+    const bool load = l || kind == 2;
+    const bool doubleword = !l && kind != 1;
+    if (doubleword && (rt & 1))
+    {
+        return Undefined(op);
+    }
+
+    // The access. A load reads into lo, and LDRD reads into lo and hi.
+    uint32_t lo = 0;
+    uint32_t hi = 0;
+    switch (kind)
     {
     case 1: // LDRH / STRH
         if (l)
         {
-            const uint32_t value = mem_.Read16(addr);
-            if (wback)
-            {
-                state_.r[rn] = offset_addr;
-            }
-            state_.r[rt] = value;
+            lo = mem_.Read16(addr);
         }
         else
         {
             mem_.Write16(addr, static_cast<uint16_t>(Reg(rt)));
-            if (wback)
-            {
-                state_.r[rn] = offset_addr;
-            }
         }
-
-        return true;
+        break;
 
     case 2: // LDRSB / LDRD
         if (l)
         {
-            const uint32_t value = static_cast<uint32_t>(static_cast<int8_t>(mem_.Read8(addr)));
-            if (wback)
-            {
-                state_.r[rn] = offset_addr;
-            }
-            state_.r[rt] = value;
+            lo = static_cast<uint32_t>(static_cast<int8_t>(mem_.Read8(addr)));
         }
         else
         {
-            if (rt & 1)
-            {
-                return Undefined(op);
-            }
-
-            const uint32_t lo = mem_.Read32(addr);
-            const uint32_t hi = mem_.Read32(addr + 4);
-            if (wback)
-            {
-                state_.r[rn] = offset_addr;
-            }
-            state_.r[rt] = lo;
-            state_.r[rt + 1] = hi;
+            lo = mem_.Read32(addr);
+            hi = mem_.Read32(addr + 4);
         }
-
-        return true;
+        break;
 
     default: // LDRSH / STRD
         if (l)
         {
-            const uint32_t value = static_cast<uint32_t>(static_cast<int16_t>(mem_.Read16(addr)));
-            if (wback)
-            {
-                state_.r[rn] = offset_addr;
-            }
-            state_.r[rt] = value;
+            lo = static_cast<uint32_t>(static_cast<int16_t>(mem_.Read16(addr)));
         }
         else
         {
-            if (rt & 1)
-            {
-                return Undefined(op);
-            }
-
             mem_.Write32(addr, state_.r[rt]);
             mem_.Write32(addr + 4, Reg(rt + 1));
-            if (wback)
-            {
-                state_.r[rn] = offset_addr;
-            }
         }
-
-        return true;
+        break;
     }
+
+    // The writeback comes before a load writes Rt. The loaded value wins when Rn is Rt.
+    if (wback)
+    {
+        state_.r[rn] = offset_addr;
+    }
+
+    if (load)
+    {
+        state_.r[rt] = lo;
+        if (doubleword)
+        {
+            state_.r[rt + 1] = hi;
+        }
+    }
+
+    return true;
 }
 
 bool Cpu::ArmLoadStore(uint32_t op)

@@ -2,18 +2,27 @@
 
 #include "nnsnd/aux_effects.h"
 
+#include <array>
 #include <bit>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <variant>
+#include <vector>
 
+#include "ntdlib/ctr/nnsnd/dsp_abi.h"
 #include "ntdlib/ctr_fx/effects.h"
 #include "ntdlib/ctr_fx/vfp.h"
 
 namespace threesf::nnsnd
 {
+
+using ntdlib::ctr::nnsnd::FirmwareDelayParams;
+using ntdlib::ctr::nnsnd::FirmwareReverbParams;
+
 namespace
 {
 
@@ -51,6 +60,24 @@ bool InUnitRange(float value)
     return !(value < 0.0f) && std::bit_cast<int32_t>(value) <= std::bit_cast<int32_t>(1.0f);
 }
 
+// The frames of a reverb's three filters: each filter's whole frames.
+uint64_t FilterFrames(const ntdlib::ctr_fx::ReverbParam& param)
+{
+    uint64_t frames = 0;
+    for (const uint32_t size : param.filter_sizes)
+    {
+        frames += size / kAuxChannelSamples;
+    }
+
+    return frames;
+}
+
+// The damping that nn::snd's DSP delay and reverb take: `damping` at most 0.95, by the bits of the floats.
+float ClampDamping(float damping)
+{
+    return std::bit_cast<int32_t>(damping) > std::bit_cast<int32_t>(0.95f) ? 0.95f : damping;
+}
+
 } // namespace
 
 FirmwareDelay::FirmwareDelay(const ntdlib::ctr_fx::DelayParam& param)
@@ -66,9 +93,24 @@ FirmwareDelay::FirmwareDelay(const ntdlib::ctr_fx::DelayParam& param)
     channels = param.enable_surround ? 4 : 2;
     frames = ntdlib::ctr_fx::DelayFrames(param.delay_time);
     feedback = static_cast<uint16_t>(vfp::ToU32(vfp::Mul(param.feedback, 128.0f)));
-    const float damping = std::bit_cast<int32_t>(param.damping) > std::bit_cast<int32_t>(0.95f) ? 0.95f : param.damping;
+    const float damping = ClampDamping(param.damping);
     damping_a = static_cast<uint16_t>(vfp::ToS32(vfp::Mul(vfp::Sub(1.0f, damping), 128.0f)));
     damping_b = static_cast<uint16_t>(vfp::ToS32(vfp::Mul(damping, 128.0f)));
+}
+
+FirmwareDelayParams FirmwareDelay::Record(uint32_t line) const
+{
+    FirmwareDelayParams p{};
+    p.buffer = line;
+    p.channels = channels;
+    p.frames = static_cast<uint16_t>(frames);
+    p.feedback = feedback;
+    p.damping_a = damping_a;
+    p.damping_b = damping_b;
+    p.enable = 1;
+    p.dirty = 7;
+
+    return p;
 }
 
 uint64_t FirmwareDelay::LineBytes() const
@@ -126,7 +168,7 @@ FirmwareReverb::FirmwareReverb(const ntdlib::ctr_fx::ReverbParam& param)
     early_gain = static_cast<uint16_t>(vfp::ToU32(vfp::Mul(param.early_gain, 128.0f)));
     fused_gain = static_cast<uint16_t>(vfp::ToU32(vfp::Mul(param.fused_gain, 128.0f)));
     all_pass_gain = static_cast<uint16_t>(vfp::ToU32(vfp::Mul(param.coloration, 128.0f)));
-    const float damping = std::bit_cast<int32_t>(param.damping) > std::bit_cast<int32_t>(0.95f) ? 0.95f : param.damping;
+    const float damping = ClampDamping(param.damping);
     const float a = param.high_pass_damping ? vfp::Sub(damping, 1.0f) : vfp::Sub(1.0f, damping);
     const float b = param.high_pass_damping ? -damping : damping;
     damping_a = static_cast<int16_t>(vfp::ToS32(vfp::Mul(a, 128.0f)));
@@ -204,13 +246,8 @@ uint64_t AuxEffect::BufferSamples() const
     // and reverb, in FCRAM. The firmware's reverb counts its frames as the delay does.
     if (kind == Kind::kFirmwareReverb)
     {
-        uint64_t frames = uint64_t{ntdlib::ctr_fx::DelayFrames(reverb.early_reflection_time)} +
-                          ntdlib::ctr_fx::DelayFrames(reverb.pre_delay_time);
-        for (const uint32_t size : reverb.filter_sizes)
-        {
-            frames += size / kAuxChannelSamples;
-        }
-
+        const uint64_t frames = uint64_t{ntdlib::ctr_fx::DelayFrames(reverb.early_reflection_time)} +
+                                ntdlib::ctr_fx::DelayFrames(reverb.pre_delay_time) + FilterFrames(reverb);
         return frames * kAuxChannelSamples * 2;
     }
 
@@ -220,63 +257,57 @@ uint64_t AuxEffect::BufferSamples() const
         return uint64_t{ntdlib::ctr_fx::DelayFrames(delay.delay_time)} * kAuxChannelSamples * channels;
     }
 
-    uint64_t frames = uint64_t{ntdlib::ctr_fx::ReverbFrames(reverb.early_reflection_time)} +
-                      ntdlib::ctr_fx::ReverbFrames(reverb.pre_delay_time);
-    for (const uint32_t size : reverb.filter_sizes)
-    {
-        frames += size / kAuxChannelSamples;
-    }
-
+    const uint64_t frames = uint64_t{ntdlib::ctr_fx::ReverbFrames(reverb.early_reflection_time)} +
+                            ntdlib::ctr_fx::ReverbFrames(reverb.pre_delay_time) + FilterFrames(reverb);
     const uint64_t channels = reverb.enable_surround ? 4 : 2;
     return frames * kAuxChannelSamples * channels;
 }
 
-AuxEffects::AuxEffects(const AuxEffectLists& lists)
+bool HasEffects(const AuxEffectLists& effects)
 {
-    for (std::size_t bus = 0; bus < models_.size(); bus++)
+    return !effects[0].empty() || !effects[1].empty();
+}
+
+AuxEffects::AuxEffects(std::span<const AuxEffect> effects)
+{
+    for (const AuxEffect& effect : effects)
     {
-        for (const AuxEffect& effect : lists[bus])
+        if (!effect.InFirmware())
         {
-            if (!effect.InFirmware())
-            {
-                models_[bus].push_back(MakeModel(effect));
-                continue;
-            }
-
-            if (effect.kind == AuxEffect::Kind::kFirmwareReverb)
-            {
-                if (firmware_reverbs_[bus])
-                {
-                    throw std::invalid_argument("a bus with two of the firmware's reverbs");
-                }
-
-                firmware_reverbs_[bus].emplace(effect.reverb);
-                continue;
-            }
-
-            if (firmware_delays_[bus])
-            {
-                throw std::invalid_argument("a bus with two of the firmware's delays");
-            }
-
-            firmware_delays_[bus].emplace(effect.delay);
+            models_.push_back(MakeModel(effect));
+            continue;
         }
+
+        if (effect.kind == AuxEffect::Kind::kFirmwareReverb)
+        {
+            if (firmware_reverb_)
+            {
+                throw std::invalid_argument("a bus with two of the firmware's reverbs");
+            }
+
+            firmware_reverb_.emplace(effect.reverb);
+            continue;
+        }
+
+        if (firmware_delay_)
+        {
+            throw std::invalid_argument("a bus with two of the firmware's delays");
+        }
+
+        firmware_delay_.emplace(effect.delay);
     }
 }
 
-bool AuxEffects::Has(int bus) const
+bool AuxEffects::Any() const
 {
-    const auto b = static_cast<std::size_t>(bus);
-    return !models_[b].empty() || firmware_delays_[b] || firmware_reverbs_[b];
+    return !models_.empty() || firmware_delay_ || firmware_reverb_;
 }
 
-void AuxEffects::Process(int bus, AuxFrame& frame)
+void AuxEffects::Process(const ntdlib::ctr_fx::Channels& channels, std::size_t samples)
 {
-    const ntdlib::ctr_fx::Channels channels = {&frame[0], &frame[kAuxChannelSamples], &frame[2 * kAuxChannelSamples],
-                                               &frame[3 * kAuxChannelSamples]};
-    for (Model& model : models_[static_cast<std::size_t>(bus)])
+    for (Model& model : models_)
     {
-        std::visit([&channels](auto& effect) { effect.Process(channels, kAuxChannelSamples); }, model);
+        std::visit([&channels, samples](auto& effect) { effect.Process(channels, samples); }, model);
     }
 }
 

@@ -11,195 +11,13 @@
 #include <array>
 #include <bit>
 #include <cfenv>
-#include <cstddef>
 #include <cstdint>
-#include <functional>
-#include <memory>
 #include <string>
-#include <vector>
 
-#include "xsflib/bytes.h"
+#include "arm/memory.h"
 
 namespace threesf::arm
 {
-
-// Flat 32-bit address space backed by host memory in 4 KiB pages.
-class Memory
-{
-public:
-    // Snapshot of the mapping: runs of pages mapped to consecutive host memory. The kernel and system own the host
-    // memory and keep its addresses stable. The snapshot can only be restored to this address space.
-    struct Snapshot
-    {
-        struct Run
-        {
-            uint32_t first_page;
-            uint32_t pages;
-            uint8_t* host;
-        };
-
-        std::shared_ptr<const std::vector<Run>> runs; // shared with the previous snapshot while the mapping is the same
-        uint64_t generation = 0;
-        bool fault = false;
-        uint32_t fault_address = 0;
-        bool fault_write = false;
-    };
-
-    static constexpr uint32_t kPageBits = 12;
-    static constexpr uint32_t kPageSize = 1u << kPageBits;
-    static constexpr uint32_t kPageMask = kPageSize - 1;
-    static constexpr uint32_t kPageCount = 1u << (32 - kPageBits);
-
-    Memory();
-
-    // A size rounded up to a whole number of pages, in u32 arithmetic. A size above 0xFFFFF000 rounds to 0.
-    static constexpr uint32_t RoundUpToPage(uint32_t size)
-    {
-        return (size + kPageMask) & ~kPageMask;
-    }
-
-    // Map maps [vaddr, vaddr + size) to the host memory at `host`. Unmap removes the mapping of that range. size must
-    // be page aligned. An address inside a page stands for the start of that page.
-    void Map(uint32_t vaddr, uint8_t* host, uint32_t size);
-    void Unmap(uint32_t vaddr, uint32_t size);
-
-    // Calls `on_write` after CPU or kernel writes (WriteBlock, ZeroBlock) to [host, host + size), through any current
-    // or future virtual mapping. host and size must be page aligned. Supports one watch at a time, with no overhead for
-    // writes to other pages.
-    void WatchWrites(const uint8_t* host, uint32_t size, std::function<void()> on_write);
-
-    // Host pointer for a virtual address, or nullptr if unmapped.
-    uint8_t* HostPtr(uint32_t vaddr) const
-    {
-        uint8_t* p = pages_[vaddr >> kPageBits];
-        return p ? p + (vaddr & kPageMask) : nullptr;
-    }
-
-    uint8_t Read8(uint32_t a)
-    {
-        if (uint8_t* p = pages_[a >> kPageBits])
-        {
-            return p[a & kPageMask];
-        }
-
-        return static_cast<uint8_t>(Fault(a, false));
-    }
-
-    uint16_t Read16(uint32_t a)
-    {
-        uint8_t* p = pages_[a >> kPageBits];
-        if (p && (a & kPageMask) <= kPageSize - 2)
-        {
-            return xsflib::LoadLe16(p + (a & kPageMask));
-        }
-
-        return static_cast<uint16_t>(Read8(a) | (Read8(a + 1) << 8));
-    }
-
-    uint32_t Read32(uint32_t a)
-    {
-        uint8_t* p = pages_[a >> kPageBits];
-        if (p && (a & kPageMask) <= kPageSize - 4)
-        {
-            return xsflib::LoadLe32(p + (a & kPageMask));
-        }
-
-        return Read16(a) | (static_cast<uint32_t>(Read16(a + 2)) << 16);
-    }
-
-    void Write8(uint32_t a, uint8_t v)
-    {
-        if (uint8_t* p = write_pages_[a >> kPageBits])
-        {
-            p[a & kPageMask] = v;
-        }
-        else
-        {
-            WriteSlow8(a, v);
-        }
-    }
-
-    void Write16(uint32_t a, uint16_t v)
-    {
-        uint8_t* p = write_pages_[a >> kPageBits];
-        if (p && (a & kPageMask) <= kPageSize - 2)
-        {
-            xsflib::StoreLe16(p + (a & kPageMask), v);
-            return;
-        }
-
-        Write8(a, static_cast<uint8_t>(v));
-        Write8(a + 1, static_cast<uint8_t>(v >> 8));
-    }
-
-    void Write32(uint32_t a, uint32_t v)
-    {
-        uint8_t* p = write_pages_[a >> kPageBits];
-        if (p && (a & kPageMask) <= kPageSize - 4)
-        {
-            xsflib::StoreLe32(p + (a & kPageMask), v);
-            return;
-        }
-
-        Write16(a, static_cast<uint16_t>(v));
-        Write16(a + 2, static_cast<uint16_t>(v >> 16));
-    }
-
-    // Copy between host buffers and virtual memory, for the kernel HLE. They stop at the first unmapped page, without
-    // setting the fault flag.
-    void ReadBlock(uint32_t vaddr, void* dst, std::size_t size) const;
-    void WriteBlock(uint32_t vaddr, const void* src, std::size_t size);
-    void ZeroBlock(uint32_t vaddr, std::size_t size);
-    std::string ReadCString(uint32_t vaddr, std::size_t max) const;
-
-    // The bytes of [vaddr, vaddr + size) that a block copy reaches: those before the first unmapped page.
-    std::size_t MappedLength(uint32_t vaddr, std::size_t size) const;
-
-    // Takes a snapshot, reusing `previous`'s runs if nothing has been mapped or unmapped since.
-    Snapshot Save(const Snapshot* previous) const;
-
-    void Restore(const Snapshot& snapshot);
-
-    // Set by the first access to unmapped memory. Cpu::Run stops with StopReason::kFault, and the caller clears the
-    // flag once it has handled the fault.
-    bool fault_ = false;
-    uint32_t fault_address_ = 0;
-    bool fault_write_ = false;
-
-private:
-    // A write to a watched page (see WatchWrites) or an unmapped one.
-    void WriteSlow8(uint32_t a, uint8_t v);
-
-    bool Watched(const uint8_t* host) const
-    {
-        return host >= watch_start_ && host < watch_end_;
-    }
-
-    uint32_t Fault(uint32_t a, bool write)
-    {
-        if (!fault_)
-        {
-            fault_ = true;
-            fault_address_ = a;
-            fault_write_ = write;
-        }
-
-        return 0;
-    }
-
-    std::unique_ptr<uint8_t*[]> pages_;
-
-    // The same pages for writing, except that watched pages are missing, so that their writes take the slow path.
-    std::unique_ptr<uint8_t*[]> write_pages_;
-
-    const uint8_t* watch_start_ = nullptr;
-    const uint8_t* watch_end_ = nullptr;
-    std::function<void()> on_watched_write_;
-
-    // Mapping generation. Map and Unmap assign a new number, so snapshots with the same number share the same mapping.
-    uint64_t generation_ = 0;
-    uint64_t next_generation_ = 1;
-};
 
 // Register state of one thread.
 struct CpuState
@@ -276,48 +94,89 @@ public:
         exclusive_addr_ = snapshot.exclusive_addr;
     }
 
-    CpuState state_;
-    uint32_t svc_number_ = 0;
-    uint32_t stop_pc_ = 0;     // address of the instruction that stopped execution
-    uint32_t stop_opcode_ = 0; // the instruction, when Run stopped with kUndefined
-    uint64_t executed_ = 0;    // instructions executed since construction
+    // The registers of the thread that runs.
+    CpuState& State()
+    {
+        return state_;
+    }
+
+    // The number of the SVC that stopped Run with kSvc.
+    uint32_t SvcNumber() const
+    {
+        return svc_number_;
+    }
+
+    uint32_t StopPc() const
+    {
+        return stop_pc_;
+    }
+
+    uint32_t StopOpcode() const
+    {
+        return stop_opcode_;
+    }
+
+    uint64_t Executed() const
+    {
+        return executed_;
+    }
 
 private:
+    // The value of host_rmode_ while the host rounding mode follows no FPSCR.RMode.
+    static constexpr uint32_t kNoHostRMode = 0xffffffff;
+
     // Each returns false to stop execution, with reason_ set.
     bool StepArm(uint32_t op);
     bool StepThumb(uint32_t op);
     bool ArmUnconditional(uint32_t op);
     bool ArmDataProcessing(uint32_t op);
     bool ArmMisc(uint32_t op);
+    bool ArmSignedMultiply16(uint32_t op);
     bool ArmMultiply(uint32_t op);
     bool ArmSwapExclusive(uint32_t op);
+    bool ArmSwap(uint32_t op);
     bool ArmExtraLoadStore(uint32_t op);
     bool ArmLoadStore(uint32_t op);
     bool ArmBlockTransfer(uint32_t op);
     bool ArmCoprocessor(uint32_t op);
     bool ArmMsrImmediate(uint32_t op);
+    bool ThumbShiftAddSubtract(uint32_t op);
+    bool ThumbImmediate(uint32_t op);
+    bool ThumbDataProcessing(uint32_t op);
+    bool ThumbHighRegister(uint32_t op);
+    bool ThumbLoadStore(uint32_t op);
+    bool ThumbAddress(uint32_t op);
+    bool ThumbMisc(uint32_t op);
+    bool ThumbBlockTransfer(uint32_t op);
+    bool ThumbBranch(uint32_t op);
     bool Media(uint32_t op);
     bool Vfp(uint32_t op);
+    bool VfpExtension(uint32_t op, bool dp);
+    bool VfpUnary(uint32_t op, bool dp);   // FCPY, FABS, FNEG and FSQRT
+    bool VfpCompare(uint32_t op, bool dp); // FCMP, FCMPE, FCMPZ and FCMPEZ
+    bool VfpConvert(uint32_t op, bool dp); // FCVTSD, FCVTDS, FUITO, FSITO, FTOUI and FTOSI, with or without Z
 
-    // The groups of the media instructions. `r` holds the registers, with PC as the instruction's address + 8.
-    bool MediaParallelAddSubtract(uint32_t op, const std::array<uint32_t, 16>& r);
-    bool MediaPackSaturateReverse(uint32_t op, const std::array<uint32_t, 16>& r); // also extend and select
-    bool MediaSignedMultiply(uint32_t op, const std::array<uint32_t, 16>& r);      // dual 16-bit and high-word ones
-    bool MediaSumOfAbsoluteDifferences(uint32_t op, const std::array<uint32_t, 16>& r);
+    // The groups of the media instructions. Reg gives the registers, with PC as the instruction's address + 8.
+    bool MediaParallelAddSubtract(uint32_t op);
+    bool MediaPackSaturateReverse(uint32_t op); // also extend and select
+    bool MediaSignedMultiply(uint32_t op);      // dual 16-bit and high-word ones
+    bool MediaSumOfAbsoluteDifferences(uint32_t op);
 
     // Instructions that MediaPackSaturateReverse decodes and runs: PKHBT and PKHTB, SSAT and USAT, SSAT16 and USAT16,
     // and the extends.
-    void MediaPack(uint32_t op, const std::array<uint32_t, 16>& r);
-    void MediaSaturate(uint32_t op, const std::array<uint32_t, 16>& r);
-    void MediaSaturate16(uint32_t op, const std::array<uint32_t, 16>& r);
-    void MediaExtend(uint32_t op, const std::array<uint32_t, 16>& r);
+    void MediaPack(uint32_t op);
+    void MediaSaturate(uint32_t op);
+    void MediaSaturate16(uint32_t op);
+    void MediaExtend(uint32_t op);
 
     // The VFP's arithmetic instructions with three operands. T is float for S registers and double for D registers.
     template <typename T>
     bool VfpArithmetic(uint32_t op, uint32_t opc, uint32_t d, uint32_t n, uint32_t m);
 
     bool VfpLoadStore(uint32_t op);
+    bool VfpLoadStoreMultiple(uint32_t op);
     bool VfpTransfer(uint32_t op);
+    bool VfpSystemRegister(uint32_t op);
     bool VfpTransfer64(uint32_t op);
     bool Cp15(uint32_t op);
     bool Undefined(uint32_t op);
@@ -362,6 +221,7 @@ private:
 
     static uint32_t ShiftImm(uint32_t value, uint32_t type, uint32_t amount, bool& carry);
     static uint32_t ShiftReg(uint32_t value, uint32_t type, uint32_t amount, bool& carry);
+    void ArmOperands(uint32_t op, uint32_t& a, uint32_t& b, bool& carry) const;
 
     // SatSigned and SatUnsigned: `value` clamped to a signed or an unsigned integer of `bits` bits. Each sets
     // `saturated` when it clamps.
@@ -510,12 +370,17 @@ private:
     void FpCompare(double a, double b);
     void UpdateHostFpu();
 
+    CpuState state_;
+    uint32_t svc_number_ = 0;
+    uint32_t stop_pc_ = 0;     // address of the instruction that stopped execution
+    uint32_t stop_opcode_ = 0; // the instruction, when Run stopped with kUndefined
+    uint64_t executed_ = 0;    // instructions executed since construction
     Memory& mem_;
     uint32_t cur_pc_ = 0;
     StopReason reason_ = StopReason::kNone;
     bool exclusive_valid_ = false;
     uint32_t exclusive_addr_ = 0;
-    uint32_t host_rmode_ = 0xffffffff; // the FPSCR.RMode bits the host rounds by during Run, or none
+    uint32_t host_rmode_ = kNoHostRMode; // the FPSCR.RMode bits the host rounds by during Run, or none
 };
 
 // Saves the host's floating-point environment and restores it when destroyed. In between, Apply sets the host rounding

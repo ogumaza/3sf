@@ -8,21 +8,25 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
 #include <map>
 #include <optional>
 #include <string>
 #include <vector>
 
+#include "ntdlib/ctr/snd/sar_options.h"
 #include "ntdlib/sar/formats.h"
 #include "ntdlib/testing/sar_files.h"
 #include "xsflib/bytes.h"
+#include "xsflib/files.h"
 #include "xsflib/testing/check.h"
 #include "xsflib/testing/sets.h"
+#include "xsflib/testing/temp_folder.h"
 
-#include "common/sar_options.h"
 #include "nnsnd/aux_effects.h"
 #include "rip/effects.h"
 #include "rip/game.h"
+#include "rip/length.h"
 #include "rip/music.h"
 #include "threesf/format.h"
 
@@ -154,6 +158,37 @@ static void TestGameFirmware()
     XSFLIB_CHECK(!from_neither);
 }
 
+// A loose archive's group file is found past a folder that the search can't read (R-479). The search walks two folders
+// in the system's order. The first can't be read, and the second holds the group file. Windows still lists a folder
+// whose permissions are none, so there the search reads both.
+static void TestGroupPastUnreadableFolder()
+{
+    const xsflib::testing::TempFolder folder("threesf_rip_test");
+    std::filesystem::create_directories(folder.Path() / "a");
+    std::filesystem::create_directories(folder.Path() / "b");
+    std::vector<std::filesystem::path> order;
+    for (const std::filesystem::directory_entry& entry : std::filesystem::directory_iterator(folder.Path()))
+    {
+        order.push_back(entry.path().filename());
+    }
+
+    XSFLIB_CHECK(order.size() == 2);
+    if (order.size() != 2)
+    {
+        return;
+    }
+
+    const std::vector<uint8_t> data = {1, 2, 3};
+    XSFLIB_CHECK(!xsflib::WriteFile(folder.Path() / order[1] / "GROUP_A.bcgrp", data));
+    std::filesystem::permissions(folder.Path() / order[0], std::filesystem::perms::none);
+
+    const std::optional<rip::FileChunk> group = rip::FindGroupIn(folder.Path(), "GROUP_A");
+    // The folder's removal requires the permissions back.
+    std::filesystem::permissions(folder.Path() / order[0], std::filesystem::perms::owner_all);
+
+    XSFLIB_CHECK(group && group->path == xsflib::Utf8(order[1]) + "/GROUP_A.bcgrp" && group->data == data);
+}
+
 // --bgm's labels: a word that starts with BGM, a jingle or a fanfare, with or without a number, or SEQ_M_ at the start,
 // in any case. Other words, and the same letters inside another word, don't count.
 static void TestMusicLabels()
@@ -232,7 +267,7 @@ static void TestPieces()
         "BGM_D_DPCM", "BGM_D_NOISE", "BGM_D_P1",   "BGM_D_P2",   "BGM_D_TRI",   "_DPCM",     "_NOISE",
         "_P1",        "_P2",         "_TRI",       "BGM_A_DPCM",
     };
-    const auto archive = ntdlib::sar::SoundArchive::Load(ArchiveOf(kLabels, {"BGM_D_TRI"}), kSarOptions);
+    const auto archive = ntdlib::sar::SoundArchive::Load(ArchiveOf(kLabels, {"BGM_D_TRI"}), ntdlib::ctr::kSarOptions);
 
     const std::vector<rip::Piece> pieces = rip::FindPieces(archive);
 
@@ -354,6 +389,7 @@ int main()
     TestFirmwareCandidates();
     TestFirmwareInCode();
     TestGameFirmware();
+    TestGroupPastUnreadableFolder();
     TestMusicLabels();
     TestPieces();
     TestTimingOfPiece();

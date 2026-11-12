@@ -14,9 +14,9 @@
 // The files are rendered one after another, and one that fails doesn't stop the rest. A .3sflib among them is skipped,
 // since it's a library that the others load. Dropping files on the program gives it the files as inputs.
 
+#include "ntdlib/ctr/dsp/quiet_stdout.h"
 #include "xsflib/cli/play.h"
 
-#include "common/quiet_stdout.h"
 #include "threesf/player.h"
 
 using namespace threesf;
@@ -45,7 +45,7 @@ int main(int argc, char** argv)
     tool.requires_a_value = "needs a value";
     tool.describe_set = xsflib::cli::DescribeLoadedChunks<Player>;
     // Teakra prints to stdout. The renders' messages go to stderr.
-    tool.before_inputs = SilenceStdout;
+    tool.before_inputs = ntdlib::ctr::SilenceStdout;
 
     return xsflib::cli::RunPlayTool(tool, argc, argv);
 }

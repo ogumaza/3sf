@@ -22,8 +22,12 @@ namespace threesf::arm
 namespace
 {
 
+constexpr uint32_t kFpscrNzcvShift = 28;         // the flags N, Z, C and V, in bits 31 to 28
+constexpr uint32_t kFpscrBelowNzcv = 0x0fffffff; // every bit below the flags
 constexpr uint32_t kFpscrDn = 1u << 25;
 constexpr uint32_t kFpscrFz = 1u << 24;
+constexpr uint32_t kFpscrRModeShift = 22;
+constexpr uint32_t kFpscrRMode = 3u << kFpscrRModeShift;
 constexpr uint32_t kFpscrVector = 0x00370000; // LEN (18:16) and STRIDE (21:20)
 constexpr uint32_t kFpsid = 0x410120b4;       // VFP11 (VFPv2)
 constexpr uint32_t kFpexcEn = 0x40000000;
@@ -31,8 +35,21 @@ constexpr uint32_t kFpexcEn = 0x40000000;
 // NZCV, DN, FZ, RMode, STRIDE, LEN, the trap enables and the cumulative flags.
 constexpr uint32_t kFpscrWritable = 0xf3f79f9f;
 
-// The register fields of an instruction. A single-precision register's number is Vx:X, and a double-precision one's
-// is X:Vx. VFPv2 has D0 to D15, so a double-precision number of 16 or more is undefined.
+// The sign, exponent and fraction fields of IEEE single-precision and double-precision values.
+constexpr uint32_t kFloatSign = 0x80000000;
+constexpr uint32_t kFloatExponent = 0x7f800000;
+constexpr uint32_t kFloatFraction = 0x007fffff;
+constexpr uint64_t kDoubleSign = 0x8000000000000000;
+constexpr uint64_t kDoubleExponent = 0x7ff0000000000000;
+constexpr uint64_t kDoubleFraction = 0x000fffffffffffff;
+
+// The default NaN of each precision: positive and quiet, with no other fraction bit. With the FPSCR's DN bit set, every
+// NaN result becomes it.
+constexpr uint32_t kFloatDefaultNan = 0x7fc00000;
+constexpr uint64_t kDoubleDefaultNan = 0x7ff8000000000000;
+
+// The register fields of an instruction. A single-precision register's number is Vx:X, and a double-precision one's is
+// X:Vx. VFPv2 has D0 to D15, so a double-precision number of 16 or more is undefined.
 constexpr uint32_t Sd(uint32_t op)
 {
     return ((op >> 11) & 0x1e) | ((op >> 22) & 1);
@@ -112,12 +129,12 @@ HostFpuMode::~HostFpuMode()
 void HostFpuMode::Apply(uint32_t fpscr)
 {
     static constexpr int kModes[4] = {FE_TONEAREST, FE_UPWARD, FE_DOWNWARD, FE_TOWARDZERO};
-    std::fesetround(kModes[(fpscr >> 22) & 3]);
+    std::fesetround(kModes[(fpscr & kFpscrRMode) >> kFpscrRModeShift]);
 }
 
 void Cpu::UpdateHostFpu()
 {
-    const uint32_t rmode = state_.fpscr & 0x00c00000;
+    const uint32_t rmode = state_.fpscr & kFpscrRMode;
     if (rmode != host_rmode_)
     {
         HostFpuMode::Apply(state_.fpscr);
@@ -127,9 +144,9 @@ void Cpu::UpdateHostFpu()
 
 float Cpu::FlushIn(float f) const
 {
-    if ((state_.fpscr & kFpscrFz) && (std::bit_cast<uint32_t>(f) & 0x7f800000) == 0)
+    if ((state_.fpscr & kFpscrFz) && (std::bit_cast<uint32_t>(f) & kFloatExponent) == 0)
     {
-        return std::bit_cast<float>(std::bit_cast<uint32_t>(f) & 0x80000000);
+        return std::bit_cast<float>(std::bit_cast<uint32_t>(f) & kFloatSign);
     }
 
     return f;
@@ -137,9 +154,9 @@ float Cpu::FlushIn(float f) const
 
 double Cpu::FlushIn(double d) const
 {
-    if ((state_.fpscr & kFpscrFz) && (std::bit_cast<uint64_t>(d) & 0x7ff0000000000000ull) == 0)
+    if ((state_.fpscr & kFpscrFz) && (std::bit_cast<uint64_t>(d) & kDoubleExponent) == 0)
     {
-        return std::bit_cast<double>(std::bit_cast<uint64_t>(d) & 0x8000000000000000ull);
+        return std::bit_cast<double>(std::bit_cast<uint64_t>(d) & kDoubleSign);
     }
 
     return d;
@@ -148,16 +165,16 @@ double Cpu::FlushIn(double d) const
 void Cpu::SetS(uint32_t i, float f)
 {
     uint32_t bits = std::bit_cast<uint32_t>(f);
-    if ((bits & 0x7f800000) == 0x7f800000 && (bits & 0x007fffff) != 0)
+    if ((bits & kFloatExponent) == kFloatExponent && (bits & kFloatFraction) != 0)
     {
         if (state_.fpscr & kFpscrDn)
         {
-            bits = 0x7fc00000;
+            bits = kFloatDefaultNan;
         }
     }
-    else if ((state_.fpscr & kFpscrFz) && (bits & 0x7f800000) == 0)
+    else if ((state_.fpscr & kFpscrFz) && (bits & kFloatExponent) == 0)
     {
-        bits &= 0x80000000;
+        bits &= kFloatSign;
     }
 
     state_.vfp[i] = bits;
@@ -166,16 +183,16 @@ void Cpu::SetS(uint32_t i, float f)
 void Cpu::SetD(uint32_t i, double d)
 {
     uint64_t bits = std::bit_cast<uint64_t>(d);
-    if ((bits & 0x7ff0000000000000ull) == 0x7ff0000000000000ull && (bits & 0x000fffffffffffffull) != 0)
+    if ((bits & kDoubleExponent) == kDoubleExponent && (bits & kDoubleFraction) != 0)
     {
         if (state_.fpscr & kFpscrDn)
         {
-            bits = 0x7ff8000000000000ull;
+            bits = kDoubleDefaultNan;
         }
     }
-    else if ((state_.fpscr & kFpscrFz) && (bits & 0x7ff0000000000000ull) == 0)
+    else if ((state_.fpscr & kFpscrFz) && (bits & kDoubleExponent) == 0)
     {
-        bits &= 0x8000000000000000ull;
+        bits &= kDoubleSign;
     }
 
     SetDBits(i, bits);
@@ -225,7 +242,7 @@ void Cpu::FpCompare(double a, double b)
         nzcv = 0x2;
     }
 
-    state_.fpscr = (state_.fpscr & 0x0fffffff) | (nzcv << 28);
+    state_.fpscr = (state_.fpscr & kFpscrBelowNzcv) | (nzcv << kFpscrNzcvShift);
 }
 
 // opc is bits 23, 21, 20 and 6 of the instruction.
@@ -265,11 +282,11 @@ bool Cpu::VfpArithmetic(uint32_t op, uint32_t opc, uint32_t d, uint32_t n, uint3
         SetFp(d, a * b);
         if constexpr (std::is_same_v<T, float>)
         {
-            state_.vfp[d] ^= 0x80000000;
+            state_.vfp[d] ^= kFloatSign;
         }
         else
         {
-            SetDBits(d, DBits(d) ^ 0x8000000000000000ull);
+            SetDBits(d, DBits(d) ^ kDoubleSign);
         }
         break;
 
@@ -301,99 +318,124 @@ bool Cpu::Vfp(uint32_t op)
 
     const bool dp = (op >> 8) & 1;
     const uint32_t opc = ((op >> 20) & 8) | ((op >> 19) & 4) | ((op >> 19) & 2) | ((op >> 6) & 1);
+    if (opc == 15)
+    {
+        return VfpExtension(op, dp);
+    }
 
-    const uint32_t sd = Sd(op);
-    const uint32_t sn = Sn(op);
-    const uint32_t sm = Sm(op);
+    if (!dp)
+    {
+        return VfpArithmetic<float>(op, opc, Sd(op), Sn(op), Sm(op));
+    }
+
     const uint32_t dd = Dd(op);
     const uint32_t dn = Dn(op);
     const uint32_t dm = Dm(op);
-    if (opc != 15)
+    if (dd >= 16 || dn >= 16 || dm >= 16)
     {
-        if (!dp)
-        {
-            return VfpArithmetic<float>(op, opc, sd, sn, sm);
-        }
-
-        if (dd >= 16 || dn >= 16 || dm >= 16)
-        {
-            return Undefined(op);
-        }
-
-        return VfpArithmetic<double>(op, opc, dd, dn, dm);
+        return Undefined(op);
     }
 
-    // Extension instructions, selected by Vn:N.
-    switch (sn)
+    return VfpArithmetic<double>(op, opc, dd, dn, dm);
+}
+
+// Extension instructions, selected by Vn:N.
+bool Cpu::VfpExtension(uint32_t op, bool dp)
+{
+    switch (Sn(op))
+    {
+    case 0x00: // FCPY
+    case 0x01: // FABS
+    case 0x02: // FNEG
+    case 0x03: // FSQRT
+        return VfpUnary(op, dp);
+    case 0x08: // FCMP
+    case 0x09: // FCMPE
+    case 0x0a: // FCMPZ
+    case 0x0b: // FCMPEZ
+        return VfpCompare(op, dp);
+    case 0x0f: // FCVTSD, FCVTDS
+    case 0x10: // FUITO
+    case 0x11: // FSITO
+    case 0x18: // FTOUI
+    case 0x19: // FTOUIZ
+    case 0x1a: // FTOSI
+    case 0x1b: // FTOSIZ
+        return VfpConvert(op, dp);
+    default:
+        return Undefined(op);
+    }
+}
+
+bool Cpu::VfpUnary(uint32_t op, bool dp)
+{
+    const uint32_t sd = Sd(op);
+    const uint32_t sm = Sm(op);
+    const uint32_t dd = Dd(op);
+    const uint32_t dm = Dm(op);
+    if (dp && (dd >= 16 || dm >= 16))
+    {
+        return Undefined(op);
+    }
+
+    switch (Sn(op))
     {
     case 0x00: // FCPY
         if (dp)
         {
-            if (dd >= 16 || dm >= 16)
-            {
-                return Undefined(op);
-            }
-
             SetDBits(dd, DBits(dm));
         }
         else
         {
             state_.vfp[sd] = state_.vfp[sm];
         }
-
-        return true;
+        break;
 
     case 0x01: // FABS
         if (dp)
         {
-            if (dd >= 16 || dm >= 16)
-            {
-                return Undefined(op);
-            }
-
-            SetDBits(dd, DBits(dm) & ~0x8000000000000000ull);
+            SetDBits(dd, DBits(dm) & ~kDoubleSign);
         }
         else
         {
-            state_.vfp[sd] = state_.vfp[sm] & 0x7fffffff;
+            state_.vfp[sd] = state_.vfp[sm] & ~kFloatSign;
         }
-
-        return true;
+        break;
 
     case 0x02: // FNEG
         if (dp)
         {
-            if (dd >= 16 || dm >= 16)
-            {
-                return Undefined(op);
-            }
-
-            SetDBits(dd, DBits(dm) ^ 0x8000000000000000ull);
+            SetDBits(dd, DBits(dm) ^ kDoubleSign);
         }
         else
         {
-            state_.vfp[sd] = state_.vfp[sm] ^ 0x80000000;
+            state_.vfp[sd] = state_.vfp[sm] ^ kFloatSign;
         }
+        break;
 
-        return true;
-
-    case 0x03: // FSQRT
+    default: // FSQRT
         if (dp)
         {
-            if (dd >= 16 || dm >= 16)
-            {
-                return Undefined(op);
-            }
-
             SetD(dd, std::sqrt(FlushIn(D(dm))));
         }
         else
         {
             SetS(sd, std::sqrt(FlushIn(S(sm))));
         }
+        break;
+    }
 
-        return true;
+    return true;
+}
 
+bool Cpu::VfpCompare(uint32_t op, bool dp)
+{
+    const uint32_t sd = Sd(op);
+    const uint32_t sm = Sm(op);
+    const uint32_t dd = Dd(op);
+    const uint32_t dm = Dm(op);
+    switch (Sn(op))
+    {
     case 0x08: // FCMP
     case 0x09: // FCMPE
         if (dp)
@@ -412,8 +454,7 @@ bool Cpu::Vfp(uint32_t op)
 
         return true;
 
-    case 0x0a: // FCMPZ
-    case 0x0b: // FCMPEZ
+    default: // FCMPZ, FCMPEZ
         if (dp)
         {
             if (dd >= 16)
@@ -429,7 +470,18 @@ bool Cpu::Vfp(uint32_t op)
         }
 
         return true;
+    }
+}
 
+bool Cpu::VfpConvert(uint32_t op, bool dp)
+{
+    const uint32_t sd = Sd(op);
+    const uint32_t sn = Sn(op);
+    const uint32_t sm = Sm(op);
+    const uint32_t dd = Dd(op);
+    const uint32_t dm = Dm(op);
+    switch (sn)
+    {
     case 0x0f:
         if (dp) // FCVTSD: single <- double
         {
@@ -473,10 +525,7 @@ bool Cpu::Vfp(uint32_t op)
             return true;
         }
 
-    case 0x18: // FTOUI
-    case 0x19: // FTOUIZ
-    case 0x1a: // FTOSI
-    case 0x1b: // FTOSIZ
+    default: // FTOUI, FTOUIZ, FTOSI, FTOSIZ
         {
             double x;
             if (dp)
@@ -496,9 +545,6 @@ bool Cpu::Vfp(uint32_t op)
             state_.vfp[sd] = ToInt(x, (sn & 2) != 0, (sn & 1) != 0);
             return true;
         }
-
-    default:
-        return Undefined(op);
     }
 }
 
@@ -551,12 +597,25 @@ bool Cpu::VfpLoadStore(uint32_t op)
         return true;
     }
 
+    return VfpLoadStoreMultiple(op);
+}
+
+// FLDM/FSTM, increment after or decrement before (FLDMX/FSTMX when the count is odd).
+bool Cpu::VfpLoadStoreMultiple(uint32_t op)
+{
+    const bool p = (op >> 24) & 1;
+    const bool u = (op >> 23) & 1;
+    const bool w = (op >> 21) & 1;
+    const bool l = (op >> 20) & 1;
+    const bool dp = (op >> 8) & 1;
+    const uint32_t rn = (op >> 16) & 0xf;
+    const uint32_t imm8 = op & 0xff;
+    const uint32_t d = dp ? Dd(op) : Sd(op);
     if (p == u)
     {
         return Undefined(op);
     }
 
-    // FLDM/FSTM, increment after or decrement before (FLDMX/FSTMX when the count is odd).
     const uint32_t base = Reg(rn);
     const uint32_t words = imm8;
     uint32_t addr = u ? base : base - words * 4;
@@ -616,58 +675,7 @@ bool Cpu::VfpTransfer(uint32_t op)
 
     if (cp == 10 && opc1 == 7) // FMXR / FMRX / FMSTAT
     {
-        const uint32_t reg = (op >> 16) & 0xf;
-        if (l)
-        {
-            uint32_t value;
-            switch (reg)
-            {
-            case 0:
-                value = kFpsid;
-                break;
-            case 1:
-                value = state_.fpscr;
-                break;
-            case 8:
-                value = kFpexcEn;
-                break;
-            default:
-                return Undefined(op);
-            }
-
-            if (rt == 15)
-            {
-                if (reg != 1)
-                {
-                    return Undefined(op);
-                }
-
-                state_.n = (value >> 31) & 1;
-                state_.z = (value >> 30) & 1;
-                state_.c = (value >> 29) & 1;
-                state_.v = (value >> 28) & 1;
-            }
-            else
-            {
-                state_.r[rt] = value;
-            }
-
-            return true;
-        }
-
-        if (reg == 1)
-        {
-            state_.fpscr = state_.r[rt] & kFpscrWritable;
-            UpdateHostFpu();
-            return true;
-        }
-
-        if (reg == 8)
-        {
-            return true; // FPEXC: the VFP stays enabled
-        }
-
-        return Undefined(op);
+        return VfpSystemRegister(op);
     }
 
     if (cp == 11 && (opc1 & 6) == 0) // FMDLR / FMDHR / FMRDL / FMRDH
@@ -689,6 +697,66 @@ bool Cpu::VfpTransfer(uint32_t op)
         }
 
         return true;
+    }
+
+    return Undefined(op);
+}
+
+// FMRX reads FPSID, FPSCR or FPEXC into an ARM register. FMXR writes FPSCR or FPEXC. FMSTAT, an FMRX of FPSCR to PC,
+// copies the FPSCR flags to the CPSR flags.
+bool Cpu::VfpSystemRegister(uint32_t op)
+{
+    const bool l = (op >> 20) & 1;
+    const uint32_t rt = (op >> 12) & 0xf;
+    const uint32_t reg = (op >> 16) & 0xf;
+    if (l)
+    {
+        uint32_t value;
+        switch (reg)
+        {
+        case 0:
+            value = kFpsid;
+            break;
+        case 1:
+            value = state_.fpscr;
+            break;
+        case 8:
+            value = kFpexcEn;
+            break;
+        default:
+            return Undefined(op);
+        }
+
+        if (rt == 15)
+        {
+            if (reg != 1)
+            {
+                return Undefined(op);
+            }
+
+            state_.n = (value >> 31) & 1;
+            state_.z = (value >> 30) & 1;
+            state_.c = (value >> 29) & 1;
+            state_.v = (value >> 28) & 1;
+        }
+        else
+        {
+            state_.r[rt] = value;
+        }
+
+        return true;
+    }
+
+    if (reg == 1)
+    {
+        state_.fpscr = state_.r[rt] & kFpscrWritable;
+        UpdateHostFpu();
+        return true;
+    }
+
+    if (reg == 8)
+    {
+        return true; // FPEXC: the VFP stays enabled
     }
 
     return Undefined(op);

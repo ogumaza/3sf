@@ -5,11 +5,11 @@
 | Component | Licence | Use in 3SF |
 |---|---|---|
 | xsflib, Copyright (c) 2026 the xsflib authors | MIT (`externals/xsflib/LICENSE`) | In `externals/xsflib`, a submodule, compiled into every 3SF program: the PSF container, playback and the tools' frames. |
-| ntdlib, Copyright (c) 2026 the ntdlib authors | MIT (`externals/ntdlib/LICENSE`) | In `externals/ntdlib`, a submodule, compiled into every 3SF program: the readers of the 3DS's sound archives, the tables of NintendoWare's sound libraries, and a model of their sequence player. |
+| ntdlib, Copyright (c) 2026 the ntdlib authors | MIT (`externals/ntdlib/LICENSE`) | In `externals/ntdlib`, a submodule, compiled into every 3SF program: the readers of the 3DS's sound archives, the tables of NintendoWare's sound libraries, a model of their sequence player, archive mode's models of nw::snd and nn::snd, and the DSP glue. |
 | seqlib, Copyright (c) 2026 the seqlib authors | MIT (`externals/xsflib/externals/seqlib/LICENSE`) | In `externals/xsflib/externals/seqlib`, a submodule of xsflib. Only the tests use it: their checks come from it, through `xsflib::testing`. |
-| [Teakra](https://github.com/wwylele/teakra), Copyright (c) 2018 Weiyi Wang | MIT (`externals/teakra/LICENSE`) | In `externals/teakra`, compiled into every 3SF program: upstream commit 3d697a1 with 3SF's changes, which are 3SF's work and offered under Teakra's MIT licence. |
-| [Catch2](https://github.com/catchorg/Catch2) v2.13.8, Copyright (c) 2022 Two Blue Cubes Ltd | BSL-1.0 | Teakra's unit tests use it (`externals/teakra/externals/catch`). 3SF doesn't build these tests or include Catch2 in its programs. |
-| [zlib](https://zlib.net), Copyright (C) 1995-2024 Jean-loup Gailly and Mark Adler | zlib | The PSF container. The system's copy is used, or v1.3.1 is downloaded when configuring. |
+| [Teakra](https://github.com/wwylele/teakra), Copyright (c) 2018 Weiyi Wang | MIT (`externals/ntdlib/externals/teakra/LICENSE`) | In `externals/ntdlib/externals/teakra`, ntdlib's copy, compiled into every 3SF program: upstream commit 3d697a1 with changes, offered under Teakra's MIT licence. |
+| [Catch2](https://github.com/catchorg/Catch2) v2.13.8, Copyright (c) 2022 Two Blue Cubes Ltd | BSL-1.0 | Teakra's unit tests use it (`externals/ntdlib/externals/teakra/externals/catch`). 3SF doesn't build these tests or include Catch2 in its programs. |
+| [zlib](https://zlib.net), Copyright (C) 1995-2026 Jean-loup Gailly and Mark Adler | zlib | The PSF container. The system's copy is used, or v1.4 is downloaded when configuring. |
 | [libFLAC](https://xiph.org/flac/), Copyright the Xiph.Org Foundation | BSD-3-Clause | FLAC output in `3sfplay`. The system's copy is used, or 1.5.0 is downloaded when configuring. |
 | [foobar2000 SDK](https://www.foobar2000.org/SDK), Copyright Peter Pawlowski | BSD-style (the SDK's `sdk-license.txt`) | Only for `plugins/foobar2000`. Not included here; it's supplied when building the plugin. |
 | [XMPlay plugin SDK](https://www.un4seen.com/xmplay.html), from Un4seen Developments | None stated | Only for `plugins/xmplay`. Not included here. It's supplied when building the plugin. CI downloads it from un4seen.com. The plugin uses only the SDK's declarations of XMPlay's interface. |
@@ -26,7 +26,7 @@ No code from the XMPlay plugin SDK goes into the XMPlay plugin.
 - [Azahar](https://github.com/azahar-emu/azahar) (GPL-2.0-or-later) was the reference for how
   the 3DS kernel, its services and the DSP interface behave. An early version used a port of its
   HLE audio mixer and DSP glue. Both have been removed. Two parts of 3SF were later rewritten in
-  clean rooms: the DSP glue (`src/dsp/teakra_dsp.*`) and the Horizon layer (`src/horizon`: the
+  clean rooms: the DSP glue (now ntdlib's `src/ctr/dsp/teakra_dsp.*`) and the Horizon layer (`src/horizon`: the
   kernel, IPC, the services, the RomFS builder and the emulated system). Each author worked from
   a description of the behaviour to keep and never saw Azahar's code or the code being replaced.
   The glue's author also used 3dbrew and Teakra's source. Three sets of facts about the console
@@ -164,7 +164,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 Copyright notice:
 
- (C) 1995-2022 Jean-loup Gailly and Mark Adler
+ (C) 1995-2026 Jean-loup Gailly and Mark Adler
 
   This software is provided 'as-is', without any express or implied
   warranty.  In no event will the authors be held liable for any damages

@@ -250,7 +250,7 @@ the game's code:
   channels' updates. The generator takes 17 steps before the sound's first frame. It then has the
   state that game mode has when the sequence first runs.
 
-3SF's implementation (`src/nwsnd`, `src/nnsnd`) was written from a study of Pokemon X's
+3SF's implementation (`ntdlib::ctr` in ntdlib) was written from a study of Pokemon X's
 `code.bin` (NintendoWare for CTR as linked into that game). Other games may use other versions of the
 library, or another number of voices, so archive-mode rips of them are close but not guaranteed
 exact. When a game has a driver profile, game mode is preferred.

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 
-// 3SF ripper (see rip.h and docs/3sf.md).
+// The rips of game mode: the game profiles, the driver's page, the library and the minis (see rip.h and docs/3sf.md).
+// firmware.cpp finds a game's DSP firmware, and archive_mode.cpp makes the rips of archive mode.
 
 #include "rip/rip.h"
 
@@ -10,27 +11,23 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
-#include <exception>
-#include <functional>
-#include <map>
 #include <optional>
 #include <string>
-#include <string_view>
 #include <utility>
 #include <vector>
 
+#include "ntdlib/ctr/snd/sar_options.h"
+#include "ntdlib/ctr_fx/effects.h"
 #include "ntdlib/rip/archive.h"
 #include "ntdlib/sar/formats.h"
-#include "xsflib/ascii.h"
 #include "xsflib/binary.h"
 #include "xsflib/bytes.h"
-#include "xsflib/psf/streaming.h"
 
-#include "common/sar_options.h"
-#include "dsp/dsp.h"
 #include "nnsnd/aux_effects.h"
 #include "rip/driver_blob.h"
+#include "rip/effects.h"
 #include "rip/game.h"
+#include "rip/length.h"
 #include "threesf/format.h"
 
 namespace threesf::rip
@@ -38,13 +35,13 @@ namespace threesf::rip
 namespace
 {
 
-constexpr uint32_t kDriverRegion = 0x1000; // one page: code, parameters and bss
 static_assert(kDriverEnd - kDriverBase <= kDriverRegion, "the driver and its bss have outgrown their page");
 static_assert(kDriverParams == DriverBlock::kAddress, "the driver's parameters aren't where the format has them");
 constexpr uint32_t kStatusAddress = DriverBlock::kAddress + DriverBlock::kStatusOffset;
 constexpr uint32_t kSoundIdAddress = DriverBlock::kAddress + DriverBlock::kSoundIdOffset;
 
-using dsp::Dsp1Image;
+// The driver's update period in nanoseconds: one 3DS video frame (268111856 / 4481136 Hz).
+constexpr uint32_t kUpdatePeriodNs = 16713680;
 
 uint32_t Get32(const std::vector<uint8_t>& v, std::size_t off)
 {
@@ -56,37 +53,8 @@ void Set32(std::vector<uint8_t>& v, std::size_t off, uint32_t x)
     xsflib::StoreLe32(v.data() + off, x);
 }
 
-// True if a DSP1 image starts at `start` in `code`, its size and segments lie inside it, and it lies inside `code`.
-bool IsDspImageAt(const std::vector<uint8_t>& code, std::size_t start)
-{
-    if (code.size() - start < Dsp1Image::kHeaderSize)
-    {
-        return false;
-    }
-
-    const uint32_t size = Get32(code, start + Dsp1Image::kSizeOffset);
-    const unsigned count = code[start + Dsp1Image::kSegmentCountOffset];
-    if (size < Dsp1Image::kHeaderSize || size > code.size() - start || count == 0 || count > Dsp1Image::kMaxSegments)
-    {
-        return false;
-    }
-
-    for (unsigned i = 0; i < count; i++)
-    {
-        const std::size_t record = start + Dsp1Image::kSegmentTableOffset + i * Dsp1Image::kSegmentRecordSize;
-        const uint64_t offset = Get32(code, record);
-        const uint64_t segment_size = Get32(code, record + Dsp1Image::kSegmentSizeOffset);
-        if (offset < Dsp1Image::kHeaderSize || offset + segment_size > size)
-        {
-            return false;
-        }
-    }
-
-    return true;
-}
-
-// The driver's page: the driver, and its parameters for `profile` in the order driver/driver.c's struct Params
-// declares them.
+// The driver's page: the driver, and its parameters for `profile` in the order driver/driver.c's struct Params declares
+// them.
 std::vector<uint8_t> DriverPage(const GameProfile& profile)
 {
     std::vector<uint8_t> driver(kDriverRegion, 0);
@@ -100,7 +68,7 @@ std::vector<uint8_t> DriverPage(const GameProfile& profile)
         kOutputStereo,          // output mode
         profile.handle,         // sound handle slot
         profile.data_heap_size, // device memory for the sound's data
-        16713680,               // update period in nanoseconds: one 3DS video frame (268111856 / 4481136 Hz)
+        kUpdatePeriodNs,        // update period in nanoseconds
         // The game's profile.
         profile.fs_init,
         profile.rom_size,
@@ -147,7 +115,7 @@ std::vector<uint8_t> LoadedArchive(const std::vector<uint8_t>& archive, const st
 {
     try
     {
-        const ntdlib::sar::SoundArchive read = ntdlib::sar::SoundArchive::Load(archive, kSarOptions);
+        const ntdlib::sar::SoundArchive read = ntdlib::sar::SoundArchive::Load(archive, ntdlib::ctr::kSarOptions);
         if (std::optional<std::vector<uint8_t>> copy = ntdlib::rip::KeepLoadedFiles(read, sounds, kReadAlignment))
         {
             return std::move(*copy);
@@ -160,6 +128,26 @@ std::vector<uint8_t> LoadedArchive(const std::vector<uint8_t>& archive, const st
 
     return archive;
 }
+
+// The words of nw::snd's FxReverb parameters for the driver (ReverbProfile::parameters), from `param`. The flag word is
+// 0. `param` must set neither flag.
+constexpr std::array<uint32_t, 9> ReverbWords(const ntdlib::ctr_fx::ReverbParam& param)
+{
+    return {
+        param.early_reflection_time,               // early reflections, in ms
+        param.fused_time,                          // the time in which the reverb falls by 60 dB, in ms
+        param.pre_delay_time,                      // pre-delay, in ms
+        std::bit_cast<uint32_t>(param.coloration), // a level
+        std::bit_cast<uint32_t>(param.damping),    // damping: the coefficient of a one-pole filter in the feedback
+        0,                                         // the filter sizes' pointer, which the driver sets
+        std::bit_cast<uint32_t>(param.early_gain), // a level
+        std::bit_cast<uint32_t>(param.fused_gain), // a level
+        0,                                         // two flags, both clear: stereo, and damping by a low-pass filter
+    };
+}
+
+static_assert(!kPokemonXFieldReverb.enable_surround && !kPokemonXFieldReverb.high_pass_damping,
+              "ReverbWords writes both flags clear");
 
 } // namespace
 
@@ -198,18 +186,8 @@ const std::vector<GameProfile>& KnownProfiles()
             {
                 0x005af0f8,
                 0x00424d5c,
-                {
-                    0,                              // early reflections: 0 ms
-                    4600,                           // the time in which the reverb falls by 60 dB: 4,600 ms
-                    1,                              // pre-delay: 1 ms
-                    std::bit_cast<uint32_t>(0.5f),  // a level
-                    std::bit_cast<uint32_t>(0.91f), // damping: the coefficient of a one-pole filter in the feedback
-                    0,                              // the filter sizes' pointer, which the driver sets
-                    std::bit_cast<uint32_t>(0.3f),  // a level
-                    std::bit_cast<uint32_t>(0.73f), // a level
-                    0,                              // two flags, both clear: stereo, and damping by a low-pass filter
-                },
-                {1120, 1440, 4960},
+                ReverbWords(kPokemonXFieldReverb),
+                kPokemonXFieldReverb.filter_sizes,
             },
         },
     };
@@ -228,84 +206,6 @@ const GameProfile* FindProfile(const GameFiles& game)
     }
 
     return nullptr;
-}
-
-std::vector<std::string> FirmwareCandidates(const GameFiles& game, const GameProfile* profile)
-{
-    const std::string_view code(reinterpret_cast<const char*>(game.code.data()), game.code.size());
-    std::vector<std::string> named, dspaudio, others;
-    for (const auto& path : game.romfs_files)
-    {
-        const std::string lower = xsflib::AsciiLower(path);
-        if (lower.size() < 4 || lower.compare(lower.size() - 4, 4, ".cdc") != 0)
-        {
-            continue;
-        }
-
-        if (code.find("/" + path) != std::string_view::npos)
-        {
-            named.push_back(path);
-        }
-        else if (lower == "dspaudio.cdc" ||
-                 (lower.size() > 13 && lower.compare(lower.size() - 13, 13, "/dspaudio.cdc") == 0))
-        {
-            dspaudio.push_back(path);
-        }
-        else
-        {
-            others.push_back(path);
-        }
-    }
-
-    std::vector<std::string> out;
-    if (profile)
-    {
-        out.push_back(profile->firmware);
-    }
-
-    for (const auto* list : {&named, &dspaudio, &others})
-    {
-        out.insert(out.end(), list->begin(), list->end());
-    }
-
-    return out;
-}
-
-std::optional<std::size_t> FindFirmwareInCode(const std::vector<uint8_t>& code)
-{
-    const std::string_view bytes(reinterpret_cast<const char*>(code.data()), code.size());
-    for (std::size_t magic = bytes.find(Dsp1Image::kMagic, Dsp1Image::kMagicOffset); magic != std::string_view::npos;
-         magic = bytes.find(Dsp1Image::kMagic, magic + 1))
-    {
-        if (IsDspImageAt(code, magic - Dsp1Image::kMagicOffset))
-        {
-            return magic - Dsp1Image::kMagicOffset;
-        }
-    }
-
-    return std::nullopt;
-}
-
-std::optional<GameFirmware> FindGameFirmware(const GameFiles& game, const GameProfile* profile)
-{
-    for (const auto& path : FirmwareCandidates(game, profile))
-    {
-        std::vector<uint8_t> data;
-        if (game.read_romfs(path, data) && IsDspFirmware(data))
-        {
-            return GameFirmware{path, 0, std::move(data)};
-        }
-    }
-
-    const auto offset = FindFirmwareInCode(game.code);
-    if (!offset)
-    {
-        return std::nullopt;
-    }
-
-    const auto begin = game.code.begin() + static_cast<std::ptrdiff_t>(*offset);
-    const auto end = begin + static_cast<std::ptrdiff_t>(Get32(game.code, *offset + Dsp1Image::kSizeOffset));
-    return GameFirmware{"", *offset, std::vector<uint8_t>(begin, end)};
 }
 
 std::optional<std::vector<uint8_t>> BuildLibrary(const GameFiles& game, const GameProfile& profile,
@@ -370,7 +270,6 @@ std::optional<std::vector<uint8_t>> BuildLibrary(const GameFiles& game, const Ga
     d.entry = text;
     d.stack_size = Get32(exh, kExheaderStackSize);
     d.priority = exh[kExheaderPriority];
-    d.app_memory = 0x04000000;
     d.status_address = kStatusAddress;
 
     return WritePsf(kPsfVersion3sf, d.Serialize(), program.Data(), tags);
@@ -386,236 +285,6 @@ std::vector<uint8_t> BuildMini(uint32_t sound_id, const std::string& lib_name, T
     tags["_lib"] = lib_name;
 
     return WritePsf(kPsfVersion3sf, {}, program.Data(), tags);
-}
-
-std::vector<uint8_t> BuildArchiveLibrary(const std::string& archive_path, const std::vector<uint8_t>& archive,
-                                         const std::string& firmware_path, const std::vector<uint8_t>& firmware,
-                                         const Tags& tags, const std::vector<FileChunk>& groups, uint32_t version,
-                                         const nnsnd::AuxEffectLists& effects, bool timed_starts,
-                                         const std::vector<nnsnd::AuxEffectLists>& effect_sets)
-{
-    ArchiveDescriptor descriptor;
-    descriptor.version = version;
-    descriptor.archive_path = archive_path;
-    descriptor.firmware_path = firmware_path;
-    if (!groups.empty())
-    {
-        descriptor.flags |= kFlagGroupFiles;
-    }
-
-    // Effect sets go with the effects, in version 3 (docs/3sf.md, "Effect sets").
-    if (!effects[0].empty() || !effects[1].empty() || !effect_sets.empty())
-    {
-        descriptor.flags |= kFlagAuxEffects;
-        descriptor.aux_effects = effects;
-    }
-    if (!effect_sets.empty())
-    {
-        descriptor.version = ArchiveDescriptor::kEffectSetsVersion;
-        descriptor.effect_sets = effect_sets;
-    }
-
-    if (timed_starts)
-    {
-        descriptor.flags |= kFlagTimedStarts;
-    }
-
-    ProgramBuilder program;
-    program.AddFile(archive_path, archive);
-    program.AddFile(firmware_path, firmware);
-    for (const FileChunk& group : groups)
-    {
-        descriptor.group_paths.push_back(group.path);
-        program.AddFile(group.path, group.data);
-    }
-
-    return WritePsf(kPsfVersion3sf, descriptor.Serialize(), program.Data(), tags);
-}
-
-namespace
-{
-
-// ntdlib's minis with 3SF's version byte. xsflib's streaming builder writes the same bytes as WritePsf.
-struct ArchiveMiniFormat
-{
-    using ProgramBuilder = xsflib::psf::StreamingProgramBuilder;
-
-    static constexpr uint8_t kPsfVersion = kPsfVersion3sf;
-};
-
-} // namespace
-
-std::vector<uint8_t> BuildArchiveMini(uint32_t sound_id, const std::string& lib_name, Tags tags)
-{
-    return ntdlib::rip::BuildMini<ArchiveMiniFormat>(ntdlib::sar::ItemNumber(sound_id), lib_name, std::move(tags));
-}
-
-std::vector<uint8_t> BuildArchiveMini(const std::vector<uint32_t>& sound_ids, const std::string& lib_name, Tags tags)
-{
-    if (sound_ids.size() == 1)
-    {
-        return BuildArchiveMini(sound_ids.front(), lib_name, std::move(tags));
-    }
-
-    ArchiveMiniFormat::ProgramBuilder program;
-    program.AddSounds(sound_ids);
-    tags["_lib"] = lib_name;
-
-    return program.WritePsf(ArchiveMiniFormat::kPsfVersion, {}, tags);
-}
-
-std::vector<Piece> FindPieces(const ntdlib::sar::SoundArchive& archive)
-{
-    static constexpr std::array<std::string_view, 5> kSuffixes = {"_DPCM", "_NOISE", "_P1", "_P2", "_TRI"};
-
-    const auto& sounds = archive.Sounds();
-    std::map<std::string, uint32_t, std::less<>> sequences;
-    for (std::size_t i = 0; i < sounds.size(); i++)
-    {
-        if (sounds[i].type == ntdlib::sar::SoundType::kSequence)
-        {
-            sequences.emplace(sounds[i].name, static_cast<uint32_t>(i));
-        }
-    }
-
-    // Each piece starts at its first channel's sequence.
-    std::vector<Piece> pieces;
-    for (std::size_t i = 0; i < sounds.size(); i++)
-    {
-        const std::string& label = sounds[i].name;
-        if (sounds[i].type != ntdlib::sar::SoundType::kSequence || label.size() <= kSuffixes[0].size() ||
-            !label.ends_with(kSuffixes[0]))
-        {
-            continue;
-        }
-
-        Piece piece{label.substr(0, label.size() - kSuffixes[0].size()), {}};
-        for (const std::string_view suffix : kSuffixes)
-        {
-            const auto found = sequences.find(piece.name + std::string(suffix));
-            if (found == sequences.end())
-            {
-                break;
-            }
-
-            piece.sounds.push_back(found->second);
-        }
-
-        if (piece.sounds.size() == kSuffixes.size() && piece.sounds.front() == i)
-        {
-            pieces.push_back(std::move(piece));
-        }
-    }
-
-    return pieces;
-}
-
-std::optional<Timing> TimingOfPiece(const std::vector<std::optional<Timing>>& timings)
-{
-    const auto missing = [](const std::optional<Timing>& timing)
-    {
-        return !timing;
-    };
-    if (timings.empty() || std::ranges::any_of(timings, missing))
-    {
-        return std::nullopt;
-    }
-
-    std::optional<Timing> piece;
-    for (const std::optional<Timing>& timing : timings)
-    {
-        if (timing->silent)
-        {
-            continue;
-        }
-
-        if (!piece)
-        {
-            piece = timing;
-            continue;
-        }
-
-        piece->length_ms = std::max(piece->length_ms, timing->length_ms);
-        piece->fade_ms = std::max(piece->fade_ms, timing->fade_ms);
-    }
-
-    return piece ? piece : timings.front();
-}
-
-bool IsDspFirmware(const std::vector<uint8_t>& data)
-{
-    return data.size() >= Dsp1Image::kHeaderSize &&
-           std::memcmp(data.data() + Dsp1Image::kMagicOffset, Dsp1Image::kMagic.data(), Dsp1Image::kMagic.size()) == 0;
-}
-
-std::vector<std::string> MissingData(const ntdlib::sar::SoundArchive& archive, uint32_t index)
-{
-    if (index >= archive.Sounds().size())
-    {
-        return {"the sound itself"};
-    }
-
-    const auto name_of = [](const std::string& name, std::size_t i)
-    {
-        return name.empty() ? "#" + std::to_string(i) : name;
-    };
-
-    const ntdlib::sar::SoundInfo& info = archive.Sounds()[index];
-    std::vector<std::string> missing;
-    if (archive.FileData(info.file_id).empty())
-    {
-        missing.push_back("its sequence data");
-    }
-
-    std::vector<uint32_t> wave_archives;
-    for (uint32_t bank_item : info.banks)
-    {
-        const std::optional<std::size_t> b =
-            ntdlib::sar::ItemIndex(bank_item, ntdlib::sar::kBankItem, archive.Banks().size());
-        if (!b)
-        {
-            continue;
-        }
-
-        const auto bytes = archive.FileData(archive.Banks()[*b].file_id);
-        if (bytes.empty())
-        {
-            missing.push_back("bank " + name_of(archive.Banks()[*b].name, *b));
-            continue;
-        }
-
-        try
-        {
-            for (const ntdlib::sar::WaveId& w : ntdlib::sar::Bank::Parse(bytes, kSarOptions).waves)
-            {
-                if (std::find(wave_archives.begin(), wave_archives.end(), w.wave_archive_item) == wave_archives.end())
-                {
-                    wave_archives.push_back(w.wave_archive_item);
-                }
-            }
-        }
-        catch (const std::exception&)
-        {
-            missing.push_back("bank " + name_of(archive.Banks()[*b].name, *b) + " (unreadable)");
-        }
-    }
-
-    for (uint32_t item : wave_archives)
-    {
-        const std::optional<std::size_t> w =
-            ntdlib::sar::ItemIndex(item, ntdlib::sar::kWaveArchiveItem, archive.WaveArchives().size());
-        if (!w)
-        {
-            continue;
-        }
-
-        if (archive.FileData(archive.WaveArchives()[*w].file_id).empty())
-        {
-            missing.push_back("wave archive " + name_of(archive.WaveArchives()[*w].name, *w));
-        }
-    }
-
-    return missing;
 }
 
 } // namespace threesf::rip

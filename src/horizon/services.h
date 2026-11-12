@@ -14,8 +14,9 @@
 #include <string>
 #include <vector>
 
-#include "dsp/dsp.h"
-#include "dsp/teakra_dsp.h"
+#include "ntdlib/ctr/dsp/dsp.h"
+#include "ntdlib/ctr/dsp/teakra_dsp.h"
+
 #include "horizon/ipc.h"
 #include "horizon/kernel.h"
 #include "horizon/romfs.h"
@@ -55,7 +56,7 @@ public:
 
     // Installs the services: dsp::DSP with its semaphore event and its interrupt handler, the ports, and the services
     // that srv: finds by name. fs:USER serves the files as the RomFS. Makes no handles.
-    Services(Kernel& kernel, dsp::TeakraDsp& dsp, std::vector<RomFs::File> files);
+    Services(Kernel& kernel, ntdlib::ctr::dsp::TeakraDsp& dsp, std::vector<RomFs::File> files);
     Services(const Services&) = delete;
     Services& operator=(const Services&) = delete;
     ~Services() override;
@@ -88,10 +89,10 @@ private:
     uint32_t* InterruptEvent(uint32_t interrupt, uint32_t pipe);
     void LogUnhandled(std::set<uint32_t>& logged, const char* service, uint32_t header);
     void StubRequest(Stub& stub, ipc::CommandBuffer& command);
-    void OnInterrupt(dsp::Interrupt interrupt, dsp::Pipe pipe);
+    void OnInterrupt(ntdlib::ctr::dsp::Interrupt interrupt, ntdlib::ctr::dsp::Pipe pipe);
 
     Kernel& kernel_;
-    dsp::TeakraDsp& dsp_;
+    ntdlib::ctr::dsp::TeakraDsp& dsp_;
     RomFs romfs_;
     State state_;
 };

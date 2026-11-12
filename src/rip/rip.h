@@ -8,21 +8,27 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
 #include <optional>
 #include <string>
 #include <vector>
 
 #include "ntdlib/sar/formats.h"
+#include "ntdlib/sound_pieces.h"
 #include "xsflib/psf/program.h"
 #include "xsflib/rip/file_names.h"
 #include "xsflib/rip/length.h"
 
 #include "nnsnd/aux_effects.h"
 #include "rip/game.h"
+#include "rip/length.h"
 #include "threesf/format.h"
 
 namespace threesf::rip
 {
+
+// The memory that a rip gives the driver at kDriverBase (rip/driver_blob.h): one page for its code, parameters and bss.
+inline constexpr uint32_t kDriverRegion = 0x1000;
 
 // A reverb that the driver starts on aux bus A before it plays the sound, as the game does (see driver/driver.c).
 // `start` is 0 for a game without one.
@@ -95,6 +101,12 @@ std::vector<uint8_t> BuildMini(uint32_t sound_id, const std::string& lib_name, T
 // A file of a set: its path and its data.
 using FileChunk = xsflib::psf::FileChunk;
 
+// Archive mode: finds the file of the group `name` in `folder` or a folder below it. The file's name is the group's
+// name followed by .bcgrp. The match ignores case. The chunk's path is the file's path from `folder`. A slash separates
+// the folders in it. The search skips an entry whose type can't be read, such as a broken symbolic link. The search
+// also skips a folder that it can't open. Returns nothing when no file matches.
+std::optional<FileChunk> FindGroupIn(const std::filesystem::path& folder, const std::string& name);
+
 // Archive mode: a .3sflib holding the sound archive, the DSP firmware and the group files `groups` beside the archive,
 // as FILE chunks at the given paths, with an archive descriptor. The descriptor lists the group files, with
 // kFlagGroupFiles, when there are any. It gives `effects` on the aux buses, with kFlagAuxEffects, when there are any.
@@ -121,33 +133,23 @@ std::vector<uint8_t> BuildArchiveMini(const std::vector<uint32_t>& sound_ids, co
 // A piece of music whose channels a game plays as separate sequences, started together (docs/3sf.md, "Sounds that play
 // together"): the piece's name, and the sequences by their indices in the archive, in the order in which the game
 // starts them.
-struct Piece
-{
-    std::string name;
-    std::vector<uint32_t> sounds;
-};
+using Piece = ntdlib::SoundPiece;
 
 // The pieces of `archive` whose channels are separate sequences. Mighty Gunvolt Burst plays each piece of its music as
 // five sequences, one for each channel of the NES's sound chip. It starts them together: the DPCM channel, the noise,
 // the two pulse channels and the triangle. Their labels are the piece's name followed by _DPCM, _NOISE, _P1, _P2 and
 // _TRI. A piece is five sequences labelled with one name and those suffixes. The pieces come in the order of their
 // first sounds.
-std::vector<Piece> FindPieces(const ntdlib::sar::SoundArchive& archive);
+inline std::vector<Piece> FindPieces(const ntdlib::sar::SoundArchive& archive)
+{
+    return ntdlib::FindSoundPieces(archive, ntdlib::kMightyGunvoltBurstChannels);
+}
 
-// A sequence's length and fade in milliseconds, and whether it never makes a sound (xsflib/rip/length.h).
-using Timing = xsflib::rip::Timing;
-
-// The timing of sequences that play together, from the timing that the length analysis gives each sequence alone: the
-// latest end, and the longest fade. Sequences that never make a sound don't count, unless all are silent. Without the
-// timing of one of the sequences, there is none.
-std::optional<Timing> TimingOfPiece(const std::vector<std::optional<Timing>>& timings);
+// The timing of sequences that play together: the latest end, and the longest fade.
+using xsflib::rip::TimingOfPiece;
 
 // True if `data` is a DSP1 firmware image (such as a game's dspaudio.cdc).
 bool IsDspFirmware(const std::vector<uint8_t>& data);
-
-// Lists the files sequence `index` needs that the archive doesn't hold: the sequence's data, banks or wave archives
-// kept in other files, or cut off by truncation. Empty when nothing is missing.
-std::vector<std::string> MissingData(const ntdlib::sar::SoundArchive& archive, uint32_t index);
 
 // Filenames for one rip, valid on Windows, macOS and Linux and unique even on case-insensitive filesystems
 // (xsflib::rip). 3SF names them "<base>.3sflib" and "<index, four digits> <label>.mini3sf".
