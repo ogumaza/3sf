@@ -18,6 +18,7 @@
 #include <utility>
 #include <vector>
 
+#include "ntdlib/rounding.h"
 #include "xsflib/bytes.h"
 #include "xsflib/utf8.h"
 
@@ -30,9 +31,6 @@ using Layout = RomFsLayout;
 
 // A name's hash starts from the entry offset of its directory XORed with this value.
 constexpr uint32_t kHashSeed = 123456789;
-
-// The character that stands for a UTF-8 sequence that doesn't decode.
-constexpr char16_t kReplacement = 0xfffd;
 
 // The fixed part of each kind of entry, before its name.
 constexpr uint32_t kDirEntrySize = 0x18;
@@ -63,45 +61,10 @@ struct FileNode
     uint32_t sibling = Layout::kNoEntry; // the offset of the next entry in the directory's list of files
 };
 
-// A part of a path in UTF-16. A UTF-8 sequence that doesn't decode gives U+FFFD and moves on by one byte.
-std::u16string Utf16(std::string_view part)
-{
-    std::u16string name;
-    while (!part.empty())
-    {
-        const auto [c, length] = xsflib::Utf8Character(part);
-        if (length == 0)
-        {
-            name.push_back(kReplacement);
-            part.remove_prefix(1);
-            continue;
-        }
-
-        if (c > 0xffff)
-        {
-            name.push_back(static_cast<char16_t>(0xd800 + ((c - 0x10000) >> 10)));
-            name.push_back(static_cast<char16_t>(0xdc00 + ((c - 0x10000) & 0x3ff)));
-        }
-        else
-        {
-            name.push_back(static_cast<char16_t>(c));
-        }
-
-        part.remove_prefix(length);
-    }
-
-    return name;
-}
-
-uint64_t AlignUp(uint64_t value, uint64_t alignment)
-{
-    return (value + alignment - 1) / alignment * alignment;
-}
-
 // The bytes that a name takes in its entry: two for each UTF-16 unit, padded to a multiple of 4.
 uint32_t NameField(const std::u16string& name)
 {
-    return static_cast<uint32_t>(AlignUp(2 * uint64_t{name.size()}, 4));
+    return static_cast<uint32_t>(ntdlib::AlignUp(2 * uint64_t{name.size()}, 4));
 }
 
 // The bucket count of a hash table for `entries` entries.
@@ -210,12 +173,12 @@ Tree BuildTree(const std::vector<RomFs::File>& files)
         uint32_t dir = 0;
         for (std::size_t slash = path.find('/'); slash != std::string_view::npos; slash = path.find('/'))
         {
-            dir = Subdirectory(tree.dirs, dir, Utf16(path.substr(0, slash)));
+            dir = Subdirectory(tree.dirs, dir, xsflib::Utf16FromUtf8(path.substr(0, slash)));
             path.remove_prefix(slash + 1);
         }
 
         FileNode node;
-        node.name = Utf16(path);
+        node.name = xsflib::Utf16FromUtf8(path);
         node.dir = dir;
         node.size = file.data ? file.data->size() : 0;
         tree.dirs[dir].files.push_back(static_cast<uint32_t>(tree.files.size()));
@@ -248,7 +211,7 @@ Lengths PlaceEntries(Tree& tree)
     {
         node.offset = lengths.file_table;
         lengths.file_table += kFileEntrySize + NameField(node.name);
-        lengths.data = AlignUp(lengths.data, kDataAlignment);
+        lengths.data = ntdlib::AlignUp(lengths.data, kDataAlignment);
         node.data_offset = lengths.data;
         lengths.data += node.size;
     }
@@ -280,7 +243,7 @@ std::vector<uint8_t> BuildHead(const Tree& tree, const Lengths& lengths)
     const uint32_t file_hash_offset = dir_table_offset + lengths.dir_table;
     const uint32_t file_table_offset = file_hash_offset + 4 * file_buckets;
     const auto data_offset =
-        static_cast<uint32_t>(AlignUp(uint64_t{file_table_offset} + lengths.file_table, kDataAlignment));
+        static_cast<uint32_t>(ntdlib::AlignUp(uint64_t{file_table_offset} + lengths.file_table, kDataAlignment));
 
     std::vector<uint8_t> bytes(data_offset, 0);
     uint8_t* const head = bytes.data();

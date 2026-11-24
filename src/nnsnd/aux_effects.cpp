@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+// The effects on the aux buses (see aux_effects.h).
+
 #include "nnsnd/aux_effects.h"
 
 #include <array>
@@ -122,7 +124,7 @@ FirmwareReverb::FirmwareReverb(const ntdlib::ctr_fx::ReverbParam& param)
 {
     namespace vfp = ntdlib::ctr_fx::vfp;
 
-    // 0x2eede0 to 0x2eee50 test that each of the four ratios lies in [0, 1]. The delay tests its ratios likewise.
+    // 0x2eede0 to 0x2eee50 test that each of the four ratios is in [0, 1]. The delay tests its ratios likewise.
     if (!InUnitRange(param.coloration) || !InUnitRange(param.damping) || !InUnitRange(param.early_gain) ||
         !InUnitRange(param.fused_gain))
     {
@@ -224,42 +226,26 @@ uint64_t FirmwareReverb::BufferBytes() const
     return frame_count * channels * kAuxChannelSamples * sizeof(int32_t);
 }
 
-bool AuxEffect::Known(uint32_t kind)
-{
-    return kind >= static_cast<uint32_t>(Kind::kNwSndReverb) && kind <= static_cast<uint32_t>(Kind::kFirmwareReverb);
-}
-
-bool AuxEffect::IsReverb() const
-{
-    return kind == Kind::kNwSndReverb || kind == Kind::kNnSndReverb || kind == Kind::kNnSndReverb2011 ||
-           kind == Kind::kNwSndReverb2011 || kind == Kind::kFirmwareReverb;
-}
-
-bool AuxEffect::InFirmware() const
-{
-    return kind == Kind::kFirmwareDelay || kind == Kind::kFirmwareReverb;
-}
-
-uint64_t AuxEffect::BufferSamples() const
+uint64_t BufferSamples(const AuxEffect& effect)
 {
     // The models lay each channel's buffers out in whole frames (ntdlib/ctr_fx/effects.h). So do the firmware's delay
     // and reverb, in FCRAM. The firmware's reverb counts its frames as the delay does.
-    if (kind == Kind::kFirmwareReverb)
+    if (effect.kind == AuxEffect::Kind::kFirmwareReverb)
     {
-        const uint64_t frames = uint64_t{ntdlib::ctr_fx::DelayFrames(reverb.early_reflection_time)} +
-                                ntdlib::ctr_fx::DelayFrames(reverb.pre_delay_time) + FilterFrames(reverb);
+        const uint64_t frames = uint64_t{ntdlib::ctr_fx::DelayFrames(effect.reverb.early_reflection_time)} +
+                                ntdlib::ctr_fx::DelayFrames(effect.reverb.pre_delay_time) + FilterFrames(effect.reverb);
         return frames * kAuxChannelSamples * 2;
     }
 
-    if (!IsReverb())
+    if (!effect.IsReverb())
     {
-        const uint64_t channels = delay.enable_surround ? 4 : 2;
-        return uint64_t{ntdlib::ctr_fx::DelayFrames(delay.delay_time)} * kAuxChannelSamples * channels;
+        const uint64_t channels = effect.delay.enable_surround ? 4 : 2;
+        return uint64_t{ntdlib::ctr_fx::DelayFrames(effect.delay.delay_time)} * kAuxChannelSamples * channels;
     }
 
-    const uint64_t frames = uint64_t{ntdlib::ctr_fx::ReverbFrames(reverb.early_reflection_time)} +
-                            ntdlib::ctr_fx::ReverbFrames(reverb.pre_delay_time) + FilterFrames(reverb);
-    const uint64_t channels = reverb.enable_surround ? 4 : 2;
+    const uint64_t frames = uint64_t{ntdlib::ctr_fx::ReverbFrames(effect.reverb.early_reflection_time)} +
+                            ntdlib::ctr_fx::ReverbFrames(effect.reverb.pre_delay_time) + FilterFrames(effect.reverb);
+    const uint64_t channels = effect.reverb.enable_surround ? 4 : 2;
     return frames * kAuxChannelSamples * channels;
 }
 

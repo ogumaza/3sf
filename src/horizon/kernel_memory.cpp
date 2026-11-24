@@ -209,12 +209,12 @@ void Kernel::SvcCreateMemoryBlock()
     }
 
     const uint32_t block = NewObject(ObjectKind::kMemoryBlock);
-    state_.objects[block].address = address;
-    state_.objects[block].size = size;
+    state_.objects[block].block.address = address;
+    state_.objects[block].block.size = size;
     if (address == 0)
     {
         const uint32_t storage = NewRegion(size);
-        state_.objects[block].storage = storage;
+        state_.objects[block].block.storage = storage;
     }
 
     r.r[0] = kSuccess;
@@ -240,17 +240,17 @@ void Kernel::SvcMapMemoryBlock()
     }
 
     const Object& object = state_.objects[*block];
-    if (object.address != 0)
+    if (object.block.address != 0)
     {
-        r.r[0] = MapAlias(address, object.address, object.size) ? kSuccess : kInvalidAddress;
+        r.r[0] = MapAlias(address, object.block.address, object.block.size) ? kSuccess : kInvalidAddress;
         return;
     }
 
-    memory_.Map(address, regions_[object.storage].host.get(), object.size);
+    memory_.Map(address, regions_[object.block.storage].host.get(), object.block.size);
     r.r[0] = kSuccess;
 }
 
-// Nothing checks that the address is page aligned. arm::Memory unmaps from the start of the page that holds it.
+// Nothing checks that the address is page aligned. arm::Memory unmaps from the start of the page that contains it.
 void Kernel::SvcUnmapMemoryBlock()
 {
     arm::CpuState& r = cpu_.State();
@@ -260,7 +260,7 @@ void Kernel::SvcUnmapMemoryBlock()
         return;
     }
 
-    memory_.Unmap(r.r[1], state_.objects[*block].size);
+    memory_.Unmap(r.r[1], state_.objects[*block].block.size);
     r.r[0] = kSuccess;
 }
 

@@ -15,10 +15,12 @@
 #include <utility>
 #include <vector>
 
+#include "ntdlib/ctr/snd/game_effects.h"
 #include "ntdlib/ctr/snd/sar_options.h"
 #include "ntdlib/ctr/snd/starting_tracks.h"
 #include "ntdlib/rip/archive.h"
 #include "ntdlib/sar/formats.h"
+#include "xsflib/cli/length_analysis.h"
 #include "xsflib/cli/rip.h"
 
 #include "rip/length.h"
@@ -31,6 +33,18 @@ namespace threesf::cli
 
 using ntdlib::ctr::kSarOptions;
 
+std::vector<uint32_t> SoundsOf(const std::vector<Job>& jobs)
+{
+    std::vector<uint32_t> sounds;
+    for (const Job& job : jobs)
+    {
+        const std::vector<uint32_t> played = job.Sounds();
+        sounds.insert(sounds.end(), played.begin(), played.end());
+    }
+
+    return sounds;
+}
+
 SequenceStart StartOf(const ntdlib::sar::SoundArchive& archive, std::string_view archive_sha1, uint32_t sound)
 {
     if (archive_sha1.empty())
@@ -38,7 +52,12 @@ SequenceStart StartOf(const ntdlib::sar::SoundArchive& archive, std::string_view
         return {};
     }
 
-    return ntdlib::ctr::snd::StartingSequenceTracks(archive_sha1, archive.Sounds()[sound].name);
+    const std::string& label = archive.Sounds()[sound].name;
+    SequenceStart start = ntdlib::ctr::snd::StartingSequenceTracks(archive_sha1, label);
+    start.game_effect =
+        ntdlib::ctr::snd::GameEffectOf(ntdlib::ctr::snd::FindArchiveEffects(archive_sha1), label, start.game_effect);
+
+    return start;
 }
 
 SequenceStart StartOf(const Job& job, const ntdlib::sar::SoundArchive& archive, std::string_view archive_sha1,
@@ -73,14 +92,18 @@ void AnalyzeLengths(std::vector<Job>& jobs, const ntdlib::sar::SoundArchive& arc
     }
 
     const rip::LengthAnalyzer analyzer(data.archive, firmware, variables, data.groups, data.effects);
-    const auto analyze = [&analyzer, &data](Measure& measure)
+    const auto analyze = [&analyzer, &archive, &data](Measure& measure)
     {
         if (!measure.sequence)
         {
             return false;
         }
 
-        measure.timing = analyzer.Analyze(measure.index, measure.start, &data.EffectsOf(measure.effect_set));
+        // Music runs to the long limit. Sound effects keep the default limit.
+        const xsflib::rip::Limit limit = rip::IsMusic(archive, archive.Sounds()[measure.index])
+                                             ? xsflib::rip::Limit::kLong
+                                             : xsflib::rip::Limit::kDefault;
+        measure.timing = analyzer.Analyze(measure.index, measure.start, &data.EffectsOf(measure.effect_set), limit);
 
         return true;
     };
@@ -165,22 +188,6 @@ std::size_t DropMuted(std::vector<Job>& jobs, const ntdlib::sar::SoundArchive& a
     return std::erase_if(jobs, muted);
 }
 
-std::size_t DropUnheard(std::vector<Job>& jobs)
-{
-    const auto unheard = [](const Job& job)
-    {
-        if (!job.timing || !job.timing->silent)
-        {
-            return false;
-        }
-
-        std::fprintf(stderr, "skipped %s: it makes no sound\n", job.label.c_str());
-
-        return true;
-    };
-    return std::erase_if(jobs, unheard);
-}
-
 std::size_t AnalyzeAndDropSilent(std::vector<Job>& jobs, const ntdlib::sar::SoundArchive& archive,
                                  const ArchiveData& data, const std::vector<uint8_t>& firmware,
                                  const Variables& variables, const Options& o)
@@ -189,7 +196,7 @@ std::size_t AnalyzeAndDropSilent(std::vector<Job>& jobs, const ntdlib::sar::Soun
     if (o.lengths && !jobs.empty())
     {
         AnalyzeLengths(jobs, archive, data, firmware, variables, o.jobs);
-        silent += DropUnheard(jobs);
+        silent += xsflib::cli::SkipSilent(jobs);
     }
 
     return silent;

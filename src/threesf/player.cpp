@@ -101,7 +101,7 @@ bool Player::RunStep()
     case horizon::Kernel::RunResult::kExited:
         return Fail("the emulated program exited");
     case horizon::Kernel::RunResult::kError:
-        return Fail(k.error_);
+        return Fail(k.Error());
     }
 
     return Fail("unknown run result");

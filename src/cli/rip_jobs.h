@@ -12,6 +12,7 @@
 #include <string_view>
 #include <vector>
 
+#include "ntdlib/ctr/snd/game_effects.h"
 #include "ntdlib/sar/formats.h"
 #include "xsflib/cli/rip.h"
 
@@ -35,7 +36,8 @@ struct Options : xsflib::cli::RipOptions
 {
     Variables variables; // --var: set before each sequence starts, and written as the 3sf_var tag
 
-    // The firmware --firmware names, and a firmware file among the inputs, which only loose sound archives use.
+    // The firmware that --firmware names, and a firmware file among the inputs. Only loose sound archives use the
+    // second.
     FirmwareFile firmware, input_firmware;
 };
 
@@ -62,6 +64,9 @@ struct Job
     }
 };
 
+// The sounds that the minis of `jobs` play, in the jobs' order (Job::Sounds).
+std::vector<uint32_t> SoundsOf(const std::vector<Job>& jobs);
+
 // What a sound archive is played with: its bytes, the group files beside it that the rip found, and the effects on the
 // aux buses.
 struct ArchiveData
@@ -75,7 +80,7 @@ struct ArchiveData
     std::string archive_sha1 = {};
 
     // Archive mode: the known archive's entry, whose game effects some sequences play with in place of `effects`.
-    const rip::ArchiveEffects* known = nullptr;
+    const ntdlib::ctr::snd::ArchiveEffects* known = nullptr;
 
     // The effect set that a sequence started as `start` plays (rip::EffectSetOf).
     uint32_t EffectSet(const SequenceStart& start) const
@@ -90,8 +95,8 @@ struct ArchiveData
     }
 };
 
-// How a known game starts sound `sound` of `archive`, by the archive's SHA-1 `archive_sha1`. The archive's start for an
-// empty SHA-1.
+// How a known game starts sound `sound` of `archive`, by the archive's SHA-1 `archive_sha1`, with the effect that
+// ntdlib's GameEffectOf gives the sound's label. The archive's start for an empty SHA-1.
 SequenceStart StartOf(const ntdlib::sar::SoundArchive& archive, std::string_view archive_sha1, uint32_t sound);
 
 // How `job` starts its sound `sound`: as the job's later state does, or else as StartOf gives.
@@ -114,12 +119,9 @@ std::size_t DropIncomplete(std::vector<Job>& jobs, const ntdlib::sar::SoundArchi
 // Returns how many it dropped.
 std::size_t DropMuted(std::vector<Job>& jobs, const ntdlib::sar::SoundArchive& archive);
 
-// Lists and drops the sequences that the length analysis found never sound, such as those that play no notes, or play
-// them at a volume of 0. Returns how many it dropped.
-std::size_t DropUnheard(std::vector<Job>& jobs);
-
 // Drops the sounds that make no sound. DropMuted finds those at a volume of 0. Unless --no-length is given, the length
-// analysis of the rest then finds the sequences that never sound. Returns how many it dropped.
+// analysis of the rest then finds the sequences that never sound, such as those that play no notes, or play them at a
+// volume of 0, and xsflib::cli::SkipSilent lists and drops them. Returns how many it dropped.
 std::size_t AnalyzeAndDropSilent(std::vector<Job>& jobs, const ntdlib::sar::SoundArchive& archive,
                                  const ArchiveData& data, const std::vector<uint8_t>& firmware,
                                  const Variables& variables, const Options& o);
@@ -127,9 +129,11 @@ std::size_t AnalyzeAndDropSilent(std::vector<Job>& jobs, const ntdlib::sar::Soun
 // "; 3 sounds skipped (2 data outside the archive, 1 no sound)", or nothing when none were skipped.
 std::string SkippedText(std::size_t missing_data, std::size_t silent);
 
-// Whether --only or --bgm picks sounds, so that picking none is an error.
+// Whether --only or --bgm picks sounds. Picking none is then an error.
 bool PicksSounds(const Options& o);
 
+// Game mode: the sounds that --only and --bgm pick. They're the sequences, and with `with_wave_sounds` the wave sounds.
+// Streams are out of scope.
 std::vector<Job> SelectSounds(const ntdlib::sar::SoundArchive& archive, const Options& o, bool with_wave_sounds);
 
 // Archive mode: the sequences that --only and --bgm pick. A piece whose channels the game plays as separate sequences

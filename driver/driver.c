@@ -1,23 +1,23 @@
 // SPDX-License-Identifier: MIT
 
 /*
- * 3SF guest driver for games built on Game Freak's gfl::snd over NintendoWare nw::snd
- * (Pokemon X/Y). It's compiled for the ARM11 (ARMv6K, VFPv2) and stored in every .3sflib;
- * the player boots the game's startup code, and the rip patches nnMain to call this driver.
+ * The 3SF guest driver, for games built on Game Freak's gfl::snd over NintendoWare's nw::snd (Pokemon X and Y). It's
+ * compiled for the ARM11 (ARMv6K, VFPv2), and every .3sflib contains it. The player boots the game's startup code. The
+ * rip patches nnMain to call this driver.
  *
- * The driver then does what the game's boot would do for sound, using the game's
- * functions (addresses come from the profile in `driver_params`, filled by the ripper):
- *   1. stand-in gfl heaps over the memory the startup code already allocated;
- *   2. nn::fs::MountRom("rom:");
- *   3. the game's sound manager init (nn::snd, nw::snd and the DSP firmware);
- *   4. the console's sound output mode;
- *   5. the reverb that the game runs on aux bus A, if the profile gives one;
- *   6. a sound heap, LoadData(sound), Play(sound);
- *   7. the game's per-frame sound update, forever (about 59.83 times per emulated second).
- * `driver_params.status` tells the player what's happening (see docs/3sf.md).
+ * The driver then does what the game's boot does for sound, with the game's functions. Their addresses come from the
+ * profile in `driver_params`. The ripper fills it in. The steps:
+ *   1. stand-in gfl heaps over the memory that the startup code has already allocated
+ *   2. nn::fs::MountRom("rom:")
+ *   3. the game's init of its sound manager (nn::snd, nw::snd and the DSP firmware)
+ *   4. the console's sound output mode
+ *   5. the reverb that the game runs on aux bus A, if the profile gives one
+ *   6. a sound heap, LoadData(sound) and Play(sound)
+ *   7. the game's sound update of each frame, forever (about 59.83 times per emulated second)
+ * The driver writes its progress to `driver_params.status` for the player (see docs/3sf.md).
  *
- * Build with driver/build.py (clang and ld.lld); the result is committed as
- * src/rip/driver_blob.h so building 3SF itself needs no ARM toolchain.
+ * driver/build.py builds it with clang and ld.lld. The result is committed as src/rip/driver_blob.h. A build of 3SF
+ * therefore requires no ARM toolchain.
  */
 
 typedef unsigned int u32;
@@ -26,7 +26,7 @@ typedef int s32;
 #define PARAMS_MAGIC 0x44465333u /* '3SFD' */
 #define PARAMS_VERSION 1u
 
-/* Values of Params.status. They're macros because an enumerator can't hold 0x80000000 before C23. */
+/* Values of Params.status. They're macros because an enumerator can't have the value 0x80000000 before C23. */
 #define STATUS_BOOTING 0u
 #define STATUS_PLAYING 1u
 #define STATUS_FINISHED 2u
@@ -57,7 +57,7 @@ struct Params {
     u32 heap_base, heap_size;     /* ordinary memory for the stand-in heap */
     u32 device_base, device_size; /* device (linear) memory for the stand-in device heap */
     /* The reverb on aux bus A, or 0 in reverb_start for none. reverb_start(gfl heap, parameters) finds the sound
-     * system through the game's pointer to its sound manager, which the game sets after the manager's init. */
+     * system through the game's pointer to its sound manager. The game sets that pointer after the manager's init. */
     u32 manager_pointer;    /* where the game keeps the pointer to its sound manager object */
     u32 reverb_start;       /* u32 reverb_start(gfl heap, const void* parameters) */
     u32 reverb_params[9];   /* the reverb's parameter block; word 5 points to its filter sizes */

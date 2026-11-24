@@ -24,6 +24,10 @@
 namespace threesf::horizon
 {
 
+// The ARM11's address of DSP RAM. The system maps DSP RAM there, and ConvertProcessAddressFromDspDram gives addresses
+// in it.
+inline constexpr uint32_t kDspRam = 0x1ff00000;
+
 class Services : public ServiceHost
 {
 public:
@@ -35,7 +39,7 @@ public:
         std::set<uint32_t> logged;
     };
 
-    // What the services keep between requests. The sets hold the headers (and for cfg:u the block ids too) that a
+    // What the services keep between requests. The sets contain the headers (and for cfg:u the block ids too) that a
     // service logs once.
     struct State
     {

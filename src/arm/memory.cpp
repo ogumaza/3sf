@@ -64,7 +64,7 @@ Memory::Snapshot Memory::Save(const Snapshot* previous) const
             continue;
         }
 
-        // Runs are at most 2 GiB, so that Restore can map each with a 32-bit size.
+        // A run is at most 2 GiB. Restore can then map each run with a 32-bit size.
         if (!runs->empty())
         {
             Snapshot::Run& last = runs->back();

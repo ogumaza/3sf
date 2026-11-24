@@ -51,7 +51,7 @@ constexpr uint32_t kEffectSurround = 1;
 constexpr uint32_t kEffectHighPassDamping = 2;
 
 // The bytes of FCRAM that a player gives the lines of the firmware's delays and reverbs, all together. The archive-mode
-// model's FCRAM holds them and the wave archives.
+// model's FCRAM contains them and the wave archives.
 constexpr uint64_t kMaxFirmwareLines = 16 * 1024 * 1024;
 
 // `text` without the white space around it. Text of nothing but white space gives an empty view.
@@ -65,37 +65,6 @@ std::string_view TrimSpace(std::string_view text)
     }
 
     return text.substr(first, text.find_last_not_of(kSpace) - first + 1);
-}
-
-// Parses decimal digits, then an optional '.' and more digits, with white space around them allowed. Returns nullopt
-// for anything else. ReadDecimal would also take a sign, a ',' and an exponent.
-std::optional<float> ParsePlainDecimal(std::string_view text)
-{
-    text = TrimSpace(text);
-    if (text.empty())
-    {
-        return std::nullopt;
-    }
-
-    const std::size_t point = text.find('.');
-    const auto digits = [](std::string_view part)
-    {
-        return std::ranges::all_of(part, [](char c) { return c >= '0' && c <= '9'; });
-    };
-
-    if (point == 0 || !digits(text.substr(0, point)) ||
-        (point != std::string_view::npos && (point + 1 == text.size() || !digits(text.substr(point + 1)))))
-    {
-        return std::nullopt;
-    }
-
-    const std::optional<xsflib::DecimalNumber> number = xsflib::ReadDecimal(text);
-    if (!number || number->length != text.size())
-    {
-        return std::nullopt;
-    }
-
-    return static_cast<float>(number->value);
 }
 
 // The bus's name in messages.
@@ -144,8 +113,8 @@ void PutEffect(std::vector<uint8_t>& v, const AuxEffect& effect)
     Put32(v, (r.enable_surround ? kEffectSurround : 0) | (r.high_pass_damping ? kEffectHighPassDamping : 0));
 }
 
-// Reads the 32-bit values of an effect's parameters at `pos`, and moves `pos` past them. Returns nothing if `data`
-// ends first.
+// Reads the 32-bit values of an effect's parameters at `pos`, and moves `pos` past them. Returns nothing if `data` ends
+// first.
 std::optional<std::vector<uint32_t>> ReadWords(const std::vector<uint8_t>& data, std::size_t& pos, std::size_t count)
 {
     if (data.size() < pos || data.size() - pos < 4 * count)
@@ -550,7 +519,7 @@ std::optional<std::string> ArchiveDescriptor::Check() const
         {
             for (const AuxEffect& effect : effects)
             {
-                bytes += effect.BufferSamples() * sizeof(int32_t);
+                bytes += nnsnd::BufferSamples(effect) * sizeof(int32_t);
                 if (bytes > ProcessDescriptor::kMaxAppMemory)
                 {
                     return which +
@@ -558,7 +527,7 @@ std::optional<std::string> ArchiveDescriptor::Check() const
                            " than the 178 MiB a 3DS gives a program";
                 }
 
-                line_bytes += effect.InFirmware() ? effect.BufferSamples() * sizeof(int32_t) : 0;
+                line_bytes += effect.InFirmware() ? nnsnd::BufferSamples(effect) * sizeof(int32_t) : 0;
                 if (line_bytes > kMaxFirmwareLines)
                 {
                     return (set == 0 ? std::string("the archive descriptor's") : which + "'s") +
@@ -698,17 +667,6 @@ std::optional<uint32_t> ParseSeed(std::string_view text)
     return static_cast<uint32_t>(*seed);
 }
 
-std::optional<float> ParseRatio(std::string_view text)
-{
-    const std::optional<float> ratio = ParsePlainDecimal(text);
-    if (!ratio || !(*ratio >= kMinRatio && *ratio <= kMaxRatio))
-    {
-        return std::nullopt;
-    }
-
-    return ratio;
-}
-
 std::optional<std::array<uint32_t, 4>> ParseBanks(std::string_view text)
 {
     std::array<uint32_t, 4> banks;
@@ -734,6 +692,36 @@ std::optional<std::array<uint32_t, 4>> ParseBanks(std::string_view text)
     return banks;
 }
 
+std::optional<float> ParseLowPass(std::string_view text)
+{
+    const std::size_t first = text.find_first_not_of(" \t\r\n");
+    if (first == std::string_view::npos)
+    {
+        return std::nullopt;
+    }
+
+    // A '-' goes straight before the digits. ParsePlainDecimal reads the rest, white space after it included.
+    text.remove_prefix(first);
+    const bool negative = text.front() == '-';
+    if (negative)
+    {
+        text.remove_prefix(1);
+    }
+
+    if (text.empty() || text.front() < '0' || text.front() > '9')
+    {
+        return std::nullopt;
+    }
+
+    const std::optional<float> magnitude = xsflib::ParsePlainDecimal(text);
+    if (!magnitude || *magnitude > 1.0f || (!negative && *magnitude != 0.0f))
+    {
+        return std::nullopt;
+    }
+
+    return negative ? -*magnitude : *magnitude;
+}
+
 std::optional<std::array<float, 2>> ParseSends(std::string_view text)
 {
     std::array<float, 2> sends = {};
@@ -742,7 +730,7 @@ std::optional<std::array<float, 2>> ParseSends(std::string_view text)
     for (std::size_t bus = 0; bus < count; bus++)
     {
         const std::string_view part = bus == 0 ? text.substr(0, comma) : text.substr(comma + 1);
-        const std::optional<float> send = ParsePlainDecimal(part);
+        const std::optional<float> send = xsflib::ParsePlainDecimal(part);
         if (!send || !(*send >= 0.0f && *send <= 1.0f))
         {
             return std::nullopt;
@@ -767,7 +755,7 @@ std::optional<TrackVolumes> ParseTrackVolumes(std::string_view text)
         }
 
         const std::optional<int64_t> track = xsflib::ParseInteger(item.substr(0, equals));
-        const std::optional<float> volume = ParsePlainDecimal(item.substr(equals + 1));
+        const std::optional<float> volume = xsflib::ParsePlainDecimal(item.substr(equals + 1));
         if (!track || *track < 0 || *track >= static_cast<int64_t>(volumes.size()) || !volume ||
             !(*volume <= kMaxRatio))
         {
@@ -802,12 +790,17 @@ SequenceStart SequenceStartOf(const Tags& tags)
 
     if (const auto tag = tags.find("3sf_tempo"); tag != tags.end())
     {
-        start.tempo_ratio = ParseRatio(tag->second).value_or(1.0f);
+        start.tempo_ratio = xsflib::psf::ParseRatio(tag->second, kMinRatio, kMaxRatio).value_or(1.0f);
     }
 
     if (const auto tag = tags.find("3sf_pitch"); tag != tags.end())
     {
-        start.pitch = ParseRatio(tag->second).value_or(1.0f);
+        start.pitch = xsflib::psf::ParseRatio(tag->second, kMinRatio, kMaxRatio).value_or(1.0f);
+    }
+
+    if (const auto tag = tags.find("3sf_lpf"); tag != tags.end())
+    {
+        start.lpf = ParseLowPass(tag->second).value_or(0.0f);
     }
 
     if (const auto tag = tags.find("3sf_banks"); tag != tags.end())
@@ -874,6 +867,11 @@ void WriteSequenceStart(const SequenceStart& start, Tags& tags)
     ratio("3sf_pitch", start.pitch);
     ratio("volume", start.volume);
 
+    if (start.lpf != 0.0f)
+    {
+        tags["3sf_lpf"] = ntdlib::ShortestDecimal(start.lpf);
+    }
+
     if (start.banks)
     {
         WriteBanksTag(*start.banks, tags);
@@ -897,8 +895,8 @@ bool NeedsTimedStarts(const SequenceStart& start)
     };
 
     return start.seed.has_value() || std::ranges::any_of(start.variables, later) || start.tempo_ratio != 1.0f ||
-           start.pitch != 1.0f || start.banks.has_value() || start.fx_send[0] != 0.0f || start.fx_send[1] != 0.0f ||
-           start.track_volumes != ntdlib::ctr::snd::kFullTrackVolumes;
+           start.pitch != 1.0f || start.lpf != 0.0f || start.banks.has_value() || start.fx_send[0] != 0.0f ||
+           start.fx_send[1] != 0.0f || start.track_volumes != ntdlib::ctr::snd::kFullTrackVolumes;
 }
 
 } // namespace threesf

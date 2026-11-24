@@ -4,23 +4,23 @@
 counterpart of the DS's 2SF and NCSF.
 
 A 3SF rip includes the game's DSP firmware. The player runs it in
-[Teakra](https://github.com/wwylele/teakra), which emulates the Teak DSP, so the firmware handles
-mixing, filtering and limiting. The rip's mode determines what drives the DSP:
+[Teakra](https://github.com/wwylele/teakra), an emulator of the Teak DSP. The firmware therefore does
+the mixing, filtering and limiting, as on the console. The rip's mode determines what drives the DSP:
 
-- **Game mode** (from a decrypted game with a driver profile): the rip carries the game's
+- **Game mode** (from a decrypted game with a driver profile): the rip contains the game's
   sound code, and the player runs it on an ARM11 interpreter with a high-level Horizon kernel.
   The rip plays as it does in the game.
 - **Archive mode** (from a sound archive, `.bcsar`, or a game without a profile): 3SF's model
   of the SDK sound player (`nw::snd`/`nn::snd`, reverse engineered from Pokemon X) plays the archive. It
   accepts sound archives from any game.
 
-The format is described in [`docs/3sf.md`](docs/3sf.md). Game mode needs a small driver profile
+The format is described in [`docs/3sf.md`](docs/3sf.md). Game mode requires a small driver profile
 per game (`src/rip/rip.cpp`), and so far only Pokemon X (Japan) has one. Archive mode takes any
 sound archive, with a DSP firmware file.
 
 Some games keep groups of their sound data outside the sound archive, in group files (`.bcgrp`).
 `3sfrip` finds each one by its group's name, in the game's RomFS or in the folder of a loose
-`.bcsar` and the folders below it. The `.3sflib` holds the parts of the group files that the rips
+`.bcsar` and the folders below it. The `.3sflib` contains the parts of the group files that the rips
 play. Mighty Gunvolt Burst keeps its sound data that way. It also plays each piece of its music as
 five sequences, one for each channel of the NES's sound chip. `3sfrip` rips each piece as one
 `.mini3sf`. Like the game, the `.mini3sf` starts the five together. Rips with group files or with
@@ -28,7 +28,7 @@ such pieces require a player newer than 3SF 1.3.3. 3SF 1.3.3 refuses them. `docs
 describes both, under "Archive descriptor" and "Sounds that play together".
 
 Besides the main mix, a 3DS sends sounds to two aux buses, A and B. A game puts effects on them
-as it runs, such as a reverb. Its sound archive doesn't hold them. In archive mode, `3sfrip`
+as it runs, such as a reverb. Its sound archive doesn't contain them. In archive mode, `3sfrip`
 writes the effects of these games into their rips. The player runs them as the game's sound
 library does:
 
@@ -44,8 +44,8 @@ library does:
   Warrior's Way puts a reverb on bus B. Mii Force, Slot Car Rivals, Market Crashers and Battleground
   Z put a reverb and a delay on bus B. Mii Trek puts no effect on either bus. The DSP's firmware
   runs the reverbs of Flower Town, Warrior's Way and those four games. The firmware also runs the
-  four games' delays.
-- Luigi's Mansion (2018, North America): a delay on bus A, which the DSP's firmware runs.
+  four games' delays. Ninja Launcher also sends its jingles to its reverb.
+- Luigi's Mansion (2018, North America): a delay on bus A. The DSP's firmware runs it.
 - Six of the 3DS's system titles, the European builds: both System Settings titles, Mii Maker,
   Nintendo eShop, the Activity Log and Swapnote. Each puts a reverb on bus A. Swapnote has it on
   while its music plays.
@@ -77,11 +77,12 @@ build of one. Rips of another loose `.bcsar` or of any other game get none. Rips
 require a player newer than 3SF 1.3.3. 3SF 1.3.3 refuses them. The Plaza and four of its add-on
 games link an earlier version of `nw::snd`'s reverb, with another damping filter. Rips with that
 reverb or with the firmware's delay or reverb require a player newer than 3SF 1.4. 3SF 1.4 refuses
-them. A rip of DJ K.K.'s music holds the club's reverb as an effect set, beside the effects of the
+them. A rip of DJ K.K.'s music contains the club's reverb as an effect set, beside the effects of the
 rest of the archive. Happy Home Designer's 364 pieces of music rip as they play in a room with
 "silence". Each piece gets two more files, named with `_ringing` and `_echoes`. They play the piece
-with the room's reverb or delay, held as effect sets. Players of 3SF 1.4 and older refuse these
-rips. `docs/3sf.md` describes the effects
+with the room's reverb or delay, held as effect sets. Flower Town's 29 `SOUNDLIST_` pieces play
+only in the Plaza's sound test, which plays them dry. Their rips contain the sound test's effects as an
+effect set. Players of 3SF 1.4 and older refuse these rips. `docs/3sf.md` describes the effects
 under "Effects on the aux buses" and "Effect sets".
 
 Some games' code also changes how a sequence plays. It quiets some tracks as a piece starts, or
@@ -98,13 +99,15 @@ Activity Log each play three pieces from one sequence. Each piece keeps a group 
 tracks, and its rip plays that group. Mii Maker's first screen plays tracks 0 to 7 of its music. Two
 later states play other mixes of it, with some tracks at lower volumes.
 Two of Ultimate Angler's catch sounds draw a random number as they start, and the game plays them
-only on some draws. Their rips take a draw that plays the sound, and their comment tag says how
-often the game does. Flower Town turns its watering music down step by step as the Mii walks. The
+only on some draws. Their rips take a draw that plays the sound. Flower Town turns its watering music down step by step as the Mii walks. The
 rips play it at full volume, as it starts. Ninja Launcher speeds its battle music up for the last 10
 seconds of a battle. The Plaza plays its music faster and higher in its quick mode. Each of those
-pieces gets one more file in that state, named with `_hurry` or `_quick`. Mii Force's game-over
-music, SD_BGM_D01, loops until the game tells it to end. It gets two more files that play the
-ending, named with `_ending` and `_ending_early`.
+pieces gets one more file in that state, named with `_hurry` or `_quick`. In Find Mii II, a room
+with a wall of fire, ice or poison plays its battle music quieter and muffled until a hero breaks
+the wall. `BGM_DEN2_Battle01` and `BGM_DEN2_Battle02` get one more file each in that state, named
+with `_wall`. Players of 3SF 1.5 and 1.5.1 play those files without the muffling. Mii Force's
+game-over music, SD_BGM_D01, loops until the game tells it to end. It gets two more files that play
+the ending, named with `_ending` and `_ending_early`.
 Super Mario 3D Land plays a melody as the player collects the notes of a trail, one beat for
 each note. Its seven melodies, such as `SS_NOTE_OBJ_CHIKA`, rip as they sound when the player
 collects every note in time: as written, at their tempo. With each note, the game also sets the
@@ -133,7 +136,7 @@ Animal Crossing: New Leaf's café job music starts with track 7 muted. Its rip p
 K.K.'s songs waits at its start for a value that the game writes. The rips start each song and
 interlude with the game's value. Two of the interludes, `SEQ_BGM_DJ_HS_MURAMELO` and
 `SEQ_BGM_DJ_FC_MURAMELO`, play the town's tune. The game plays the tune that the player's save
-holds. The rips play the first of the game's four default tunes instead, in the key of most of DJ
+contains. The rips play the first of the game's four default tunes instead, in the key of most of DJ
 K.K.'s songs. New Leaf and Animal Crossing: Happy Home Designer play a town's
 tune one note at a time. Each note starts one of 417 `SE_MELODY_` sounds again, such as a
 villager's voice or a door's chime. The rips play each of these sounds once, at the tune's C, in
@@ -143,16 +146,16 @@ the count of the start of the TV show's run. Tomodachi Life's apartment music ge
 each of the Mii's other states, such as `BGM_MANSION_AND_ROOM_track_15`. A Mii's guitar
 (`SE_MII_PLAY_GUITAR_S`, `_M` and `_L`) rips in the first chord of the apartment's music.
 Rips that change a variable after the start, set a track's variable, set the random numbers,
-change the tempo or pitch, give a sequence other banks, give it sends on the aux buses or set its
-tracks' volumes require a player newer than 3SF 1.4. 3SF 1.4 refuses them.
+change the tempo, pitch or low-pass, give a sequence other banks, give it sends on the aux buses or
+set its tracks' volumes require a player newer than 3SF 1.4. 3SF 1.4 refuses them.
 
 ## Tools
 
 | Tool | Description |
 |---|---|
-| `3sfrip <input>...` | Rips each input into a `.3sflib` and one `.mini3sf` per sound, in a folder next to the input that's named after it with `_3sf` added (`-o DIR` puts them in `DIR`). A `.3sflib` that differs from one of the same name in the folder gets the next free name, such as `<name>_2.3sflib`. The rips already in the folder then still play. To replace earlier rips, rip into an empty folder. An input is a decrypted `.3ds`/`.cci`, `.cxi` or `.cia` (encrypted images are rejected), an extracted game directory (`exefs/code.bin`, `exefs/exheader.bin`, `romfs/`), or a `.bcsar`. Games with a driver profile rip in game mode, everything else in archive mode (`--mode` chooses). A `.bcsar` needs a DSP firmware file, any game's `dspaudio.cdc` or a console's `dspfirm.cdc`: give it along with the archive, put it in the archive's folder, or name it with `--firmware`. `--list` shows the sound archives, `--bgm` picks the music (the sounds whose labels mark them as BGM, jingles or fanfares, and the sequences with 3 tracks or more and 50 notes or more), `--only REGEX` picks sounds by their labels, and `--game`/`--artist`/`--year`/`--copyright`/`--by` set tags. Some sequences play nothing until the game sets one of their variables: in archive mode, `--var N=V` sets variable N (0 to 15 the sound's player variables, 16 to 31 the global ones) to V before each sequence starts, and writes it in the rip's `3sf_var` tag. Sounds that make no sound are listed and skipped: those at a volume of 0 in the archive, and the sequences that the length analysis finds never sound. |
-| `3sfplay <file.mini3sf>...` | Renders each sound to a WAV file next to it, at the native 32728 Hz, with the tagged length, fade and volume. `-o FILE` names the output file for a single input, as WAV or FLAC by its extension. `--length` and `--fade` override the tags, `--default` gives the length of a file without one, and `--info` shows the tags. |
-| `plugins/foobar2000` | foobar2000 input component: `foo_input_3sf.dll` for Windows, built with clang-cl, and `foo_input_3sf.component` for macOS. Both are built with the foobar2000 SDK; see its [README](plugins/foobar2000/README.md). |
+| `3sfrip <input>...` | Rips each input into a `.3sflib` and one `.mini3sf` per sound, in a folder next to the input that's named after it with `_3sf` added (`-o DIR` puts them in `DIR`). A `.3sflib` that differs from one of the same name in the folder gets the next free name, such as `<name>_2.3sflib`. The rips already in the folder then still play. To replace earlier rips, rip into an empty folder. An input is a decrypted `.3ds`/`.cci`, `.cxi` or `.cia` (encrypted images are rejected), an extracted game directory (`exefs/code.bin`, `exefs/exheader.bin`, `romfs/`), or a `.bcsar`. Games with a driver profile rip in game mode, everything else in archive mode (`--mode` chooses). A `.bcsar` requires a DSP firmware file, any game's `dspaudio.cdc` or a console's `dspfirm.cdc`: give it along with the archive, put it in the archive's folder, or name it with `--firmware`. `--list` shows the sound archives, `--bgm` picks the music (the sounds whose labels mark them as BGM, jingles or fanfares, and the sequences with 3 tracks or more and 50 notes or more), `--only REGEX` picks sounds by their labels, and `--game`/`--artist`/`--year`/`--copyright`/`--by` set tags. Where a sound archive's string block is missing or damaged, a sequence is labelled from its sequence file, or `SEQ_<index>` if the file has no label for it. Some sequences play nothing until the game sets one of their variables: in archive mode, `--var N=V` sets variable N (0 to 15 the sound's player variables, 16 to 31 the global ones) to V before each sequence starts, and writes it in the rip's `3sf_var` tag. Sounds that make no sound are listed and skipped: those at a volume of 0 in the archive, and the sequences that the length analysis finds never sound. |
+| `3sfplay <file.mini3sf>...` | Renders each sound to a WAV file next to it, at the native 32728 Hz, with the tagged length, fade and volume. Like an album, it skips the silence before the first sound and adds 0.5 s of silence before the track and 1 s after it. `--keep-opening`, `--start-silence T`, `--loops N`, `--one-pass-over T`, `--loop-fade T`, `--end-silence T`, `--ignore-tags` and `--keep-ending` change that, and `--raw` renders the file as it is. `-o FILE` names the output file for a single input, as WAV or FLAC by its extension. `--length` and `--fade` override the tags, `--default` gives the length of a file without one, and `--info` shows the tags. `--fade-exponent P` sets the fade's curve, from 0.5 to 4: 1 fades linearly, and the default, 2, fades with the square of the time left in the fade, as most soundtrack albums do. |
+| `plugins/foobar2000` | foobar2000 input component: `foo_input_3sf.dll` for Windows, built with clang-cl, and `foo_input_3sf.component` for macOS. Both are built with the foobar2000 SDK. See its [README](plugins/foobar2000/README.md). |
 | `plugins/xmplay` | XMPlay input plugin: `xmp-3sf.dll`, a 32-bit DLL for XMPlay on Windows, built with clang-cl and the XMPlay plugin SDK. See its [README](plugins/xmplay/README.md). |
 
 Both tools accept multiple inputs and continue if one fails. A nonexistent input path stops the
@@ -179,20 +182,20 @@ or in a folder inside it. Then restart XMPlay.
 
 The results go next to the files, as above. Drop a sound archive together with a firmware file
 (`.cdc`), unless there's one in the archive's folder already. File and folder names can use any
-characters; on Windows that needs Windows 10 version 1903 or later.
+characters. On Windows, that requires Windows 10 version 1903 or later.
 
 ## Building
 
 You need Git, CMake 3.20 or later and a C++20 compiler. 3SF builds on two libraries: xsflib, for
 players and rippers of the PSF family, and ntdlib, for the hardware and formats of Nintendo's
-consoles. The repository holds them as submodules in `externals/xsflib` and `externals/ntdlib`:
+consoles. The repository contains them as submodules in `externals/xsflib` and `externals/ntdlib`:
 clone with `git clone --recursive`, or run `git submodule update --init --recursive` in a clone.
 The source code archives on the Releases page don't include the submodules. Clone the repository
 instead. zlib and libFLAC are downloaded and built along with 3SF when they aren't installed.
 Python 3 is only needed for the scripts in `driver/`.
 
-- **Windows:** Visual Studio 2022 or later with the "Desktop development with C++" workload,
-  which includes CMake, and its "C++ Clang tools for Windows" component, which adds clang-cl.
+- **Windows:** Visual Studio 2022 or later with the "Desktop development with C++" workload
+  (it includes CMake) and its "C++ Clang tools for Windows" component (it adds clang-cl).
   Configure with `cmake -S . -B build -A x64 -T ClangCL` in place of the configure command
   below. Run the commands in a Developer PowerShell or Developer Command Prompt.
 - **macOS on Apple Silicon:** the Xcode command line tools (`xcode-select --install`) and CMake
@@ -210,7 +213,7 @@ ctest --test-dir build -C Release
 
 `CMakePresets.json` has `release` and `debug` presets for the same steps, such as
 `cmake --preset release`, `cmake --build --preset release` and `ctest --preset release`. The
-presets need CMake 3.23 or later. They don't select clang-cl. On Windows, use the commands
+presets require CMake 3.23 or later. They don't select clang-cl. On Windows, use the commands
 above.
 
 CI (`.github/workflows/ci.yml`) builds 3SF on every push to `main` that changes more than
@@ -230,8 +233,8 @@ ntdlib's DSP glue tests (`tests/ctr_teakra_dsp_test.cpp` there) use small firmwa
 timeouts, pipe transfers and interrupts in the glue (`src/ctr/dsp/teakra_dsp.*` in ntdlib).
 
 Emulating the DSP takes most of the time. On x86-64, where the system allows it, Teakra
-translates the DSP firmware into machine code as it runs, which renders the same samples faster
-than interpreting it. On Apple Silicon and in 32-bit builds Teakra interprets the firmware.
+translates the DSP firmware into machine code as it runs. The machine code renders the same samples
+as the interpreter, faster. On Apple Silicon and in 32-bit builds Teakra interprets the firmware.
 Set `TEAKRA_JIT=0` in the environment to disable the JIT. A test runs random programs through
 both the JIT and interpreter and compares the results (ntdlib's `tests/ctr_teakra_jit_test.cpp`).
 
@@ -253,7 +256,7 @@ restoring the state reproduces the same results (ntdlib's `tests/ctr_teakra_stat
 
 ```
 docs/3sf.md          the format
-externals/           the libraries xsflib and ntdlib (ntdlib holds Teakra and the DSP)
+externals/           the libraries xsflib and ntdlib (ntdlib contains Teakra and the DSP)
 driver/              the guest driver (ARM code, prebuilt into src/rip/driver_blob.h)
 src/arm/             ARM11 interpreter (ARMv6K, Thumb, VFPv2)
 src/horizon/         Horizon kernel HLE, services, RomFS, the emulated system

@@ -94,7 +94,7 @@ SequenceShape WalkSequence(std::span<const uint8_t> data, uint32_t start)
 {
     using ntdlib::commands::Kind;
 
-    const ntdlib::nwsnd::Grammar grammar = ntdlib::nwsnd::GrammarOf<ntdlib::nwsnd::CtrPolicy>();
+    const ntdlib::nwsnd::Grammar kGrammar = ntdlib::nwsnd::GrammarOf<ntdlib::nwsnd::CtrPolicy>();
     SequenceShape shape;
     std::vector<bool> seen(data.size());
     std::vector<std::size_t> todo{start};
@@ -106,7 +106,7 @@ SequenceShape WalkSequence(std::span<const uint8_t> data, uint32_t start)
         {
             seen[pc] = true;
             const std::optional<ntdlib::nwsnd::DecodedCommand> read =
-                ntdlib::nwsnd::DecodeCommand(data, static_cast<uint32_t>(pc), grammar);
+                ntdlib::nwsnd::DecodeCommand(data, static_cast<uint32_t>(pc), kGrammar);
             if (!read)
             {
                 break;
@@ -126,7 +126,7 @@ SequenceShape WalkSequence(std::span<const uint8_t> data, uint32_t start)
                 todo.push_back(c.target);
             }
 
-            if (!ntdlib::nwsnd::FallsThrough(c, grammar))
+            if (!ntdlib::nwsnd::FallsThrough(c, kGrammar))
             {
                 break;
             }

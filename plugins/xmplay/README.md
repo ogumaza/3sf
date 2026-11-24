@@ -15,13 +15,18 @@ a folder inside it, and restart XMPlay.
 ## Features
 
 - Tags become XMPlay's tags: `game` as album and `year` as date. The Message info window lists every tag except
-  `_lib`, `length`, `fade`, `volume`, `utf8` and the `3sf_` tags that set how a sound plays: `3sf_var`,
-  `3sf_var_change`, `3sf_seed`, `3sf_tempo`, `3sf_pitch`, `3sf_banks`, `3sf_fx_send`, `3sf_track_volume`, `3sf_aux`,
-  `3sf_mute` and `3sf_silence`.
+  `_lib`, `length`, `fade`, `loop_start`, `loop_length`, `volume`, `utf8` and the `3sf_` tags that set how a sound
+  plays: `3sf_var`, `3sf_var_change`, `3sf_seed`, `3sf_tempo`, `3sf_pitch`, `3sf_lpf`, `3sf_banks`,
+  `3sf_fx_send`, `3sf_track_volume`, `3sf_aux`, `3sf_mute` and `3sf_silence`.
 - Length and fade come from the `length` and `fade` tags. Files without a length tag play for the default length and
   fade. They stop early when the sound ends by itself.
-- The plugin's options page, among the decoders in XMPlay's options: default length and fade, endless playback, and
-  rendering ahead. XMPlay stores the settings.
+- Each track plays the way a soundtrack album plays it. By default the plugin skips the silence before the first sound,
+  plays 0.5 s of silence, then the track as its tags say, and 1 s of silence after it. The options page has eight
+  settings for this: "Skip silence at the start", "Silence before a track", "Loops" (the number of passes, from the
+  tags `loop_start` and `loop_length`), "One pass for long loops", "Fade length" for loops, "Silence after a track",
+  "Ignore length and fade tags" and "Skip silence at the end". The settings never change a file.
+- The plugin's options page, among the decoders in XMPlay's options: default length and fade, the fade's curve,
+  endless playback, and rendering ahead. XMPlay stores the settings.
 - During playback, the plugin renders ahead on a separate thread as fast as the CPU allows. It buffers up to 10 minutes
   and 10 seconds of audio (about 76 MiB). Seeking within the buffer is instant. Seeking further ahead waits for
   rendering to reach the requested position. Longer tracks also save the emulation state every 2 seconds. Seeking back
@@ -39,7 +44,7 @@ repository. It downloads the XMPlay plugin SDK from un4seen.com (`externals/xsfl
 
 **On Windows:** you need Visual Studio 2022 or later with the C++ workload and the "C++ Clang tools for Windows"
 component, plus CMake 3.20 or later. Download the XMPlay plugin SDK (<https://www.un4seen.com/files/xmp-sdk.zip>) and
-unpack it. Use the folder that holds `xmpin.h` as the SDK path below.
+unpack it. Use the folder that contains `xmpin.h` as the SDK path below.
 
 ```
 cmake -S . -B build-xmplay -A Win32 -T ClangCL -DXMPLAY_SDK_DIR=C:/path/to/xmp-sdk
@@ -47,7 +52,7 @@ cmake --build build-xmplay --config Release --target xmp-3sf
 ```
 
 This produces `build-xmplay/plugins/xmplay/Release/xmp-3sf.dll`. Everything is built with the static C runtime (`/MT`).
-The plugin therefore needs no runtime DLLs.
+The plugin therefore requires no runtime DLLs.
 
 ## Performance
 

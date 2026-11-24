@@ -36,12 +36,15 @@ public:
     // with the previous snapshot.
     struct SourceSnapshot;
 
-    // A snapshot of the player between emulation steps. It holds pointers into this player's emulation and can only be
-    // restored to this player, before the next Start.
+    // A snapshot of the player between emulation steps. It contains pointers into this player's emulation and can only
+    // be restored to this player, before the next Start.
     using Snapshot = xsflib::player::Snapshot<SourceSnapshot>;
 
     // The rate players report. The exact rate is 268111856 / 8192 = 32728.498 Hz.
     static constexpr int kSampleRate = kPlayerSampleRate;
+
+    // The length tags count from the first sound: the first sample that isn't 0 (docs/3sf.md, "Length and fade").
+    static constexpr xsflib::player::LengthOrigin kLengthOrigin = xsflib::player::LengthOrigin::kFirstSound;
 
     Player();
     ~Player();

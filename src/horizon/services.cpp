@@ -70,7 +70,7 @@ constexpr std::array<NamedService, 4> kRegistered = {{
 constexpr uint32_t kFsNotFound = 0xc8804478;
 constexpr uint32_t kFsUnhandled = 0xe0c046be;
 
-// The archive that holds the RomFS, a binary path, and the handle that OpenArchive gives for it.
+// The archive that contains the RomFS, a binary path, and the handle that OpenArchive gives for it.
 constexpr uint32_t kRomFsArchive = 3;
 constexpr uint32_t kBinaryPath = 2;
 constexpr uint64_t kRomFsArchiveHandle = 0x0000003000000003;
@@ -79,7 +79,7 @@ constexpr uint64_t kRomFsArchiveHandle = 0x0000003000000003;
 constexpr int32_t kSrvSemaphoreMaximum = 64;
 
 // The ARM11's view of DSP data memory (ConvertProcessAddressFromDspDram).
-constexpr uint32_t kDspDataMemory = 0x1ff40000;
+constexpr uint32_t kDspDataMemory = kDspRam + ntdlib::ctr::dsp::kDataMemoryOffset;
 
 // cfg:u's configuration blocks (GetConfigInfoBlk2). A block that isn't here reads as zeros.
 struct ConfigBlock
@@ -137,7 +137,8 @@ Services::Services(Kernel& kernel, ntdlib::ctr::dsp::TeakraDsp& dsp, std::vector
     dsp_.SetInterruptHandler([this](Interrupt interrupt, Pipe pipe) { OnInterrupt(interrupt, pipe); });
 }
 
-// The DSP's interrupt handler calls the services. The DSP can outlive them. The handler therefore goes with them.
+// The DSP's interrupt handler calls the services. The DSP can outlive them. The destructor therefore removes the
+// handler.
 Services::~Services()
 {
     dsp_.SetInterruptHandler({});
@@ -686,8 +687,8 @@ void Services::WriteProcessPipe(ipc::CommandBuffer& command)
     command.Reply(1, 0, {kSuccess});
 }
 
-// ReadPipe and ReadPipeIfPossible: the data, if the pipe holds the size asked for, goes to the caller's receive buffer
-// 0. Neither waits for data.
+// ReadPipe and ReadPipeIfPossible: the data, if the pipe contains the size asked for, goes to the caller's receive
+// buffer 0. Neither waits for data.
 void Services::ReadPipe(ipc::CommandBuffer& command)
 {
     const auto pipe = static_cast<Pipe>(command.Word(1) & 0xff);

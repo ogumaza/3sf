@@ -4,7 +4,7 @@
 # foobar2000 on macOS. Uploads one .fb2k-component with all three: the 32-bit DLL at the top level, the 64-bit DLL in
 # x64/ and the Mac bundle (Apple Silicon) in mac/. Runs only when started by hand (Actions > foobar2000 component > Run
 # workflow). It uses no Actions minutes otherwise. The foobar2000 SDK is downloaded from foobar2000.org at build time
-# (externals/xsflib/ci/foobar2000-sdk); it isn't stored in this repository.
+# (externals/xsflib/ci/foobar2000-sdk). It isn't stored in this repository.
 name: foobar2000 component
 
 on:
@@ -25,7 +25,7 @@ jobs:
         with:
           component: foo_input_3sf
 
-  # This job puts the package together, because zip keeps the bundle's file permissions and an artifact wouldn't.
+  # This job puts the package together. zip keeps the bundle's file permissions, and an artifact wouldn't.
   macos:
     needs: windows
     runs-on: macos-15

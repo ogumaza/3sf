@@ -46,9 +46,8 @@ std::unique_ptr<horizon::System> MakeGameSystem(const LoadedSet& set, horizon::K
 
     config.app_memory = d.app_memory;
     auto system = std::make_unique<horizon::System>(image, config, upstream);
-    system->GetKernel().log_ = [](const std::string&) // drop the guest's debug output
-    {
-    };
+    // The guest's debug output is dropped.
+    system->GetKernel().SetLog([](const std::string&) {});
 
     return system;
 }

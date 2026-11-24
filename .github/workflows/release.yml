@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: MIT
 
-# A vX.Y.Z tag publishes a release. X.Y.Z must match CMakeLists.txt, with notes in docs/release-notes/X.Y.Z.md.
+# A vX.Y.Z tag publishes a release. X.Y.Z must match CMakeLists.txt. The notes must be in docs/release-notes/X.Y.Z.md.
 # Builds the Windows programs, the foobar2000 component and the XMPlay plugin with clang-cl. Attaches three downloads:
 #   3sf-X.Y.Z-win-x64.zip               3sfrip and 3sfplay for 64-bit Windows, with README.md and the licences
 #   foo_input_3sf-X.Y.Z.fb2k-component  the component for 64-bit and 32-bit foobar2000: the 32-bit DLL at the top
 #                                       level and the 64-bit one in x64/, with the licences
 #   xmp-3sf-X.Y.Z.zip                   the XMPlay plugin, a 32-bit DLL, with the licences
-# Manual runs (Actions > Release > Run workflow) build the same files as an artifact without publishing a release, even
-# when started from a tag.
+# Manual runs (Actions > Release > Run workflow) build the same files as an artifact without publishing a release. A
+# manual run from a tag does the same.
 # The build downloads the foobar2000 SDK from foobar2000.org (externals/xsflib/ci/foobar2000-sdk) and the XMPlay plugin
 # SDK from un4seen.com (externals/xsflib/ci/xmplay-sdk).
 name: Release
@@ -69,7 +69,7 @@ jobs:
           foobar2000: true
           xmplay: ${{ matrix.xmplay || false }}
 
-  # zip, run on Linux, writes the names in the packages with forward slashes, which foobar2000 needs in a component.
+  # zip, run on Linux, writes the names in the packages with forward slashes. foobar2000 requires those in a component.
   package:
     needs: [version, windows]
     runs-on: ubuntu-24.04
@@ -87,12 +87,6 @@ jobs:
           programs: 3sfrip 3sfplay
           component: foo_input_3sf
           xmplay-plugin: xmp-3sf
-
-      # The 32-bit build is for the foobar2000 component and the XMPlay plugin. 32-bit Windows is unsupported for the
-      # programs.
-      - name: Leave out the 32-bit programs
-        shell: bash
-        run: rm dist/*-win32.zip
 
       - uses: ./externals/xsflib/ci/release-publish
         with:

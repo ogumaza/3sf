@@ -30,9 +30,9 @@ struct PluginTraits
     static constexpr uint8_t kPsfVersion = threesf::kPsfVersion3sf;
     static constexpr uint64_t kMaxFileSize = 256u << 20; // largest file read into memory
 
-    // The tags that set how a set plays. A rip of an archive may hold them. foobar2000 keeps them when the user removes
-    // the tags. A sequence that waits for its variables would otherwise go silent. XMPlay's Message info window leaves
-    // them out.
+    // The tags that set how a set plays. A rip of an archive may contain them. foobar2000 keeps them when the user
+    // removes the tags. A sequence that waits for its variables would otherwise go silent. XMPlay's Message info window
+    // leaves them out.
     static constexpr std::array<const char*, threesf::kPlaybackTags.size()> kPlaybackTags = threesf::kPlaybackTags;
 
     static constexpr const char* kVersion = THREESF_VERSION;

@@ -143,10 +143,10 @@ void Kernel::SvcExitThread()
     for (std::size_t i = 0; i < s.handles.size(); i++)
     {
         Object& object = s.objects[s.handles[i].object];
-        if (object.kind == ObjectKind::kMutex && object.holder == thread)
+        if (object.kind == ObjectKind::kMutex && object.mutex.holder == thread)
         {
-            object.holder = kNone;
-            object.lock_count = 0;
+            object.mutex.holder = kNone;
+            object.mutex.lock_count = 0;
             WakeWaiters(s.handles[i].object);
         }
     }
@@ -354,7 +354,7 @@ Kernel::ResourceFigures Kernel::Resource(uint32_t name) const
     case 0: // priority
         return {0x18, 0x18};
     case 1: // commit
-        return {config_.app_memory, s.heap_size + s.linear_size + config_.program_end};
+        return {config_.app_memory, s.heap_size + s.linear_size + program_end_};
     case 2: // threads
         return {0x20, s.threads.size()};
     case 3: // events

@@ -43,7 +43,8 @@ constexpr std::size_t kCollectMinimum = 256;
 
 } // namespace
 
-Kernel::Kernel(const KernelConfig& config) : config_(config), cpu_(memory_)
+Kernel::Kernel(const KernelConfig& config, uint32_t program_end)
+    : config_(config), program_end_(program_end), cpu_(memory_)
 {
     state_.collect_at = kCollectMinimum;
 
@@ -236,8 +237,8 @@ uint32_t Kernel::NewMutex()
 uint32_t Kernel::NewSemaphore(int32_t count, int32_t maximum)
 {
     const uint32_t object = NewObject(ObjectKind::kSemaphore);
-    state_.objects[object].count = count;
-    state_.objects[object].maximum = maximum;
+    state_.objects[object].semaphore.count = count;
+    state_.objects[object].semaphore.maximum = maximum;
 
     return object;
 }
@@ -279,16 +280,16 @@ bool Kernel::IsEvent(uint32_t object) const
 
 void Kernel::SetSignalHook(uint32_t event)
 {
-    state_.objects[event].hooked = true;
+    state_.objects[event].signal.hooked = true;
 }
 
 void Kernel::Signal(uint32_t object)
 {
-    state_.objects[object].signalled = true;
+    state_.objects[object].signal.signalled = true;
     WakeWaiters(object);
-    if (state_.objects[object].reset_type == kPulse)
+    if (state_.objects[object].signal.reset_type == kPulse)
     {
-        state_.objects[object].signalled = false;
+        state_.objects[object].signal.signalled = false;
     }
 }
 
@@ -324,6 +325,16 @@ void Kernel::Log(const char* format, ...)
     {
         std::fprintf(stderr, "%s\n", message);
     }
+}
+
+const std::string& Kernel::Error() const
+{
+    return error_;
+}
+
+void Kernel::SetLog(std::function<void(const std::string&)> log)
+{
+    log_ = std::move(log);
 }
 
 Kernel::Snapshot Kernel::Save(const Snapshot* previous) const
@@ -414,13 +425,13 @@ void Kernel::ExpireTimeout(uint32_t thread, uint64_t generation)
 // was scheduled makes it stale.
 void Kernel::ExpireTimer(uint32_t timer, uint64_t generation)
 {
-    if (state_.objects[timer].generation != generation)
+    if (state_.objects[timer].signal.generation != generation)
     {
         return;
     }
 
     Signal(timer);
-    const uint64_t interval = state_.objects[timer].interval;
+    const uint64_t interval = state_.objects[timer].signal.interval;
     if (interval != 0)
     {
         ScheduleExpiry(timer, state_.ticks + interval);
@@ -548,7 +559,7 @@ uint32_t Kernel::NewObject(ObjectKind kind)
 uint32_t Kernel::NewEventOrTimer(ObjectKind kind, uint32_t reset_type)
 {
     const uint32_t object = NewObject(kind);
-    state_.objects[object].reset_type = reset_type;
+    state_.objects[object].signal.reset_type = reset_type;
 
     return object;
 }

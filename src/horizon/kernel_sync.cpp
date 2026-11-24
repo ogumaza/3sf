@@ -66,15 +66,15 @@ void Kernel::SvcReleaseMutex()
     }
 
     Object& object = state_.objects[*mutex];
-    if (object.holder != state_.current)
+    if (object.mutex.holder != state_.current)
     {
         r.r[0] = kNotOwner;
         return;
     }
 
-    if (--object.lock_count == 0)
+    if (--object.mutex.lock_count == 0)
     {
-        object.holder = kNone;
+        object.mutex.holder = kNone;
         WakeWaiters(*mutex);
     }
 
@@ -100,14 +100,14 @@ void Kernel::SvcReleaseSemaphore()
 
     Object& object = state_.objects[*semaphore];
     const auto release = static_cast<int32_t>(r.r[2]);
-    if (release < 0 || int64_t{object.count} + release > object.maximum)
+    if (release < 0 || int64_t{object.semaphore.count} + release > object.semaphore.maximum)
     {
         r.r[0] = kOutOfRange;
         return;
     }
 
-    r.r[1] = static_cast<uint32_t>(object.count);
-    object.count += release;
+    r.r[1] = static_cast<uint32_t>(object.semaphore.count);
+    object.semaphore.count += release;
     WakeWaiters(*semaphore);
     r.r[0] = kSuccess;
 }
@@ -130,7 +130,7 @@ void Kernel::SvcSignalEvent()
         return;
     }
 
-    if (state_.objects[*event].hooked && host_)
+    if (state_.objects[*event].signal.hooked && host_)
     {
         host_->RunSignalHook(*event);
     }
@@ -164,8 +164,8 @@ void Kernel::SvcSetTimer()
     }
 
     Object& object = state_.objects[*timer];
-    object.generation++;
-    object.interval = NsToTicks(Nanoseconds(r.r[1], r.r[4]));
+    object.signal.generation++;
+    object.signal.interval = NsToTicks(Nanoseconds(r.r[1], r.r[4]));
     ScheduleExpiry(*timer, state_.ticks + NsToTicks(Nanoseconds(r.r[2], r.r[3])));
     r.r[0] = kSuccess;
 }
@@ -180,7 +180,7 @@ void Kernel::SvcCancelTimer()
         return;
     }
 
-    state_.objects[*timer].generation++;
+    state_.objects[*timer].signal.generation++;
     r.r[0] = kSuccess;
 }
 
@@ -199,7 +199,7 @@ void Kernel::ClearSignal(ObjectKind kind)
         return;
     }
 
-    state_.objects[*object].signalled = false;
+    state_.objects[*object].signal.signalled = false;
     r.r[0] = kSuccess;
 }
 
@@ -500,7 +500,7 @@ void Kernel::StartTimeout(uint32_t thread, int64_t ns)
 // A set or cancel of the timer makes the expiry stale.
 void Kernel::ScheduleExpiry(uint32_t timer, uint64_t due)
 {
-    Schedule(due, TimedEvent::Kind::kTimerExpiry, timer, state_.objects[timer].generation);
+    Schedule(due, TimedEvent::Kind::kTimerExpiry, timer, state_.objects[timer].signal.generation);
 }
 
 void Kernel::Schedule(uint64_t due, TimedEvent::Kind kind, uint32_t target, uint64_t generation)
@@ -571,11 +571,11 @@ bool Kernel::MustWait(uint32_t object, uint32_t thread) const
     {
     case ObjectKind::kEvent:
     case ObjectKind::kTimer:
-        return !o.signalled;
+        return !o.signal.signalled;
     case ObjectKind::kMutex:
-        return o.holder != kNone && o.holder != thread;
+        return o.mutex.holder != kNone && o.mutex.holder != thread;
     case ObjectKind::kSemaphore:
-        return o.count <= 0;
+        return o.semaphore.count <= 0;
     case ObjectKind::kThread:
         return state_.threads[o.thread].state != ThreadState::kDead;
     default:
@@ -590,19 +590,19 @@ void Kernel::Acquire(uint32_t object, uint32_t thread)
     {
     case ObjectKind::kEvent:
     case ObjectKind::kTimer:
-        if (o.reset_type == kOneShot)
+        if (o.signal.reset_type == kOneShot)
         {
-            o.signalled = false;
+            o.signal.signalled = false;
         }
         break;
 
     case ObjectKind::kMutex:
-        o.holder = thread;
-        o.lock_count++;
+        o.mutex.holder = thread;
+        o.mutex.lock_count++;
         break;
 
     case ObjectKind::kSemaphore:
-        o.count--;
+        o.semaphore.count--;
         break;
 
     default:

@@ -26,7 +26,7 @@ using threesf_test::CheckRefused;
 
 using Kind = nnsnd::AuxEffect::Kind;
 
-// Whether two lists hold the same effects with the same parameters.
+// Whether two lists contain the same effects with the same parameters.
 static bool SameEffects(const nnsnd::AuxEffectLists& a, const nnsnd::AuxEffectLists& b)
 {
     for (std::size_t bus = 0; bus < a.size(); bus++)
@@ -259,9 +259,10 @@ static void TestAuxEffectLayout()
     // The first effect's kind is the u32 after the count, at 16 + 9 + 7 + 2. Its flags end its 44 bytes.
     constexpr std::size_t kKind = 34;
     constexpr std::size_t kFlags = kKind + 4 + 40;
+
     XSFLIB_CHECK(xsflib::LoadLe32(&raw[kKind]) == 1 && xsflib::LoadLe32(&raw[kFlags]) == 3);
 
-    // An effect of a kind that this player doesn't know, or with flags that the effect doesn't have, gets a message
+    // An effect of a kind that this player doesn't support, or with flags that the effect doesn't have, gets a message
     // from Check. Parse reads no further.
     std::vector<uint8_t> odd = raw;
     xsflib::StoreLe32(&odd[kKind], 9);
@@ -327,7 +328,7 @@ static void TestRefusedAuxEffects()
     XSFLIB_CHECK(refused.Check().has_value());
 
     // The effects' buffers can't take more than the 178 MiB that a 3DS gives a program. A delay of 1,000 s on four
-    // channels needs 499 MiB.
+    // channels requires 499 MiB.
     ArchiveDescriptor large = d;
     large.aux_effects[0][1].delay.delay_time = 1000000;
     XSFLIB_CHECK(large.Check() ==
@@ -456,10 +457,9 @@ static void TestNoAuxEffects()
     XSFLIB_CHECK(empty_back && empty_back->aux_effects[0].empty() && empty_back->aux_effects[1].empty());
 }
 
-static void TestEffectSets()
+// A descriptor of version 3 with two effect sets: a reverb on bus A, then a delay on bus B.
+static ArchiveDescriptor EffectSetsDescriptor()
 {
-    // Version 3 gives further sets of effects after those of bit 2 (docs/3sf.md, "Effect sets"). A mini's 3sf_aux tag
-    // picks one. Set 0 is the descriptor's aux effects.
     nnsnd::AuxEffect reverb;
     reverb.kind = Kind::kNnSndReverb;
     reverb.reverb = {.early_reflection_time = 10,
@@ -481,6 +481,15 @@ static void TestEffectSets()
     d.firmware_path = "b.cdc";
     d.effect_sets = {{{{reverb}, {}}}, {{{}, {delay}}}};
 
+    return d;
+}
+
+// Version 3 gives further sets of effects after those of bit 2 (docs/3sf.md, "Effect sets"). A mini's 3sf_aux tag picks
+// one. Set 0 is the descriptor's aux effects.
+static void TestEffectSets()
+{
+    const ArchiveDescriptor d = EffectSetsDescriptor();
+
     const auto raw = d.Serialize();
     const auto back = ArchiveDescriptor::Parse(raw);
 
@@ -501,9 +510,15 @@ static void TestEffectSets()
     {
         XSFLIB_CHECK(!ArchiveDescriptor::Parse(std::vector<uint8_t>(raw.begin(), raw.begin() + size)).has_value());
     }
+}
 
-    // Version 3 gives its sets with the effects. A set's effect that this player can't play, or whose buffers take too
-    // much memory, gets a message that names the set.
+// Version 3 gives its sets with the effects. A set's effect that this player can't play, or whose buffers take too much
+// memory, gets a message that names the set.
+static void TestRefusedEffectSets()
+{
+    const ArchiveDescriptor d = EffectSetsDescriptor();
+    const auto raw = d.Serialize();
+
     ArchiveDescriptor bare = d;
     bare.flags = kFlagDspRequired;
     XSFLIB_CHECK(bare.Check() ==
@@ -526,8 +541,13 @@ static void TestEffectSets()
     ArchiveDescriptor refused = d;
     refused.effect_sets[0][0][0].reverb.coloration = 1.5f;
     XSFLIB_CHECK(refused.Check() == "the archive descriptor's effect set 1: the reverb's parameters are out of range");
+}
 
-    // Versions 1 and 2 have no sets. Their bytes are those that players of 3SF 1.4 read, and they load as before.
+// Versions 1 and 2 have no sets. Their bytes are those that players of 3SF 1.4 read, and they load as before.
+static void TestVersionsWithoutEffectSets()
+{
+    const ArchiveDescriptor d = EffectSetsDescriptor();
+    const nnsnd::AuxEffect& delay = d.effect_sets[1][1][0];
     for (const uint32_t version : {ArchiveDescriptor::kVersion, ArchiveDescriptor::kListVersion})
     {
         ArchiveDescriptor older = d;
@@ -542,9 +562,12 @@ static void TestEffectSets()
         XSFLIB_CHECK(older_back && !older_back->Check() && older_back->effect_sets.empty() &&
                      SameEffects(older_back->aux_effects, older.aux_effects));
     }
+}
 
-    // The 3sf_aux tag gives the set: 0 to 65535, in decimal, with white space around it allowed. A mini without the
-    // tag, or with one that doesn't parse, plays set 0.
+// The 3sf_aux tag gives the set: 0 to 65535, in decimal, with white space around it allowed. A mini without the tag, or
+// with one that doesn't parse, plays set 0.
+static void TestEffectSetTag()
+{
     XSFLIB_CHECK(ParseEffectSet(" 1\n") == 1u && ParseEffectSet("65535") == 65535u && ParseEffectSet("007") == 7u);
     CheckRefused(ParseEffectSet, {"", " ", "-1", "65536", "0x1", "1 2", "1.0", "+1", "a"});
     XSFLIB_CHECK(EffectSetOf({{"3sf_aux", "2"}}) == 2u && EffectSetOf({}) == 0u &&
@@ -560,6 +583,9 @@ int main()
     TestNoAuxEffects();
     TestFirmwareRecords();
     TestEffectSets();
+    TestEffectSetTag();
+    TestRefusedEffectSets();
+    TestVersionsWithoutEffectSets();
 
     return Summary("aux effects");
 }

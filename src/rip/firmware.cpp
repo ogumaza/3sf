@@ -4,7 +4,6 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <cstring>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -25,7 +24,9 @@ namespace
 
 using ntdlib::ctr::dsp::Dsp1Image;
 
-// True if a DSP1 image starts at `start` in `code`, its size and segments lie inside it, and it lies inside `code`.
+// True if a DSP1 image starts at `start` in `code`, its size and segments are inside it, and it's inside `code`. A
+// "DSP1" can turn up in code by chance. ntdlib's loader throws for an image whose segments are outside it. This test
+// checks them first.
 bool IsDspImageAt(const std::vector<uint8_t>& code, std::size_t start)
 {
     if (code.size() - start < Dsp1Image::kHeaderSize)
@@ -136,8 +137,7 @@ std::optional<GameFirmware> FindGameFirmware(const GameFiles& game, const GamePr
 
 bool IsDspFirmware(const std::vector<uint8_t>& data)
 {
-    return data.size() >= Dsp1Image::kHeaderSize &&
-           std::memcmp(data.data() + Dsp1Image::kMagicOffset, Dsp1Image::kMagic.data(), Dsp1Image::kMagic.size()) == 0;
+    return ntdlib::ctr::dsp::IsDsp1Image(data);
 }
 
 } // namespace threesf::rip

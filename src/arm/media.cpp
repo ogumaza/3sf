@@ -6,6 +6,7 @@
 #include <bit>
 #include <cstdint>
 
+#include "ntdlib/arm/alu.h"
 #include "xsflib/bytes.h"
 
 #include "arm/cpu.h"
@@ -118,8 +119,8 @@ bool Cpu::MediaParallelAddSubtract(uint32_t op)
             }
 
         case 2:
-            lane = (is_signed ? static_cast<uint32_t>(SatSigned(sum, width, ignored_saturation))
-                              : SatUnsigned(sum, width, ignored_saturation)) &
+            lane = (is_signed ? static_cast<uint32_t>(ntdlib::arm::SignedSaturate(sum, width, ignored_saturation))
+                              : ntdlib::arm::UnsignedSaturate(sum, width, ignored_saturation)) &
                    mask;
             break;
 
@@ -238,11 +239,11 @@ void Cpu::MediaSaturate(uint32_t op)
     bool saturated = false;
     if ((op >> 22) & 1)
     {
-        state_.r[rd] = SatUnsigned(value, sat, saturated);
+        state_.r[rd] = ntdlib::arm::UnsignedSaturate(value, sat, saturated);
     }
     else
     {
-        state_.r[rd] = static_cast<uint32_t>(SatSigned(value, sat + 1, saturated));
+        state_.r[rd] = static_cast<uint32_t>(ntdlib::arm::SignedSaturate(value, sat + 1, saturated));
     }
 
     if (saturated)
@@ -263,12 +264,13 @@ void Cpu::MediaSaturate16(uint32_t op)
     bool saturated = false;
     if ((op >> 22) & 1)
     {
-        state_.r[rd] = (SatUnsigned(lo, sat, saturated) & 0xffff) | (SatUnsigned(hi, sat, saturated) << 16);
+        state_.r[rd] = (ntdlib::arm::UnsignedSaturate(lo, sat, saturated) & 0xffff) |
+                       (ntdlib::arm::UnsignedSaturate(hi, sat, saturated) << 16);
     }
     else
     {
-        state_.r[rd] = (static_cast<uint32_t>(SatSigned(lo, sat + 1, saturated)) & 0xffff) |
-                       (static_cast<uint32_t>(SatSigned(hi, sat + 1, saturated)) << 16);
+        state_.r[rd] = (static_cast<uint32_t>(ntdlib::arm::SignedSaturate(lo, sat + 1, saturated)) & 0xffff) |
+                       (static_cast<uint32_t>(ntdlib::arm::SignedSaturate(hi, sat + 1, saturated)) << 16);
     }
 
     if (saturated)

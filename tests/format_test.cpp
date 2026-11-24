@@ -14,6 +14,7 @@
 #include <iterator>
 #include <map>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "xsflib/bytes.h"
@@ -114,9 +115,16 @@ static void TestLoadSet()
 
         XSFLIB_CHECK(LoadSet("dir/flags.3sflib", reader, set).has_value());
     }
+}
 
-    // A driver block of version 1 in stereo plays. One of another version, or with another output mode, doesn't,
-    // including when a mini3sf patches the output mode.
+// A driver block of version 1 in stereo plays. One of another version, or with another output mode, doesn't, including
+// when a mini3sf patches the output mode.
+static void TestDriverBlock()
+{
+    std::map<std::string, std::vector<uint8_t>> fs;
+    const FileReader reader = MapReader(fs);
+    ProcessDescriptor d;
+    d.status_address = 0x1234;
     const auto driver_block = [](uint32_t version, uint32_t mode)
     {
         std::vector<uint8_t> block(0x20, 0);
@@ -142,6 +150,7 @@ static void TestLoadSet()
         fs["dir/patched.mini3sf"] = WritePsf(kPsfVersion3sf, {}, b.Data(), {{"_lib", "stereo.3sflib"}});
     }
 
+    LoadedSet set;
     XSFLIB_CHECK(!LoadSet("dir/stereo.3sflib", reader, set));
     XSFLIB_CHECK(LoadSet("dir/mono.3sflib", reader, set).has_value());
     XSFLIB_CHECK(LoadSet("dir/surround.3sflib", reader, set).has_value());
@@ -149,7 +158,9 @@ static void TestLoadSet()
     XSFLIB_CHECK(LoadSet("dir/patched.mini3sf", reader, set).has_value());
 }
 
-static void TestArchiveMode()
+// A player takes versions 1 to 3, with bit 0 of the flags set, bit 1 for group files and bit 2 for effects, in stereo.
+// aux_effects_test checks version 3.
+static void TestArchiveDescriptorChecks()
 {
     ArchiveDescriptor d;
     d.version = 2;
@@ -158,17 +169,6 @@ static void TestArchiveMode()
     d.archive_path = "sound/b.bcsar";
     d.firmware_path = "dspaudio.cdc";
 
-    const auto raw = d.Serialize();
-    const auto back = ArchiveDescriptor::Parse(raw);
-
-    XSFLIB_CHECK(raw.size() % 4 == 0);
-    XSFLIB_CHECK(back && back->version == d.version && back->flags == d.flags && back->output_mode == d.output_mode &&
-                 back->archive_path == d.archive_path && back->firmware_path == d.firmware_path);
-    XSFLIB_CHECK(!ArchiveDescriptor::Parse(std::vector<uint8_t>(raw.begin(), raw.begin() + 18)).has_value());
-    XSFLIB_CHECK(!ProcessDescriptor::Parse(raw).has_value());
-
-    // A player takes versions 1 to 3, with bit 0 of the flags set, bit 1 for group files and bit 2 for effects, in
-    // stereo. aux_effects_test checks version 3.
     XSFLIB_CHECK(d.Check().has_value());
 
     ArchiveDescriptor v1 = d;
@@ -201,7 +201,7 @@ static void TestArchiveMode()
                                         "files), 2 (aux effects) and 4 (timed starts)");
     }
 
-    // Bit 4 marks a set whose files may hold the 3sf_var_change and 3sf_seed tags.
+    // Bit 4 marks a set whose files may contain the 3sf_var_change and 3sf_seed tags.
     ArchiveDescriptor timed = v1;
     timed.flags = kFlagDspRequired | kFlagTimedStarts;
 
@@ -214,7 +214,30 @@ static void TestArchiveMode()
 
         XSFLIB_CHECK(odd.Check().has_value());
     }
+}
 
+static void TestArchiveMode()
+{
+    ArchiveDescriptor d;
+    d.version = 2;
+    d.flags = 0;
+    d.output_mode = 2;
+    d.archive_path = "sound/b.bcsar";
+    d.firmware_path = "dspaudio.cdc";
+
+    const auto raw = d.Serialize();
+    const auto back = ArchiveDescriptor::Parse(raw);
+
+    XSFLIB_CHECK(raw.size() % 4 == 0);
+    XSFLIB_CHECK(back && back->version == d.version && back->flags == d.flags && back->output_mode == d.output_mode &&
+                 back->archive_path == d.archive_path && back->firmware_path == d.firmware_path);
+    XSFLIB_CHECK(!ArchiveDescriptor::Parse(std::vector<uint8_t>(raw.begin(), raw.begin() + 18)).has_value());
+    XSFLIB_CHECK(!ProcessDescriptor::Parse(raw).has_value());
+
+    ArchiveDescriptor v1 = d;
+    v1.version = 1;
+    v1.flags = kFlagDspRequired;
+    v1.output_mode = kOutputStereo;
     const auto raw1 = v1.Serialize();
 
     // A later descriptor of the other kind decides the mode; the last SND chunk selects the sound.
@@ -367,7 +390,7 @@ using Changes = std::vector<SequenceVariable>;
 // 3sf_var_change: the changes of variables after the start.
 static void TestVariableChanges()
 {
-    // A change is F:N=V, and the tag holds one or more, separated by commas or white space (docs/3sf.md, "Tags").
+    // A change is F:N=V, and the tag contains one or more, separated by commas or white space (docs/3sf.md, "Tags").
     XSFLIB_CHECK((ParseVariableChanges("1:16=1") == Changes{{.index = 16, .value = 1, .frame = 1}}));
     XSFLIB_CHECK((ParseVariableChanges(" 0x10:0=-2,\n 5:31=0x7fff ") ==
                   Changes{{.index = 0, .value = -2, .frame = 16}, {.index = 31, .value = 32767, .frame = 5}}));
@@ -389,8 +412,8 @@ static void TestSeed()
 // The tags that the ripper writes for a start's variables and seed: 3sf_var, 3sf_var_change and 3sf_seed.
 static void TestWrittenVariablesAndSeed()
 {
-    // The ripper writes a start's variables of frame 0 into 3sf_var, in the place of --var's for the same variable,
-    // and the later ones into 3sf_var_change. The seed goes into 3sf_seed as 0x and eight hex digits.
+    // The ripper writes a start's variables of frame 0 into 3sf_var, in the place of --var's for the same variable, and
+    // the later ones into 3sf_var_change. The seed goes into 3sf_seed as 0x and eight hex digits.
     Tags tags = {{"3sf_var", "0=1, 16=5"}};
     const SequenceStart start{.variables = {{{.index = 16, .value = 0}, {.index = 16, .value = 1, .frame = 1}}},
                               .seed = 0x995e6351};
@@ -411,13 +434,18 @@ static void TestWrittenVariablesAndSeed()
 static void TestTempoAndPitch()
 {
     // 3sf_tempo and 3sf_pitch give ratios from 1/16 to 16, as digits with an optional '.' and more digits.
-    XSFLIB_CHECK(ParseRatio(" 1.3\n") == 1.3f);
-    XSFLIB_CHECK(ParseRatio("1.1625") == 1.1625f);
-    XSFLIB_CHECK(ParseRatio("16") == 16.0f && ParseRatio("0.0625") == 0.0625f);
-    CheckRefused(ParseRatio, {"", "1.", ".5", "+1", "-1", "1,3", "1e0", "0x1", "16.01", "0.0624", "0", "1 2", "inf"});
+    const auto parse_ratio = [](std::string_view text)
+    {
+        return xsflib::psf::ParseRatio(text, kMinRatio, kMaxRatio);
+    };
 
-    // The ripper writes each ratio other than 1 as the shortest decimal that reads back as the same float, and only
-    // a tempo ratio or pitch other than 1 requires bit 4.
+    XSFLIB_CHECK(parse_ratio(" 1.3\n") == 1.3f);
+    XSFLIB_CHECK(parse_ratio("1.1625") == 1.1625f);
+    XSFLIB_CHECK(parse_ratio("16") == 16.0f && parse_ratio("0.0625") == 0.0625f);
+    CheckRefused(parse_ratio, {"", "1.", ".5", "+1", "-1", "1,3", "1e0", "0x1", "16.01", "0.0624", "0", "1 2", "inf"});
+
+    // The ripper writes each ratio other than 1 as the shortest decimal that reads back as the same float, and only a
+    // tempo ratio or pitch other than 1 requires bit 4.
     Tags quick;
     const SequenceStart fast{.tempo_ratio = 1.1625f, .pitch = 1.25f};
     WriteSequenceStart(fast, quick);
@@ -429,6 +457,27 @@ static void TestTempoAndPitch()
     XSFLIB_CHECK(NeedsTimedStarts(SequenceStart{.tempo_ratio = 1.3f}) &&
                  NeedsTimedStarts(SequenceStart{.pitch = 0.5f}));
     XSFLIB_CHECK(SequenceStartOf({{"3sf_tempo", "17"}, {"3sf_pitch", "x"}}) == SequenceStart{});
+}
+
+// 3sf_lpf: the low-pass.
+static void TestLowPass()
+{
+    // 3sf_lpf gives a low-pass from -1 to 0, as an optional '-' straight before digits with an optional '.' and more
+    // digits.
+    XSFLIB_CHECK(ParseLowPass("-0.4") == -0.4f && ParseLowPass(" -1\n") == -1.0f && ParseLowPass("0") == 0.0f);
+    CheckRefused(ParseLowPass, {"", "-", "- 0.4", "0.4", "+0.4", "-1.5", "-.4", "-0,4", "-4e-1", "x"});
+
+    // The ripper writes a low-pass other than 0 as the shortest decimal that reads back as the same float, and it
+    // requires bit 4.
+    Tags wall;
+    const SequenceStart behind_wall{.volume = 0.45f, .lpf = -0.4f};
+
+    WriteSequenceStart(behind_wall, wall);
+
+    XSFLIB_CHECK(wall.size() == 2 && wall["3sf_lpf"] == "-0.4" && wall["volume"] == "0.45");
+    XSFLIB_CHECK(SequenceStartOf(wall) == SequenceStart{.lpf = -0.4f} && NeedsTimedStarts(behind_wall));
+    XSFLIB_CHECK(!NeedsTimedStarts(SequenceStart{.volume = 0.45f}));
+    XSFLIB_CHECK(SequenceStartOf({{"3sf_lpf", "0.4"}}) == SequenceStart{});
 }
 
 // 3sf_fx_send: the sends on the aux buses.
@@ -486,8 +535,8 @@ static void TestTrackVariables()
     XSFLIB_CHECK((ParseVariables(" 0=-1,\n 0x2f=0x7fff 16=-32768") == Variables{{0, -1}, {16, -32768}, {47, 32767}}));
     CheckRefused(ParseVariables, {"", " , ", "48=1", "-1=0", "34=32768", "34", "34=1;"});
 
-    // Super Mario 3D Land's note melodies start with track variable 2 (34) at 1. The ripper writes it into 3sf_var.
-    // A player of 3SF 1.4 would ignore that tag. The set therefore requires bit 4.
+    // Super Mario 3D Land's note melodies start with track variable 2 (34) at 1. The ripper writes it into 3sf_var. A
+    // player of 3SF 1.4 would ignore that tag. The set therefore requires bit 4.
     const SequenceStart melody{.variables = {{{.index = 34, .value = 1}}}};
     Tags tags;
     WriteSequenceStart(melody, tags);
@@ -520,8 +569,8 @@ static void TestStartBanksAndVolume()
     XSFLIB_CHECK(!SequenceStartOf({{"3sf_banks", "0x05000000"}}).banks);
 
     // The ripper writes a start's volume into the standard volume tag, as the shortest decimal that reads back as the
-    // same float. Every player applies that tag to its output, so the volume requires no flag. SequenceStartOf leaves
-    // the volume at 1: the player doesn't apply it twice.
+    // same float. Every player applies that tag to its output. The volume therefore requires no flag. SequenceStartOf
+    // leaves the volume at 1: the player doesn't apply it twice.
     Tags quieter;
     WriteSequenceStart(SequenceStart{.volume = 0.55f}, quieter);
     XSFLIB_CHECK(quieter.size() == 1 && quieter["volume"] == "0.55");
@@ -543,6 +592,7 @@ static void TestPlaybackTags()
                         .tempo_ratio = 1.5f,
                         .pitch = 0.5f,
                         .volume = 0.5f,
+                        .lpf = -0.5f,
                         .banks = std::array<uint32_t, 4>{0x03000000, 0xffffffff, 0xffffffff, 0xffffffff},
                         .fx_send = {0.5f, 0.0f}};
     start.track_volumes[0] = 0.5f;
@@ -559,8 +609,10 @@ static void TestPlaybackTags()
 
 int main()
 {
+    TestArchiveDescriptorChecks();
     TestArchiveMode();
     TestDescriptor();
+    TestDriverBlock();
     TestGroupFiles();
     TestLoadSet();
     TestPlaybackTags();
@@ -570,6 +622,7 @@ int main()
     TestSeed();
     TestWrittenVariablesAndSeed();
     TestTempoAndPitch();
+    TestLowPass();
     TestFxSends();
     TestTrackVolumes();
     TestTrackMasks();

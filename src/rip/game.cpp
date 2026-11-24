@@ -22,14 +22,16 @@
 #include <utility>
 #include <vector>
 
+#include "ntdlib/ntr/code.h"
+#include "ntdlib/rounding.h"
 #include "xsflib/ascii.h"
+#include "xsflib/binary.h"
 #include "xsflib/bytes.h"
 #include "xsflib/files.h"
 #include "xsflib/utf8.h"
 #include <zlib.h>
 
 #include "horizon/romfs.h"
-#include "rip/blz.h"
 
 namespace threesf::rip
 {
@@ -44,8 +46,8 @@ constexpr uint64_t kMaxFileSize = 1ull << 30; // largest single file read into m
 constexpr uint8_t kMaxMediaUnitShift = 16;
 
 // The offsets of the fields of an NCSD or NCCH header that 3SF reads (3dbrew, "NCSD" and "NCCH"). Both headers take
-// 0x200 bytes. Both hold their magic word and their flags at the same offsets. The offsets and sizes of the partitions
-// and areas count media units.
+// 0x200 bytes. Both contain their magic word and their flags at the same offsets. The offsets and sizes of the
+// partitions and areas count media units.
 constexpr std::size_t kImageHeaderSize = 0x200;
 constexpr std::size_t kImageMagic = 0x100;
 constexpr std::size_t kImageFlags = 0x188;
@@ -69,7 +71,7 @@ constexpr uint8_t kNoCrypto = 0x04;
 constexpr std::size_t kExheaderSize = 0x400;
 constexpr std::size_t kExheaderAndDescriptorSize = 0x800;
 
-// The ExeFS's header (3dbrew, "ExeFS") takes 0x200 bytes. It starts with ten entries of 16 bytes. Each entry holds a
+// The ExeFS's header (3dbrew, "ExeFS") takes 0x200 bytes. It starts with ten entries of 16 bytes. Each entry contains a
 // file's name in 8 bytes, the file's offset from the end of the header and the file's size.
 constexpr std::size_t kExeFsHeaderSize = 0x200;
 constexpr std::size_t kExeFsEntries = 10;
@@ -118,11 +120,6 @@ constexpr std::size_t kChunkRecordSize = 0x30;
 constexpr std::size_t kChunkType = 6;
 constexpr std::size_t kChunkSize = 8;
 constexpr uint16_t kChunkEncrypted = 1;
-
-uint64_t AlignUp(uint64_t x, uint64_t a)
-{
-    return (x + a - 1) / a * a;
-}
 
 // The media unit of an NCSD or NCCH header, in bytes, or nothing when its flags give a size past kMaxMediaUnitShift.
 std::optional<uint64_t> MediaUnit(const uint8_t* header)
@@ -195,8 +192,8 @@ private:
     uint64_t size_ = 0;
 };
 
-// A name of `bytes` bytes of UTF-16LE at `p`, in UTF-8. A surrogate without its partner keeps its three bytes, so that
-// two such names stay apart.
+// A name of `bytes` bytes of UTF-16LE at `p`, in UTF-8. A surrogate without its partner keeps its three bytes. Two such
+// names then stay apart.
 std::string Utf16ToUtf8(const uint8_t* p, uint32_t bytes)
 {
     std::string out;
@@ -380,6 +377,19 @@ std::optional<std::string> ReadExeFsCode(Image& image, uint64_t exefs, uint32_t 
     return std::nullopt;
 }
 
+// The compressed .code `code` decompressed (ntdlib::ntr::UncompressBackward), or nothing when it doesn't decompress.
+std::optional<std::vector<uint8_t>> UncompressCode(const std::vector<uint8_t>& code)
+{
+    try
+    {
+        return ntdlib::ntr::UncompressBackward(code);
+    }
+    catch (const xsflib::FormatError&)
+    {
+        return std::nullopt;
+    }
+}
+
 // Puts the paths of the RomFS's files in out.romfs_files and a reader of the files in out.read_romfs. The RomFS starts
 // at `romfs` in the image and takes `size` bytes. No file may reach past `limit`. The RomFS is an IVFC image. Its
 // level-3 file system follows the IVFC header and the master hash.
@@ -404,8 +414,8 @@ std::optional<std::string> OpenRomFs(const std::shared_ptr<Image>& image, uint64
     }
 
     const uint64_t level3 =
-        romfs + AlignUp(kIvfcHeaderSize + static_cast<uint64_t>(xsflib::LoadLe32(ivfc + kIvfcMasterHashSize)),
-                        1ull << block_log2);
+        romfs + ntdlib::AlignUp(kIvfcHeaderSize + static_cast<uint64_t>(xsflib::LoadLe32(ivfc + kIvfcMasterHashSize)),
+                                1ull << block_log2);
     auto entries = std::make_shared<std::map<std::string, RomFsEntry>>();
     if (auto err = ListRomFs(*image, level3, std::min(limit, romfs + size), *entries))
     {
@@ -475,7 +485,7 @@ std::optional<std::string> LoadNcch(const std::shared_ptr<Image>& image, uint64_
 
     if (out.exheader[kExheaderFlags] & 1)
     {
-        auto code = BlzDecompress(out.code);
+        auto code = UncompressCode(out.code);
         if (!code)
         {
             return "can't decompress .code";
@@ -496,10 +506,10 @@ std::optional<std::string> LoadCia(const std::shared_ptr<Image>& image, GameFile
         return "truncated CIA";
     }
 
-    const uint64_t cert = AlignUp(xsflib::LoadLe32(header + kCiaHeaderSize), kCiaAlignment);
-    const uint64_t ticket = AlignUp(cert + xsflib::LoadLe32(header + kCiaCertificatesSize), kCiaAlignment);
-    const uint64_t tmd = AlignUp(ticket + xsflib::LoadLe32(header + kCiaTicketSize), kCiaAlignment);
-    const uint64_t content = AlignUp(tmd + xsflib::LoadLe32(header + kCiaTmdSize), kCiaAlignment);
+    const uint64_t cert = ntdlib::AlignUp(uint64_t{xsflib::LoadLe32(header + kCiaHeaderSize)}, kCiaAlignment);
+    const uint64_t ticket = ntdlib::AlignUp(cert + xsflib::LoadLe32(header + kCiaCertificatesSize), kCiaAlignment);
+    const uint64_t tmd = ntdlib::AlignUp(ticket + xsflib::LoadLe32(header + kCiaTicketSize), kCiaAlignment);
+    const uint64_t content = ntdlib::AlignUp(tmd + xsflib::LoadLe32(header + kCiaTmdSize), kCiaAlignment);
 
     uint8_t signature_type[kSignatureTypeSize];
     if (!image->Read(tmd, signature_type, sizeof(signature_type)))
@@ -611,13 +621,13 @@ std::optional<std::string> LoadGameImage(const std::string& path, GameFiles& out
 
 // Lists the files under `romfs`, an extracted RomFS folder, into `files`: their paths relative to `romfs`, with "/"
 // between folders, in sorted order. Returns false if the folder can't be listed. Folders that are symbolic links are
-// followed, but not into a folder that holds the link. That would loop. An entry that can't be read, such as a broken
-// link, is passed over. AppleDouble files are left out. macOS writes one, named "._" and the file's name, beside each
-// file that it copies to a FAT or exFAT drive.
+// followed, but not into a folder that contains the link. That would loop. An entry that can't be read, such as a
+// broken link, is passed over. AppleDouble files are left out. macOS writes one, named "._" and the file's name, beside
+// each file that it copies to a FAT or exFAT drive.
 bool ListRomFs(const fs::path& romfs, std::vector<std::string>& files)
 {
     std::error_code ec;
-    std::vector<fs::path> ancestors = {fs::canonical(romfs, ec)}; // the folders that hold the current entry
+    std::vector<fs::path> ancestors = {fs::canonical(romfs, ec)}; // the folders that contain the current entry
     for (fs::recursive_directory_iterator it(romfs, fs::directory_options::follow_directory_symlink, ec), end;
          !ec && it != end; it.increment(ec))
     {
@@ -714,7 +724,7 @@ std::optional<std::string> LoadGameDirectory(const std::string& dir, GameFiles& 
                            xsflib::LoadLe32(&out.exheader[kExheaderDataPages]);
     if (out.code.size() < pages * 0x1000)
     {
-        auto code = BlzDecompress(out.code);
+        auto code = UncompressCode(out.code);
         if (!code || code->size() < pages * 0x1000)
         {
             return "code.bin is truncated or not valid BLZ";

@@ -43,7 +43,7 @@ constexpr uint32_t StaticBuffer(uint32_t size, uint32_t id)
     return size << 14 | id << 10 | 2;
 }
 
-// A thread's command buffer in guest memory, with the header of the request that it holds. Each word is a single
+// A thread's command buffer in guest memory, with the header of the request that it contains. Each word is a single
 // access. An access to an unmapped address sets the memory's fault flag.
 class CommandBuffer
 {

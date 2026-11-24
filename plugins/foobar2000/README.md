@@ -1,7 +1,7 @@
 # foo_input_3sf
 
 foobar2000 input component for 3SF rips (`.3sf`, `.mini3sf`). It's built on the same player
-core as `3sfplay`, which runs the game's DSP firmware in Teakra, driven either by the game's
+core as `3sfplay`. The core runs the game's DSP firmware in Teakra, driven either by the game's
 sound code on an emulated ARM11 (game mode) or by 3SF's model of the SDK sound player (archive
 mode).
 
@@ -16,18 +16,22 @@ each build plays.
 
 - Tags are shown as metadata, as in kode54's PSF-family components: `game` as album, `year` as
   date, and `replaygain_*` as ReplayGain. Tags can be edited: the tag area is rewritten, and
-  `_lib`, `length`, `fade`, `volume`, `utf8` and the `3sf_` tags that set how a sound plays are
-  kept. Those are `3sf_var`, `3sf_var_change`, `3sf_seed`, `3sf_tempo`, `3sf_pitch`, `3sf_banks`,
-  `3sf_fx_send`, `3sf_track_volume`, `3sf_aux`, `3sf_mute` and `3sf_silence`. foobar2000 doesn't
-  show them.
+  `_lib`, `length`, `fade`, `loop_start`, `loop_length`, `volume`, `utf8` and the `3sf_` tags that
+  set how a sound plays are kept. Those are `3sf_var`, `3sf_var_change`, `3sf_seed`, `3sf_tempo`,
+  `3sf_pitch`, `3sf_lpf`, `3sf_banks`, `3sf_fx_send`, `3sf_track_volume`, `3sf_aux`, `3sf_mute` and
+  `3sf_silence`. foobar2000 doesn't show them.
 - Length and fade come from the `length` and `fade` tags. Files without a length tag play
   for the default length and fade and stop early when the sound ends by itself.
-- Advanced preferences › Decoding › 3SF decoder: default length and fade, endless playback, and
-  rendering ahead. Endless playback and rendering ahead apply to playback only, never to
+- Each track plays the way a soundtrack album plays it. By default the component skips the silence before the first
+  sound, plays 0.5 s of silence, then the track as its tags say, and 1 s of silence after it. Advanced preferences
+  has eight settings for this: "Skip silence at the start", "Silence before a track", "Loops" (the number of passes,
+  from the tags `loop_start` and `loop_length`), "One pass for long loops", "Fade length" for loops, "Silence after
+  a track", "Ignore length and fade tags" and "Skip silence at the end". The settings never change a file.
+- Advanced preferences › Decoding › 3SF decoder: default length and fade, the fade's curve,
+  endless playback, and rendering ahead. Endless playback and rendering ahead apply to playback only, never to
   conversion or scanning.
 - During playback, the component renders ahead on a separate thread, as fast as the CPU allows,
-  and buffers up to 10 minutes and 10 seconds of audio (about 76 MiB), enough for the longest
-  track `3sfrip`'s length analysis produces. Seeking within the buffer is instant. Seeking further
+  and buffers up to 10 minutes and 10 seconds of audio (about 76 MiB). Seeking within the buffer is instant. Seeking further
   ahead waits for rendering to reach the requested position. Rendering ahead keeps one CPU core
   busy until it reaches the end of the track or the buffer limit. Longer tracks also save the
   emulation state every 2 seconds. Seeking back before the buffered audio restores the latest
@@ -60,7 +64,7 @@ cmake --build build-fb2k --config Release --target foo_input_3sf
 This produces `build-fb2k/plugins/foobar2000/Release/foo_input_3sf.dll`. For a
 `.fb2k-component`, zip the DLL, and for 64-bit foobar2000 v2 put it in an `x64` folder inside
 the zip. For 32-bit foobar2000, configure with `-A Win32 -T ClangCL` and put that DLL at the top
-level of the zip. With the 64-bit DLL in `pkg\x64`, Windows' own `tar` makes the zip:
+level of the zip. With the 64-bit DLL in `pkg\x64`, the `tar` that comes with Windows makes the zip:
 `tar -a -c -f foo_input_3sf.zip -C pkg x64` (add `foo_input_3sf.dll` after `x64` for a 32-bit DLL
 in `pkg` itself), then rename it to `foo_input_3sf.fb2k-component`. Windows PowerShell's
 `Compress-Archive` writes the folder's name with a backslash. The zip format doesn't allow that.
@@ -87,8 +91,8 @@ The build compiles the SDK's `pfc`, `foobar2000/SDK` and
 `foobar2000/shared/shared-<arch>.lib` (or `shared.lib`), and on macOS it compiles the parts of
 `foobar2000/shared` and the Objective-C++ files that the SDK's Xcode projects build.
 
-On Windows everything is built with the static C runtime (`/MT`), so the component needs no
-runtime DLLs. On macOS it uses only the system's libraries.
+On Windows everything is built with the static C runtime (`/MT`). The component therefore requires
+no runtime DLLs. On macOS it uses only the system's libraries.
 
 ## Performance
 
@@ -101,5 +105,5 @@ stutter. Use 64-bit foobar2000 and the 64-bit component if your other components
 ## Licence
 
 The component is MIT-licensed, like the rest of 3SF, and uses xsflib (MIT), ntdlib (MIT), Teakra (MIT) and zlib. Ship
-`LICENSE` and `THIRD-PARTY-NOTICES.md` (or their text) with a build. Nothing in it is GPL, so it
-can be distributed as a foobar2000 component.
+`LICENSE` and `THIRD-PARTY-NOTICES.md` (or their text) with a build. Nothing in it is GPL. It can
+therefore be distributed as a foobar2000 component.

@@ -47,9 +47,9 @@ EmptyLineBeforeAccessModifier: Always
 # headers. Other libraries are xsflib, ntdlib and seqlib in quotes, and the
 # third-party libraries in the first three categories in angle brackets (SDK/ is
 # the foobar2000 SDK). OS headers, such as <windows.h>, count as C system
-# headers. In the code of xsflib, ntdlib or seqlib, remove that library from
-# the list. A test, such as foo_test.cpp, or a platform's file, such as
-# foo_mac.cpp, has foo.h as its related header.
+# headers. In the code of a shared library, remove that library from the list.
+# A test, such as foo_test.cpp, or a platform's file, such as foo_mac.cpp, has
+# foo.h as its related header.
 IncludeBlocks: Regroup
 IncludeIsMainRegex: '([-_](test|unittest)|_mac|_windows|_other)?$'
 IncludeCategories:

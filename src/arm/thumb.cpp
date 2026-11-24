@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 
-// ARM11 interpreter: the Thumb-1 instruction set of ARMv6K (see cpu.h). There's no Thumb-2 on the ARM11, so BL and BLX
-// are pairs of 16-bit instructions that are executed one at a time.
+// ARM11 interpreter: the Thumb-1 instruction set of ARMv6K (see cpu.h). The ARM11 has no Thumb-2. BL and BLX are
+// therefore pairs of 16-bit instructions, and the interpreter executes each half on its own.
 
 #include <bit>
 #include <cstdint>
@@ -64,7 +64,7 @@ bool Cpu::ThumbShiftAddSubtract(uint32_t op)
     case 0x01: // LSR Rd, Rm, #imm
     case 0x02: // ASR Rd, Rm, #imm
         {
-            // Bits 11 to 15 hold 0, 1 or 2 here: ShiftImm's types for LSL, LSR and ASR.
+            // Bits 11 to 15 contain 0, 1 or 2 here: ShiftImm's types for LSL, LSR and ASR.
             const uint32_t rd = op & 7, rm = (op >> 3) & 7, imm = (op >> 6) & 0x1f;
             bool carry = state_.c;
             r[rd] = ShiftImm(r[rm], op >> 11, imm, carry);
@@ -251,6 +251,7 @@ bool Cpu::ThumbHighRegister(uint32_t op)
             {
                 r[14] = (cur_pc_ + 2) | 1;
             }
+
             BxWritePc(target);
             return true;
         }

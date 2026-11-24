@@ -9,6 +9,9 @@
 #include <cstdio>
 #include <string>
 
+#include "ntdlib/arm/alu.h"
+#include "ntdlib/arm/shifter.h"
+
 namespace threesf::arm
 {
 
@@ -125,102 +128,23 @@ bool Cpu::Svc(uint32_t number)
 }
 
 // --------------------------------------------------------------------------------------------- Shifter
+// The barrel shifter of ntdlib (ntdlib/arm/shifter.h), with the C flag as a bool.
 uint32_t Cpu::ShiftImm(uint32_t value, uint32_t type, uint32_t amount, bool& carry)
 {
-    switch (type)
-    {
-    case 0: // LSL
-        if (amount == 0)
-        {
-            return value;
-        }
+    uint32_t carry_flag = carry ? 1 : 0;
+    const uint32_t result = ntdlib::arm::ShiftByImmediate(value, type, amount, carry_flag);
+    carry = carry_flag != 0;
 
-        carry = (value >> (32 - amount)) & 1;
-        return value << amount;
-
-    case 1: // LSR (#0 encodes #32)
-        if (amount == 0)
-        {
-            carry = value >> 31;
-            return 0;
-        }
-
-        carry = (value >> (amount - 1)) & 1;
-        return value >> amount;
-
-    case 2: // ASR (#0 encodes #32)
-        if (amount == 0)
-        {
-            carry = value >> 31;
-            return static_cast<uint32_t>(static_cast<int32_t>(value) >> 31);
-        }
-
-        carry = (value >> (amount - 1)) & 1;
-        return static_cast<uint32_t>(static_cast<int32_t>(value) >> amount);
-
-    default: // ROR (#0 encodes RRX)
-        if (amount == 0)
-        {
-            const uint32_t result = (static_cast<uint32_t>(carry) << 31) | (value >> 1);
-            carry = value & 1;
-            return result;
-        }
-
-        carry = (value >> (amount - 1)) & 1;
-        return std::rotr(value, static_cast<int>(amount));
-    }
+    return result;
 }
 
 uint32_t Cpu::ShiftReg(uint32_t value, uint32_t type, uint32_t amount, bool& carry)
 {
-    if (amount == 0)
-    {
-        return value;
-    }
+    uint32_t carry_flag = carry ? 1 : 0;
+    const uint32_t result = ntdlib::arm::ShiftByRegister(value, type, amount, carry_flag);
+    carry = carry_flag != 0;
 
-    switch (type)
-    {
-    case 0: // LSL
-        if (amount < 32)
-        {
-            carry = (value >> (32 - amount)) & 1;
-            return value << amount;
-        }
-
-        carry = amount == 32 ? (value & 1) : 0;
-        return 0;
-
-    case 1: // LSR
-        if (amount < 32)
-        {
-            carry = (value >> (amount - 1)) & 1;
-            return value >> amount;
-        }
-
-        carry = amount == 32 ? (value >> 31) : 0;
-        return 0;
-
-    case 2: // ASR
-        if (amount < 32)
-        {
-            carry = (value >> (amount - 1)) & 1;
-            return static_cast<uint32_t>(static_cast<int32_t>(value) >> amount);
-        }
-
-        carry = value >> 31;
-        return static_cast<uint32_t>(static_cast<int32_t>(value) >> 31);
-
-    default: // ROR
-        amount &= 31;
-        if (amount == 0)
-        {
-            carry = value >> 31;
-            return value;
-        }
-
-        carry = (value >> (amount - 1)) & 1;
-        return std::rotr(value, static_cast<int>(amount));
-    }
+    return result;
 }
 
 // --------------------------------------------------------------------------------------------- ARM decoder
@@ -293,6 +217,7 @@ bool Cpu::StepArm(uint32_t op)
             {
                 state_.r[14] = cur_pc_ + 4;
             }
+
             state_.r[15] = cur_pc_ + 8 + static_cast<uint32_t>(offset);
             return true;
         }
@@ -362,12 +287,12 @@ void Cpu::ArmOperands(uint32_t op, uint32_t& a, uint32_t& b, bool& carry) const
     const uint32_t rn = (op >> 16) & 0xf;
     if (op & (1u << 25))
     {
-        const uint32_t rot = ((op >> 8) & 0xf) * 2;
-        b = std::rotr(op & 0xff, static_cast<int>(rot));
-        if (rot)
+        b = ntdlib::arm::ExpandImmediate(op);
+        if ((op & 0xf00) != 0)
         {
             carry = b >> 31;
         }
+
         a = Reg(rn);
     }
     else if (op & 0x10)
@@ -496,16 +421,6 @@ bool Cpu::ArmDataProcessing(uint32_t op)
     return true;
 }
 
-namespace
-{
-
-int32_t Half(uint32_t value, bool top)
-{
-    return top ? static_cast<int16_t>(value >> 16) : static_cast<int16_t>(value);
-}
-
-} // namespace
-
 bool Cpu::ArmMisc(uint32_t op)
 {
     if (op & 0x80)
@@ -576,11 +491,11 @@ bool Cpu::ArmMisc(uint32_t op)
             int64_t n = static_cast<int32_t>(state_.r[rn]);
             if (op1 & 2)
             {
-                n = SatSigned(2 * n, 32, sat);
+                n = ntdlib::arm::SignedSaturate(2 * n, 32, sat);
             }
 
             const int64_t m = static_cast<int32_t>(state_.r[rm]);
-            const int32_t result = SatSigned((op1 & 1) ? m - n : m + n, 32, sat);
+            const int32_t result = ntdlib::arm::SignedSaturate((op1 & 1) ? m - n : m + n, 32, sat);
             if (sat)
             {
                 state_.q = true;
@@ -611,7 +526,8 @@ bool Cpu::ArmSignedMultiply16(uint32_t op)
     {
     case 0: // SMLAxy
         {
-            const int64_t sum = static_cast<int64_t>(Half(state_.r[rm], x)) * Half(state_.r[rs], y) +
+            const int64_t sum = static_cast<int64_t>(ntdlib::arm::SignedHalf(state_.r[rm], x)) *
+                                    ntdlib::arm::SignedHalf(state_.r[rs], y) +
                                 static_cast<int32_t>(state_.r[ra]);
             if (sum != static_cast<int32_t>(sum))
             {
@@ -624,7 +540,8 @@ bool Cpu::ArmSignedMultiply16(uint32_t op)
 
     case 1: // SMLAWy / SMULWy
         {
-            const int64_t product = static_cast<int64_t>(static_cast<int32_t>(state_.r[rm])) * Half(state_.r[rs], y);
+            const int64_t product =
+                static_cast<int64_t>(static_cast<int32_t>(state_.r[rm])) * ntdlib::arm::SignedHalf(state_.r[rs], y);
             const int32_t top = static_cast<int32_t>(product >> 16);
             if (!x)
             {
@@ -647,7 +564,8 @@ bool Cpu::ArmSignedMultiply16(uint32_t op)
     case 2: // SMLALxy: a 64-bit accumulation that wraps, done in unsigned arithmetic
         {
             const uint64_t acc = (static_cast<uint64_t>(state_.r[rdh]) << 32) | state_.r[ra];
-            const int64_t product = static_cast<int64_t>(Half(state_.r[rm], x)) * Half(state_.r[rs], y);
+            const int64_t product = static_cast<int64_t>(ntdlib::arm::SignedHalf(state_.r[rm], x)) *
+                                    ntdlib::arm::SignedHalf(state_.r[rs], y);
             const uint64_t sum = acc + static_cast<uint64_t>(product);
             state_.r[ra] = static_cast<uint32_t>(sum);
             state_.r[rdh] = static_cast<uint32_t>(sum >> 32);
@@ -655,7 +573,8 @@ bool Cpu::ArmSignedMultiply16(uint32_t op)
         }
 
     default: // SMULxy
-        state_.r[rdh] = static_cast<uint32_t>(Half(state_.r[rm], x) * Half(state_.r[rs], y));
+        state_.r[rdh] =
+            static_cast<uint32_t>(ntdlib::arm::SignedHalf(state_.r[rm], x) * ntdlib::arm::SignedHalf(state_.r[rs], y));
         return true;
     }
 }
@@ -688,8 +607,7 @@ bool Cpu::ArmMsrImmediate(uint32_t op)
         }
     }
 
-    const uint32_t rot = ((op >> 8) & 0xf) * 2;
-    WriteCpsrFlags(std::rotr(op & 0xff, static_cast<int>(rot)), mask);
+    WriteCpsrFlags(ntdlib::arm::ExpandImmediate(op), mask);
 
     return true;
 }

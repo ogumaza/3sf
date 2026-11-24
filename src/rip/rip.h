@@ -8,7 +8,6 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
-#include <filesystem>
 #include <optional>
 #include <string>
 #include <vector>
@@ -65,7 +64,7 @@ const std::vector<GameProfile>& KnownProfiles();
 // The profile for a game's code, or nullptr if it isn't supported.
 const GameProfile* FindProfile(const GameFiles& game);
 
-// The RomFS paths that may hold the game's DSP firmware, best first: the profile's, if there is one, then the .cdc
+// The RomFS paths that may contain the game's DSP firmware, best first: the profile's, if there is one, then the .cdc
 // files whose paths the game's code names (such as "rom:/sound/dspaudio.cdc"), then any called dspaudio.cdc, then the
 // other .cdc files in RomFS order. The first that's a DSP1 image is the game's firmware.
 std::vector<std::string> FirmwareCandidates(const GameFiles& game, const GameProfile* profile);
@@ -101,19 +100,13 @@ std::vector<uint8_t> BuildMini(uint32_t sound_id, const std::string& lib_name, T
 // A file of a set: its path and its data.
 using FileChunk = xsflib::psf::FileChunk;
 
-// Archive mode: finds the file of the group `name` in `folder` or a folder below it. The file's name is the group's
-// name followed by .bcgrp. The match ignores case. The chunk's path is the file's path from `folder`. A slash separates
-// the folders in it. The search skips an entry whose type can't be read, such as a broken symbolic link. The search
-// also skips a folder that it can't open. Returns nothing when no file matches.
-std::optional<FileChunk> FindGroupIn(const std::filesystem::path& folder, const std::string& name);
-
 // Archive mode: a .3sflib holding the sound archive, the DSP firmware and the group files `groups` beside the archive,
 // as FILE chunks at the given paths, with an archive descriptor. The descriptor lists the group files, with
 // kFlagGroupFiles, when there are any. It gives `effects` on the aux buses, with kFlagAuxEffects, when there are any.
 // The descriptor has version `version`: ArchiveDescriptor::kListVersion when a mini of the set plays several sounds.
-// With `timed_starts`, it has kFlagTimedStarts: a mini of the set holds a tag that players of 3SF 1.4 can't play
-// (3sf_var_change, 3sf_seed, 3sf_tempo, 3sf_pitch, 3sf_banks, 3sf_fx_send, 3sf_track_volume, or 3sf_var with a track
-// variable). With `effect_sets`, the descriptor has version 3 (ArchiveDescriptor::kEffectSetsVersion) and
+// With `timed_starts`, it has kFlagTimedStarts: a mini of the set contains a tag that players of 3SF 1.4 can't play
+// (3sf_var_change, 3sf_seed, 3sf_tempo, 3sf_pitch, 3sf_lpf, 3sf_banks, 3sf_fx_send, 3sf_track_volume, or 3sf_var with a
+// track variable). With `effect_sets`, the descriptor has version 3 (ArchiveDescriptor::kEffectSetsVersion) and
 // kFlagAuxEffects, and gives them as effect sets 1 on. A mini's 3sf_aux tag picks one.
 std::vector<uint8_t> BuildArchiveLibrary(const std::string& archive_path, const std::vector<uint8_t>& archive,
                                          const std::string& firmware_path, const std::vector<uint8_t>& firmware,
@@ -127,7 +120,7 @@ std::vector<uint8_t> BuildArchiveMini(uint32_t sound_id, const std::string& lib_
 
 // Archive mode: a .mini3sf that plays the sequences `sound_ids` together from `lib_name`, started in that order
 // (docs/3sf.md, "Sounds that play together"). The library's descriptor must have ArchiveDescriptor::kListVersion when
-// `sound_ids` holds more than one sound. A list of one sound gives the mini of that sound alone.
+// `sound_ids` contains more than one sound. A list of one sound gives the mini of that sound alone.
 std::vector<uint8_t> BuildArchiveMini(const std::vector<uint32_t>& sound_ids, const std::string& lib_name, Tags tags);
 
 // A piece of music whose channels a game plays as separate sequences, started together (docs/3sf.md, "Sounds that play

@@ -16,16 +16,18 @@
 #include <utility>
 #include <vector>
 
+#include "ntdlib/ctr/snd/game_effects.h"
 #include "ntdlib/ctr/snd/sar_options.h"
 #include "ntdlib/ctr_fx/effects.h"
 #include "ntdlib/rip/archive.h"
+#include "ntdlib/rounding.h"
 #include "ntdlib/sar/formats.h"
 #include "xsflib/binary.h"
 #include "xsflib/bytes.h"
 
+#include "horizon/kernel_constants.h"
 #include "nnsnd/aux_effects.h"
 #include "rip/driver_blob.h"
-#include "rip/effects.h"
 #include "rip/game.h"
 #include "rip/length.h"
 #include "threesf/format.h"
@@ -34,6 +36,8 @@ namespace threesf::rip
 {
 namespace
 {
+
+using ntdlib::ctr::snd::kPokemonXFieldReverb;
 
 static_assert(kDriverEnd - kDriverBase <= kDriverRegion, "the driver and its bss have outgrown their page");
 static_assert(kDriverParams == DriverBlock::kAddress, "the driver's parameters aren't where the format has them");
@@ -103,7 +107,7 @@ std::vector<uint8_t> DriverPage(const GameProfile& profile)
 // Pokemon X's nw::snd ends each read of a file in the sound archive on a multiple of 32 bytes from the archive's start.
 constexpr std::size_t kReadAlignment = 32;
 
-// The copy of the sound archive `archive` that a game-mode library holds for the sounds at `sounds`. When the sound
+// The copy of the sound archive `archive` that a game-mode library contains for the sounds at `sounds`. When the sound
 // system starts, Pokemon X's nw::snd reads the archive's first 0x40 bytes and its INFO block. To load a sequence,
 // LoadData reads the sequence's file, the files of its banks and the files of the wave archives that the banks name.
 // Each read starts at the place that the file table gives. Where the waves load one by one, a wave archive is read in
@@ -139,7 +143,7 @@ constexpr std::array<uint32_t, 9> ReverbWords(const ntdlib::ctr_fx::ReverbParam&
         param.pre_delay_time,                      // pre-delay, in ms
         std::bit_cast<uint32_t>(param.coloration), // a level
         std::bit_cast<uint32_t>(param.damping),    // damping: the coefficient of a one-pole filter in the feedback
-        0,                                         // the filter sizes' pointer, which the driver sets
+        0,                                         // the filter sizes' pointer: the driver sets it
         std::bit_cast<uint32_t>(param.early_gain), // a level
         std::bit_cast<uint32_t>(param.fused_gain), // a level
         0,                                         // two flags, both clear: stereo, and damping by a low-pass filter
@@ -217,7 +221,7 @@ std::optional<std::vector<uint8_t>> BuildLibrary(const GameFiles& game, const Ga
     const uint32_t data = Get32(exh, kExheaderDataAddress);
     const uint32_t data_size = Get32(exh, kExheaderDataSize);
     const uint32_t bss = Get32(exh, kExheaderBssSize);
-    const uint64_t end = (uint64_t{data} + data_size + bss + 0xfff) & ~uint64_t{0xfff};
+    const uint64_t end = ntdlib::AlignUp(uint64_t{data} + data_size + bss, uint64_t{horizon::kPageSize});
     if (profile.nnmain < text || uint64_t{profile.nnmain} + 8 > end || end > kDriverBase)
     {
         if (error)
@@ -228,8 +232,8 @@ std::optional<std::vector<uint8_t>> BuildLibrary(const GameFiles& game, const Ga
         return std::nullopt;
     }
 
-    // Code, rodata, data and bss (zeros, so the pages are mapped). nnMain is patched to jump to the driver: its first
-    // word becomes "ldr pc, [pc, #-4]" and its second the driver's entry point.
+    // Code, rodata, data and bss (zeros, to map the pages). nnMain is patched to jump to the driver: its first word
+    // becomes "ldr pc, [pc, #-4]" and its second the driver's entry point.
     std::vector<uint8_t> image(static_cast<std::size_t>(end - text), 0);
     std::memcpy(image.data(), game.code.data(), std::min<std::size_t>(game.code.size(), image.size()));
     Set32(image, profile.nnmain - text, 0xe51ff004);

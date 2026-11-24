@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
-"""Build the 3SF guest driver (driver.c) and regenerate src/rip/driver_blob.h.
+"""Build the 3SF guest driver (driver.c) and generate src/rip/driver_blob.h again.
 
-Needs clang and ld.lld with the ARM target, and llvm-objcopy and llvm-nm. It's only needed when
-driver.c changes: the generated file is committed, so building 3SF itself needs no ARM toolchain.
+Requires clang and ld.lld with the ARM target, and llvm-objcopy and llvm-nm. Run it only after a
+change to driver.c. The generated file is committed. A build of 3SF therefore requires no ARM
+toolchain.
 """
 import subprocess
 import sys

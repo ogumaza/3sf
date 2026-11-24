@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: MIT
 
-// ARM11 MPCore (ARMv6K) user-mode interpreter: ARM and Thumb-1 instruction sets and VFPv2.
+// An interpreter of the ARM11 MPCore (ARMv6K) in user mode: the ARM and Thumb-1 instruction sets and VFPv2.
 //
-// Written for 3SF, which runs a 3DS game's sound code (nw::snd / nn::snd, compiled with armcc) under a high-level
-// emulation of the Horizon kernel. Only user-mode behaviour is modelled: there are no exceptions other than SVC and
-// faults, which stop execution and are reported to the caller.
+// 3SF runs a 3DS game's sound code (nw::snd and nn::snd, compiled with armcc) on it, under a high-level emulation of
+// the Horizon kernel. Only user mode is modelled. SVCs and faults are the only exceptions. Each of them stops Run, and
+// the caller handles it.
 
 #pragma once
 
@@ -13,6 +13,8 @@
 #include <cfenv>
 #include <cstdint>
 #include <string>
+
+#include "ntdlib/arm/alu.h"
 
 #include "arm/memory.h"
 
@@ -40,14 +42,15 @@ struct CpuState
 enum class StopReason
 {
     kNone,
-    kSvc,       // SVC executed; svc_number_ is set, PC points after the instruction
+    kSvc,       // an SVC ran: SvcNumber() gives its number, and PC points after the instruction
     kBudget,    // instruction budget exhausted
-    kFault,     // memory fault (see Memory::fault_address_); PC is left at the instruction
+    kFault,     // a memory fault (see Memory::FaultAddress()): PC stays at the instruction
     kUndefined, // undefined or unsupported instruction at stop_pc_
     kYield,     // YIELD, WFE or WFI hint: a good point to switch threads
 };
 
-// ARM interpreter. state_ holds the current thread's registers; Run executes until it reaches a StopReason.
+// The interpreter. state_ contains the registers of the thread that runs. Run executes instructions until one of the
+// StopReasons.
 class Cpu
 {
 public:
@@ -182,85 +185,17 @@ private:
     bool Undefined(uint32_t op);
     bool Svc(uint32_t number);
 
+    // Whether condition `cond` (0 to 14) passes with the current flags.
     bool CheckCond(uint32_t cond) const
     {
-        switch (cond)
-        {
-        case 0x0:
-            return state_.z;
-        case 0x1:
-            return !state_.z;
-        case 0x2:
-            return state_.c;
-        case 0x3:
-            return !state_.c;
-        case 0x4:
-            return state_.n;
-        case 0x5:
-            return !state_.n;
-        case 0x6:
-            return state_.v;
-        case 0x7:
-            return !state_.v;
-        case 0x8:
-            return state_.c && !state_.z;
-        case 0x9:
-            return !state_.c || state_.z;
-        case 0xa:
-            return state_.n == state_.v;
-        case 0xb:
-            return state_.n != state_.v;
-        case 0xc:
-            return !state_.z && state_.n == state_.v;
-        case 0xd:
-            return state_.z || state_.n != state_.v;
-        default:
-            return true;
-        }
+        const uint32_t nzcv = (static_cast<uint32_t>(state_.n) << 3) | (static_cast<uint32_t>(state_.z) << 2) |
+                              (static_cast<uint32_t>(state_.c) << 1) | static_cast<uint32_t>(state_.v);
+        return ntdlib::arm::ConditionPassed(cond, nzcv);
     }
 
     static uint32_t ShiftImm(uint32_t value, uint32_t type, uint32_t amount, bool& carry);
     static uint32_t ShiftReg(uint32_t value, uint32_t type, uint32_t amount, bool& carry);
     void ArmOperands(uint32_t op, uint32_t& a, uint32_t& b, bool& carry) const;
-
-    // SatSigned and SatUnsigned: `value` clamped to a signed or an unsigned integer of `bits` bits. Each sets
-    // `saturated` when it clamps.
-    static int32_t SatSigned(int64_t value, uint32_t bits, bool& saturated)
-    {
-        const int64_t max = (int64_t{1} << (bits - 1)) - 1;
-        const int64_t min = -(int64_t{1} << (bits - 1));
-        if (value > max)
-        {
-            saturated = true;
-            return static_cast<int32_t>(max);
-        }
-
-        if (value < min)
-        {
-            saturated = true;
-            return static_cast<int32_t>(min);
-        }
-
-        return static_cast<int32_t>(value);
-    }
-
-    static uint32_t SatUnsigned(int64_t value, uint32_t bits, bool& saturated)
-    {
-        const int64_t max = (int64_t{1} << bits) - 1;
-        if (value > max)
-        {
-            saturated = true;
-            return static_cast<uint32_t>(max);
-        }
-
-        if (value < 0)
-        {
-            saturated = true;
-            return 0;
-        }
-
-        return static_cast<uint32_t>(value);
-    }
 
     // REV16 reverses the bytes of each halfword. REVSH reverses the bytes of the low halfword and sign-extends it.
     static uint32_t Rev16(uint32_t value)
@@ -317,15 +252,17 @@ private:
         }
     }
 
+    // a + b + carry_in. With set_flags, the result sets N and Z, and the adder sets C and V.
     uint32_t AddWithCarry(uint32_t a, uint32_t b, bool carry_in, bool set_flags)
     {
-        const uint64_t unsigned_sum = static_cast<uint64_t>(a) + b + carry_in;
-        const uint32_t result = static_cast<uint32_t>(unsigned_sum);
+        uint32_t carry;
+        uint32_t overflow;
+        const uint32_t result = ntdlib::arm::AddWithCarry(a, b, carry_in ? 1 : 0, carry, overflow);
         if (set_flags)
         {
             SetNZ(result);
-            state_.c = (unsigned_sum >> 32) != 0;
-            state_.v = ((~(a ^ b) & (a ^ result)) >> 31) != 0;
+            state_.c = carry != 0;
+            state_.v = overflow != 0;
         }
 
         return result;
@@ -384,7 +321,7 @@ private:
 };
 
 // Saves the host's floating-point environment and restores it when destroyed. In between, Apply sets the host rounding
-// mode from the guest's FPSCR, so that host float arithmetic rounds the way VFP arithmetic does.
+// mode from the guest's FPSCR. Host float arithmetic then rounds the way VFP arithmetic does.
 class HostFpuMode
 {
 public:
@@ -393,8 +330,8 @@ public:
     HostFpuMode& operator=(const HostFpuMode&) = delete;
     ~HostFpuMode();
 
-    // Sets the host rounding mode from FPSCR.RMode. Flush-to-zero and default NaN are applied in software, so this is
-    // the only host state that has to change.
+    // Sets the host rounding mode from FPSCR.RMode. The interpreter applies flush-to-zero and default NaN in software.
+    // The rounding mode is therefore the only host state that changes.
     static void Apply(uint32_t fpscr);
 
 private:

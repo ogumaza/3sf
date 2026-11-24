@@ -24,9 +24,8 @@ namespace threesf::horizon
 namespace
 {
 
-// The main thread's stack ends here, and DSP RAM starts here.
+// The main thread's stack ends here.
 constexpr uint32_t kStackTop = 0x10000000;
-constexpr uint32_t kDspRam = 0x1ff00000;
 
 constexpr uint64_t kPageSize = arm::Memory::kPageSize;
 
@@ -37,7 +36,7 @@ struct PageRange
     uint64_t end;
 };
 
-// The pages of the segments that hold data, sorted, with ranges that overlap or touch merged.
+// The pages of the segments that contain data, sorted, with ranges that overlap or touch merged.
 std::vector<PageRange> ProgramPages(const ProcessImage& image)
 {
     std::vector<PageRange> ranges;
@@ -72,9 +71,9 @@ std::vector<PageRange> ProgramPages(const ProcessImage& image)
     return merged;
 }
 
-// Where the program ends: the end of the range of pages that holds the entry point. A rip's driver sits apart from the
-// program and doesn't count. With the entry point outside every range, the config's value stays.
-uint32_t ProgramEnd(const std::vector<PageRange>& ranges, uint32_t entry, uint32_t otherwise)
+// Where the program ends: the end of the range of pages that contains the entry point. A rip's driver is separate from
+// the program and doesn't count. With the entry point outside every range, the end is 0.
+uint32_t ProgramEnd(const std::vector<PageRange>& ranges, uint32_t entry)
 {
     const uint64_t page = entry / kPageSize;
     for (const PageRange& range : ranges)
@@ -85,14 +84,7 @@ uint32_t ProgramEnd(const std::vector<PageRange>& ranges, uint32_t entry, uint32
         }
     }
 
-    return otherwise;
-}
-
-KernelConfig WithProgramEnd(KernelConfig config, uint32_t program_end)
-{
-    config.program_end = program_end;
-
-    return config;
+    return 0;
 }
 
 } // namespace
@@ -111,7 +103,7 @@ System::System(const ProcessImage& image, const KernelConfig& config, const ntdl
     : fcram_(std::size_t{config.app_memory * 2}), dsp_(fcram_, upstream)
 {
     const std::vector<PageRange> program = ProgramPages(image);
-    kernel_ = std::make_unique<Kernel>(WithProgramEnd(config, ProgramEnd(program, image.entry, config.program_end)));
+    kernel_ = std::make_unique<Kernel>(config, ProgramEnd(program, image.entry));
     Kernel& kernel = *kernel_;
     arm::Memory& memory = kernel.Memory();
     kernel.SetLinearMemory(fcram_.At(ntdlib::ctr::kFcramBase, fcram_.Size()), static_cast<uint32_t>(fcram_.Size()));

@@ -20,8 +20,8 @@ namespace threesf::horizon
 
 class Services;
 
-// The process that a game-mode rip holds: memory segments, RomFS files, and the main thread's entry point, stack size
-// and priority.
+// The process that a game-mode rip contains: memory segments, RomFS files, and the main thread's entry point, stack
+// size and priority.
 struct ProcessImage
 {
     struct Segment

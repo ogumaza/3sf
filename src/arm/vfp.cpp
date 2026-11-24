@@ -2,11 +2,14 @@
 
 // ARM11 interpreter: VFPv2 (the ARM11 MPCore's VFP11 coprocessor), see cpu.h.
 //
-// Arithmetic is done with host IEEE single/double operations, which are correctly rounded, so results match the VFP bit
-// for bit once the host rounding mode follows FPSCR.RMode. The multiply-accumulate forms aren't fused on VFPv2 and are
-// computed as two rounded steps. Flush-to-zero (FPSCR.FZ) and default NaN (FPSCR.DN) are applied in software. NaN
+// The host's IEEE single-precision and double-precision operations do the arithmetic. They're correctly rounded. Once
+// the host rounding mode follows FPSCR.RMode, the results match the VFP's bit for bit, with one exception. With
+// FPSCR.FZ set, ARM's manual flushes a result to zero when its value before rounding is below the smallest normal
+// number. The interpreter flushes only a result that is still below it after rounding. A result that rounds up to the
+// smallest normal number therefore stays. VFPv2 doesn't fuse its multiply-accumulate forms. The interpreter computes
+// each of them as two rounded steps. It applies flush-to-zero (FPSCR.FZ) and default NaN (FPSCR.DN) in software. NaN
 // results while FPSCR.DN is clear aren't modelled. The host computes them, and an x86 host computes some differently
-// from the VFP. Floating-point exceptions aren't modelled, and neither are short vectors: while FPSCR.LEN or STRIDE
+// from the VFP. Floating-point exceptions aren't modelled, and neither are short vectors. While FPSCR.LEN or STRIDE
 // isn't 0, every VFP data-processing instruction is undefined, even one that's always scalar.
 
 #include <bit>
@@ -49,7 +52,7 @@ constexpr uint32_t kFloatDefaultNan = 0x7fc00000;
 constexpr uint64_t kDoubleDefaultNan = 0x7ff8000000000000;
 
 // The register fields of an instruction. A single-precision register's number is Vx:X, and a double-precision one's is
-// X:Vx. VFPv2 has D0 to D15, so a double-precision number of 16 or more is undefined.
+// X:Vx. VFPv2 has D0 to D15. A double-precision number of 16 or more is undefined.
 constexpr uint32_t Sd(uint32_t op)
 {
     return ((op >> 11) & 0x1e) | ((op >> 22) & 1);

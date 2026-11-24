@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+// The start of archive mode's model with the effects on the aux buses (see archive_start.h).
+
 #include "nnsnd/archive_start.h"
 
 #include <array>

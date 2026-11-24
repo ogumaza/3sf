@@ -20,52 +20,23 @@
 
 #include "ntdlib/ctr/dsp/dsp.h"
 #include "ntdlib/ctr/nnsnd/dsp_abi.h"
+#include "ntdlib/ctr/snd/game_effects.h"
 #include "ntdlib/ctr_fx/effects.h"
 
 namespace threesf::nnsnd
 {
 
-// The aux buses, A and B.
-constexpr int kAuxBusCount = 2;
+// The aux buses, an effect on one and the effects on each, as ntdlib's table of the games' effects gives them. The
+// kinds of AuxEffect are those of the archive descriptor.
+using ntdlib::ctr::snd::AuxEffect;
+using ntdlib::ctr::snd::AuxEffectLists;
+using ntdlib::ctr::snd::kAuxBusCount;
 
 // The samples of each of a bus's four channels in a frame (front left, front right, rear left and rear right).
 constexpr std::size_t kAuxChannelSamples = ntdlib::ctr::dsp::kSamplesPerFrame;
 
-// An effect on an aux bus, and the library whose code it follows. The kinds are those of the archive descriptor.
-struct AuxEffect
-{
-    enum class Kind : uint32_t
-    {
-        kNwSndReverb = 1,     // nw::snd's FxReverb
-        kNnSndReverb = 2,     // nn::snd's FxReverb, as games from 2013 on link it
-        kNnSndReverb2011 = 3, // nn::snd's FxReverb, as Ocarina of Time 3D links it
-        kDelay = 4,           // nw::snd's FxDelay, or nn::snd's: the two compute the same
-        kFirmwareDelay = 5,   // the DSP firmware's delay, which nn::snd sets up
-        kNwSndReverb2011 = 6, // nw::snd's FxReverb, as StreetPass Mii Plaza links it (2011)
-        kFirmwareReverb = 7,  // the reverb that nn::snd sets up in the DSP firmware
-    };
-
-    // Whether `kind` is one of the kinds above.
-    static bool Known(uint32_t kind);
-
-    // Whether the effect is a reverb, with the parameters in `reverb`, rather than a delay, with those in `delay`.
-    bool IsReverb() const;
-
-    // Whether the firmware runs the effect, rather than the ARM11.
-    bool InFirmware() const;
-
-    // The samples that the model's buffers hold.
-    uint64_t BufferSamples() const;
-
-    Kind kind = Kind::kNwSndReverb;
-    ntdlib::ctr_fx::ReverbParam reverb;
-    ntdlib::ctr_fx::DelayParam delay;
-};
-
-// The effects on each bus, in the order in which they process a frame. A game's nw::snd effects come first, in the
-// order of nw::snd's list, then at most one of nn::snd's. The firmware's delay and reverb, at most one of each on each
-// bus, run in the firmware wherever they stand in the list.
-using AuxEffectLists = std::array<std::vector<AuxEffect>, kAuxBusCount>;
+// The samples that the model of `effect` holds in its buffers.
+uint64_t BufferSamples(const AuxEffect& effect);
 
 // Whether `effects` puts an effect on either bus.
 bool HasEffects(const AuxEffectLists& effects);

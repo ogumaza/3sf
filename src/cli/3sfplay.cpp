@@ -1,18 +1,11 @@
 // SPDX-License-Identifier: MIT
 
-// 3sfplay: renders .3sf/.mini3sf files to WAV or FLAC at the native 32728 Hz.
+// 3sfplay: renders .3sf/.mini3sf files to WAV or FLAC at the native 32728 Hz, on xsflib's play tool
+// (xsflib/cli/play.h). The tool gives the options: -o for the output file of a single input, the times in place of the
+// tags, the fade's curve, the album settings, --info and --version.
 //
-// usage: 3sfplay [options] <file> [<file> ...]
-//   -o, --output FILE  the output file, WAV or FLAC by its extension (default: the input's name with .wav, next to
-//                      it). It takes a single input.
-//   --length T         override the length tag (seconds, m:s or h:m:s)
-//   --fade T           override the fade tag
-//   --default T        length when there's no length tag (default and fade: PlaybackOptions)
-//   --info             print the tags and loaded files, and don't render
-//   --version          print the version
-//
-// The files are rendered one after another, and one that fails doesn't stop the rest. A .3sflib among them is skipped,
-// since it's a library that the others load. Dropping files on the program gives it the files as inputs.
+// The files are rendered one after another, and one that fails doesn't stop the rest. A .3sflib among them is skipped:
+// it's a library that the others load. Dropping files on the program gives it the files as inputs.
 
 #include "ntdlib/ctr/dsp/quiet_stdout.h"
 #include "xsflib/cli/play.h"

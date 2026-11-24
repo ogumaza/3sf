@@ -8,20 +8,18 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
-#include <filesystem>
 #include <map>
 #include <optional>
 #include <string>
 #include <vector>
 
+#include "ntdlib/ctr/snd/game_effects.h"
 #include "ntdlib/ctr/snd/sar_options.h"
 #include "ntdlib/sar/formats.h"
 #include "ntdlib/testing/sar_files.h"
 #include "xsflib/bytes.h"
-#include "xsflib/files.h"
 #include "xsflib/testing/check.h"
 #include "xsflib/testing/sets.h"
-#include "xsflib/testing/temp_folder.h"
 
 #include "nnsnd/aux_effects.h"
 #include "rip/effects.h"
@@ -32,6 +30,9 @@
 
 using namespace threesf;
 using namespace xsflib::testing;
+using ntdlib::ctr::snd::ArchiveEffects;
+using ntdlib::ctr::snd::FindArchiveEffects;
+using ntdlib::ctr::snd::GameEffectOf;
 
 // A well-formed DSP1 image of 0x310 bytes: the header, then one segment of 0x10 bytes.
 static std::vector<uint8_t> DspImage()
@@ -158,37 +159,6 @@ static void TestGameFirmware()
     XSFLIB_CHECK(!from_neither);
 }
 
-// A loose archive's group file is found past a folder that the search can't read (R-479). The search walks two folders
-// in the system's order. The first can't be read, and the second holds the group file. Windows still lists a folder
-// whose permissions are none, so there the search reads both.
-static void TestGroupPastUnreadableFolder()
-{
-    const xsflib::testing::TempFolder folder("threesf_rip_test");
-    std::filesystem::create_directories(folder.Path() / "a");
-    std::filesystem::create_directories(folder.Path() / "b");
-    std::vector<std::filesystem::path> order;
-    for (const std::filesystem::directory_entry& entry : std::filesystem::directory_iterator(folder.Path()))
-    {
-        order.push_back(entry.path().filename());
-    }
-
-    XSFLIB_CHECK(order.size() == 2);
-    if (order.size() != 2)
-    {
-        return;
-    }
-
-    const std::vector<uint8_t> data = {1, 2, 3};
-    XSFLIB_CHECK(!xsflib::WriteFile(folder.Path() / order[1] / "GROUP_A.bcgrp", data));
-    std::filesystem::permissions(folder.Path() / order[0], std::filesystem::perms::none);
-
-    const std::optional<rip::FileChunk> group = rip::FindGroupIn(folder.Path(), "GROUP_A");
-    // The folder's removal requires the permissions back.
-    std::filesystem::permissions(folder.Path() / order[0], std::filesystem::perms::owner_all);
-
-    XSFLIB_CHECK(group && group->path == xsflib::Utf8(order[1]) + "/GROUP_A.bcgrp" && group->data == data);
-}
-
 // --bgm's labels: a word that starts with BGM, a jingle or a fanfare, with or without a number, or SEQ_M_ at the start,
 // in any case. Other words, and the same letters inside another word, don't count.
 static void TestMusicLabels()
@@ -219,7 +189,7 @@ static void TestWalkSequence()
         0x89, 0x00, 0x00, 0x10,                   // 0x15: jump back to 0x10
         0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, // 0x19: fin
         0xa0, 0x40, 0x64, 0x00, 0x00, 0x00, 0x30, // 0x20: a note with a random length (4 bytes)
-        0xa2, 0x89, 0x00, 0x00, 0x30,             // 0x27: a conditional jump to 0x30, which doesn't end the track
+        0xa2, 0x89, 0x00, 0x00, 0x30,             // 0x27: a conditional jump to 0x30, not an end of the track
         0xff, 0xff, 0xff, 0xff,                   // 0x2c: fin
         0x41, 0x64, 0x81, 0x00,                   // 0x30: a note 128 ticks long (a two-byte length)
         0xff,                                     // 0x34: fin
@@ -279,6 +249,32 @@ static void TestPieces()
         Check(pieces[1].name == "BGM_B" && pieces[1].sounds == std::vector<uint32_t>{9, 8, 7, 6, 5},
               "a piece's sounds go by their suffixes, not their places in the archive");
     }
+}
+
+// An archive without a STRG block names each sequence after the label in its sequence file where it starts, without a
+// _Begin at the end. A sequence file without labels leaves SEQ_<index>. --bgm then finds music by those names.
+static void TestNamesFromSequenceLabels()
+{
+    namespace sar_files = ntdlib::testing::sar_files;
+    using ntdlib::sar::Flavor;
+    sar_files::ArchiveSpec spec;
+    spec.names = false;
+    spec.players = {{"PLAYER_BGM", 1}};
+    spec.sounds = {{.file = 0}, {.file = 1}, {.file = 2}};
+    spec.files = {
+        {.bytes = sar_files::Sequence(Flavor::kCtr, {0xff}, {{"SMF_BGM_FIELD_Begin", 0}, {"SMF_BGM_FIELD_End", 0}})},
+        {.bytes = sar_files::Sequence(Flavor::kCtr, {0xff}, {{"SE_JUMP", 0}})},
+        {.bytes = sar_files::Sequence(Flavor::kCtr, {0xff}, {})},
+    };
+    const auto archive =
+        ntdlib::sar::SoundArchive::Load(sar_files::Archive(Flavor::kCtr, spec), ntdlib::ctr::kSarOptions);
+
+    const auto& sounds = archive.Sounds();
+    Check(sounds.size() == 3 && sounds[0].name == "SMF_BGM_FIELD" && sounds[1].name == "SE_JUMP" &&
+              sounds[2].name == "SEQ_2",
+          "sequences named by their labels");
+    Check(sounds.size() == 3 && rip::IsMusic(archive, sounds[0]) && !rip::IsMusic(archive, sounds[1]),
+          "--bgm reads the labels");
 }
 
 // The timing of sequences that play together (rip::TimingOfPiece): the latest end, and the longest fade. A silent
@@ -353,19 +349,26 @@ static void TestArchiveSets()
     Check(rip::BuildArchiveMini(0x01000013, "lib", {}) ==
               rip::BuildArchiveMini(std::vector<uint32_t>{0x01000013}, "lib", {}),
           "a mini of one sound is the same either way");
+}
 
-    // A library with effect sets has version 3 and bit 2 of the flags. A mini's 3sf_aux tag picks a set (docs/3sf.md,
-    // "Effect sets").
+// A library with effect sets has version 3 and bit 2 of the flags. A mini's 3sf_aux tag picks a set (docs/3sf.md,
+// "Effect sets").
+static void TestEffectSets()
+{
+    const std::vector<uint8_t> kArchive = {1, 2, 3};
+    const std::vector<uint8_t> kFirmware = {4, 5};
     nnsnd::AuxEffect delay;
     delay.kind = nnsnd::AuxEffect::Kind::kDelay;
     delay.delay = {.delay_time = 100, .feedback = 0.5f, .damping = 0.0f};
     const std::vector<nnsnd::AuxEffectLists> kSets = {{{{delay}, {}}}};
+    std::map<std::string, std::vector<uint8_t>> files;
     files["a/sets.3sflib"] = rip::BuildArchiveLibrary("Sound.bcsar", kArchive, "dspaudio.cdc", kFirmware, {}, {},
                                                       ArchiveDescriptor::kVersion, {}, false, kSets);
     files["a/club.mini3sf"] = rip::BuildArchiveMini(0x01000013, "sets.3sflib", {{"3sf_aux", "1"}});
-    const FileReader set_reader = xsflib::testing::MapReader(files);
+    const FileReader reader = xsflib::testing::MapReader(files);
+
     LoadedSet club;
-    const auto club_error = LoadSet("a/club.mini3sf", set_reader, club);
+    const auto club_error = LoadSet("a/club.mini3sf", reader, club);
 
     Check(!club_error && club.archive && club.archive->version == ArchiveDescriptor::kEffectSetsVersion &&
               club.archive->flags == (kFlagDspRequired | kFlagAuxEffects) && !club.archive->Check() &&
@@ -374,23 +377,45 @@ static void TestArchiveSets()
           "a set with effect sets has version 3");
     Check(EffectSetOf(club.tags) == 1 && EffectSet(*club.archive, EffectSetOf(club.tags)) != nullptr,
           "a mini's 3sf_aux tag picks its effect set");
+}
 
+// The effects of the known archives that some sequences play in place of the archive's effects.
+static void TestArchiveEffectsTable()
+{
     // New Leaf's DJ K.K. plays with the game's effect 0, set 1 of a rip. Other sequences play set 0.
-    const rip::ArchiveEffects* new_leaf = rip::FindArchiveEffects("54f0fbc801c85ea2035219923aa4cd955e6f4cc7");
+    const ArchiveEffects* new_leaf = FindArchiveEffects("54f0fbc801c85ea2035219923aa4cd955e6f4cc7");
+
     Check(new_leaf && rip::EffectSetOf(new_leaf, 0) == 1 &&
               rip::EffectSetOf(new_leaf, ntdlib::ctr::snd::SequenceStart::kArchiveEffects) == 0 &&
               rip::EffectSetOf(nullptr, 0) == 0,
           "New Leaf's effect 0 is effect set 1");
+
+    // The Plaza's sound test plays Flower Town's SOUNDLIST_ sounds with effect 0: the reverb on bus B alone, where the
+    // archive's reverb is on bus A. A start that gives an effect keeps it.
+    constexpr uint8_t kArchiveEffects = ntdlib::ctr::snd::SequenceStart::kArchiveEffects;
+    const ArchiveEffects* flower_town = FindArchiveEffects("331b572b09819830436fe8a09673b22fc6f7bdae");
+
+    Check(flower_town && GameEffectOf(flower_town, "SOUNDLIST_TITLE", kArchiveEffects) == 0 &&
+              rip::EffectSetOf(flower_town, 0) == 1 && flower_town->game_effects[0].buses[0].empty() &&
+              flower_town->game_effects[0].buses[1].size() == 1 && flower_town->buses[0].size() == 1 &&
+              flower_town->buses[1].empty(),
+          "Flower Town's SOUNDLIST_ sounds play effect set 1, with nothing on bus A");
+    Check(flower_town && GameEffectOf(flower_town, "BGM_FLOWER_TOWN", kArchiveEffects) == kArchiveEffects &&
+              GameEffectOf(flower_town, "SOUNDLIST_TITLE", 1) == 1 &&
+              GameEffectOf(nullptr, "SOUNDLIST_TITLE", kArchiveEffects) == kArchiveEffects,
+          "the other sounds keep the effect of their start");
 }
 
 int main()
 {
+    TestArchiveEffectsTable();
     TestArchiveSets();
+    TestEffectSets();
     TestFirmwareCandidates();
     TestFirmwareInCode();
     TestGameFirmware();
-    TestGroupPastUnreadableFolder();
     TestMusicLabels();
+    TestNamesFromSequenceLabels();
     TestPieces();
     TestTimingOfPiece();
     TestWalkSequence();

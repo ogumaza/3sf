@@ -8,8 +8,8 @@
 // Time counts ARM11 cycles. Each instruction takes one cycle and each SVC a fixed number. The kernel runs the CPU in
 // slices of at most KernelConfig::slice_cycles. Each time the clock moves on, the kernel steps the DSP.
 //
-// State holds every object, thread and timed event. They refer to each other by index. A snapshot is therefore a copy
-// of State, with images of the memory regions that the kernel made.
+// State contains every object, thread and timed event. They refer to each other by index. A snapshot is therefore a
+// copy of State, with images of the memory regions that the kernel made.
 
 #pragma once
 
@@ -55,9 +55,6 @@ struct KernelConfig
     // gives FCRAM twice that size.
     uint32_t app_memory = 0x04000000;
 
-    // Where the program's code, data and bss end. The System computes it. Callers leave it at 0.
-    uint32_t program_end = 0;
-
     // The longest run of CPU cycles between two checks for timed events and DSP steps. It changes the output.
     uint64_t slice_cycles = 5000;
 };
@@ -94,8 +91,9 @@ public:
     // The kernel's state at one moment, with the contents of its memory regions.
     struct Snapshot;
 
-    // Maps and fills configuration memory and the shared page.
-    explicit Kernel(const KernelConfig& config);
+    // Maps and fills configuration memory and the shared page. `program_end` is where the program's code, data and bss
+    // end. The System computes it.
+    explicit Kernel(const KernelConfig& config, uint32_t program_end = 0);
     Kernel(const Kernel&) = delete;
     Kernel& operator=(const Kernel&) = delete;
     ~Kernel();
@@ -149,12 +147,15 @@ public:
     void Restore(const Snapshot& snapshot);
 
     // The message of the error that ended a run with kError.
-    std::string error_;
+    const std::string& Error() const;
 
-    // Receives each log message, without a newline. When it's empty, messages go to stderr.
-    std::function<void(const std::string&)> log_;
+    // Sets the receiver of each log message, without a newline. Without one, messages go to stderr.
+    void SetLog(std::function<void(const std::string&)> log);
 
 private:
+    std::string error_;
+    std::function<void(const std::string&)> log_;
+
     enum class ThreadState : uint8_t
     {
         kReady,
@@ -202,32 +203,53 @@ private:
     // An object of any kind. Each kind uses only some of the fields.
     struct Object
     {
+        // Events and timers. A hooked event runs the services' hook when the guest signals it.
+        struct Signal
+        {
+            bool signalled = false;
+            bool hooked = false;
+            uint32_t reset_type = 0; // 0 one-shot, 1 sticky, 2 pulse; any other value behaves as sticky
+            uint64_t interval = 0;   // a timer's, in ticks
+            uint64_t generation = 0; // a timer's: each set and cancel makes the expiries scheduled before it stale
+        };
+
+        // Mutexes.
+        struct Mutex
+        {
+            uint32_t holder = kNone;
+            uint32_t lock_count = 0;
+        };
+
+        // Semaphores.
+        struct Semaphore
+        {
+            int32_t count = 0;
+            int32_t maximum = 0;
+        };
+
+        // Memory blocks.
+        struct Block
+        {
+            uint32_t address = 0;
+            uint32_t size = 0;
+            uint32_t storage = kNone; // the region of a memory block made without an address
+        };
+
         ObjectKind kind = ObjectKind::kFree;
         std::vector<uint32_t> waiters; // threads, in the order they started waiting
 
-        // Events and timers. A hooked event runs the services' hook when the guest signals it.
-        bool signalled = false;
-        bool hooked = false;
-        uint32_t reset_type = 0; // 0 one-shot, 1 sticky, 2 pulse; any other value behaves as sticky
-        uint64_t interval = 0;   // a timer's, in ticks
-        uint64_t generation = 0; // a timer's: each set and cancel makes the expiries scheduled before it stale
-
-        // Mutexes and semaphores.
-        uint32_t holder = kNone;
-        uint32_t lock_count = 0;
-        int32_t count = 0;
-        int32_t maximum = 0;
-
-        // Threads, memory blocks and sessions.
-        uint32_t thread = kNone;
-        uint32_t address = 0;
-        uint32_t size = 0;
-        uint32_t storage = kNone; // the region of a memory block made without an address
-        uint32_t service = kNone;
+        // The fields of each kind. Only the group of the object's kind is in use.
+        Signal signal;
+        Mutex mutex;
+        Semaphore semaphore;
+        uint32_t thread = kNone; // a thread's index
+        Block block;
+        uint32_t service = kNone; // a session's service
     };
 
-    // A timeout of a thread's wait or sleep, or an expiry of a timer. The event holds the generation that the thread's
-    // wait or the timer had when the event was scheduled. Once the generation has moved on, the event does nothing.
+    // A timeout of a thread's wait or sleep, or an expiry of a timer. The event contains the generation that the
+    // thread's wait or the timer had when the event was scheduled. Once the generation has moved on, the event does
+    // nothing.
     struct TimedEvent
     {
         enum class Kind : uint8_t
@@ -406,6 +428,7 @@ private:
     uint32_t NewRegion(uint32_t size);
 
     KernelConfig config_;
+    uint32_t program_end_ = 0;
     State state_;
     std::vector<Region> regions_;
     arm::Memory memory_;

@@ -1,19 +1,15 @@
 // SPDX-License-Identifier: MIT
 
-// The rips of archive mode: the library of a sound archive and its firmware, the minis, and the search for an archive's
-// group files (see rip.h and docs/3sf.md, "Archive mode").
+// The rips of archive mode: the library of a sound archive and its firmware, and the minis (see rip.h and docs/3sf.md,
+// "Archive mode").
 
 #include <cstdint>
-#include <filesystem>
-#include <optional>
 #include <string>
-#include <system_error>
 #include <utility>
 #include <vector>
 
 #include "ntdlib/rip/archive.h"
 #include "ntdlib/sar/formats.h"
-#include "xsflib/files.h"
 #include "xsflib/psf/streaming.h"
 
 #include "nnsnd/aux_effects.h"
@@ -86,48 +82,13 @@ std::vector<uint8_t> BuildArchiveMini(uint32_t sound_id, const std::string& lib_
 
 std::vector<uint8_t> BuildArchiveMini(const std::vector<uint32_t>& sound_ids, const std::string& lib_name, Tags tags)
 {
-    if (sound_ids.size() == 1)
+    std::vector<uint32_t> indices;
+    for (const uint32_t id : sound_ids)
     {
-        return BuildArchiveMini(sound_ids.front(), lib_name, std::move(tags));
+        indices.push_back(ntdlib::sar::ItemNumber(id));
     }
 
-    ArchiveMiniFormat::ProgramBuilder program;
-    program.AddSounds(sound_ids);
-    tags["_lib"] = lib_name;
-
-    return program.WritePsf(ArchiveMiniFormat::kPsfVersion, {}, tags);
-}
-
-std::optional<FileChunk> FindGroupIn(const std::filesystem::path& folder, const std::string& name)
-{
-    // A folder that the walk can't open, such as System Volume Information at the root of an NTFS drive, would end the
-    // walk without skip_permission_denied.
-    std::error_code ec;
-    for (std::filesystem::recursive_directory_iterator
-             it(folder, std::filesystem::directory_options::skip_permission_denied, ec),
-         end;
-         !ec && it != end; it.increment(ec))
-    {
-        std::error_code type_error;
-        if (!it->is_regular_file(type_error) ||
-            !ntdlib::sar::IsGroupFileName(xsflib::Utf8(it->path().filename()), name, ntdlib::sar::Flavor::kCtr))
-        {
-            continue;
-        }
-
-        FileChunk group;
-        for (const std::filesystem::path& part : it->path().lexically_relative(folder))
-        {
-            group.path += (group.path.empty() ? "" : "/") + xsflib::Utf8(part);
-        }
-
-        if (xsflib::ReadFile(it->path(), group.data))
-        {
-            return group;
-        }
-    }
-
-    return std::nullopt;
+    return ntdlib::rip::BuildMiniOfSounds<ArchiveMiniFormat>(indices, lib_name, std::move(tags));
 }
 
 } // namespace threesf::rip

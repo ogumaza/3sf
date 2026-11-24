@@ -3,7 +3,7 @@
 cmake_minimum_required(VERSION 3.20)
 # Shared version for 3sfrip, 3sfplay, the foobar2000 component, the XMPlay plugin, Windows file properties and macOS
 # bundles (THREESF_VERSION_ARGS below). For a release, update it here and add notes in docs/release-notes/.
-project(threesf VERSION 1.5.1 LANGUAGES CXX)
+project(threesf VERSION 1.6.0 LANGUAGES CXX)
 
 # xsflib is a library for players and rippers of the PSF family. It's a submodule. Its XsflibProject.cmake sets what a
 # project built on it starts with: C++20, a release build by default, the static C runtime, the options that keep the
@@ -15,12 +15,6 @@ if (NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/externals/xsflib/CMakeLists.txt")
 endif()
 include(externals/xsflib/cmake/XsflibProject.cmake)
 xsflib_project(CHECK_COMPILERS NAME 3SF PREFIX THREESF)
-# clang-cl's -Wmissing-designated-field-initializers asks for every field of a designated initializer. Filled-in fields
-# would copy the struct's defaults into each initializer, where they could drift from the struct. The warning is off
-# for 3SF's targets. The libraries keep it.
-if (THREESF_CLANG_CL)
-    list(APPEND THREESF_WARNINGS -Wno-missing-designated-field-initializers)
-endif()
 
 # xsflib also provides zlib for the PSF container and libFLAC for FLAC output. Their targets are xsflib::zlib and
 # xsflib::flac. ntdlib, a library for the hardware and formats of Nintendo's consoles, builds on it. ntdlib::ctr, a
@@ -38,14 +32,14 @@ target_include_directories(threesf_common INTERFACE src)
 target_link_libraries(threesf_common INTERFACE xsflib::common ntdlib::common)
 
 # The effects on the aux buses of nn::snd, on the models in ntdlib::ctr_fx, and the start of the archive-mode model with
-# those effects.
+# those effects. ntdlib::ctr_game_effects gives the effects of each known game.
 add_library(threesf_nnsnd STATIC
     src/nnsnd/archive_start.cpp
     src/nnsnd/archive_start.h
     src/nnsnd/aux_effects.cpp
     src/nnsnd/aux_effects.h
 )
-target_link_libraries(threesf_nnsnd PUBLIC threesf_common ntdlib::ctr ntdlib::ctr_fx)
+target_link_libraries(threesf_nnsnd PUBLIC threesf_common ntdlib::ctr ntdlib::ctr_fx ntdlib::ctr_game_effects)
 target_compile_options(threesf_nnsnd PRIVATE ${THREESF_WARNINGS})
 
 # ARM11 (ARMv6K + VFPv2) user-mode interpreter that runs the game's sound code.
@@ -104,8 +98,6 @@ target_compile_options(threesf_core PRIVATE ${THREESF_WARNINGS})
 # Ripper: game profiles, the guest driver (driver/driver.c, prebuilt), the games' effects on the aux buses and length
 # analysis.
 add_library(threesf_rip STATIC
-    src/rip/blz.cpp
-    src/rip/blz.h
     src/rip/driver_blob.h
     src/rip/effects.cpp
     src/rip/effects.h
@@ -121,7 +113,7 @@ add_library(threesf_rip STATIC
     src/rip/rip.h
 )
 target_link_libraries(threesf_rip PUBLIC threesf_core ntdlib::rip_archive xsflib::rip
-                      PRIVATE ntdlib::nwsnd_commands xsflib::zlib)
+                      PRIVATE ntdlib::ntr ntdlib::nwsnd_commands xsflib::zlib)
 target_compile_options(threesf_rip PRIVATE ${THREESF_WARNINGS})
 
 # The version of each program, as THREESF_VERSION, and on Windows the version resource that Explorer shows in the file's
@@ -129,10 +121,12 @@ target_compile_options(threesf_rip PRIVATE ${THREESF_WARNINGS})
 set(THREESF_VERSION_ARGS VERSION ${threesf_VERSION} DEFINE THREESF_VERSION PRODUCT 3SF
     COPYRIGHT "Copyright (c) 2026 the 3SF authors. MIT licence.")
 
+# A 32-bit Windows build of 3sfrip is large-address-aware. It can then use more than 2 GB.
 add_executable(3sfrip src/cli/3sfrip.cpp src/cli/rip_jobs.cpp src/cli/firmware_inputs.cpp)
 target_link_libraries(3sfrip PRIVATE threesf_rip xsflib::cli)
 target_compile_options(3sfrip PRIVATE ${THREESF_WARNINGS})
 xsflib_add_version(3sfrip ${THREESF_VERSION_ARGS} DESCRIPTION "3SF ripper")
+xsflib_large_address_aware(3sfrip)
 
 add_executable(3sfplay src/cli/3sfplay.cpp)
 target_link_libraries(3sfplay PRIVATE threesf_core xsflib::cli)

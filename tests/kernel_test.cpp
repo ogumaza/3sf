@@ -33,7 +33,7 @@ static std::vector<uint8_t> Words(std::initializer_list<uint32_t> words)
 }
 
 // Runs a program that asks GetResourceLimitCurrentValues for the committed memory, and returns the answer. The program
-// is at 0x100000 and `size` bytes long; `extra` is a segment mapped apart from it, as a rip's driver is.
+// is at 0x100000 and `size` bytes long. `extra` is a segment mapped apart from it, the way a rip maps its driver.
 static uint64_t CommittedMemory(uint32_t size, const ProcessImage::Segment& extra)
 {
     constexpr uint32_t kValues = 0x100100; // the s64 the SVC writes
@@ -41,7 +41,7 @@ static uint64_t CommittedMemory(uint32_t size, const ProcessImage::Segment& extr
 
     std::vector<uint8_t> program = Words({
         0xe59f101c, // ldr r1, =0xffff8001 (the current process)
-        0xef000038, // svc 0x38: GetResourceLimit, which leaves the handle in r1
+        0xef000038, // svc 0x38: GetResourceLimit, with the handle in r1
         0xe59f000c, // ldr r0, =kValues
         0xe59f200c, // ldr r2, =kNames
         0xe3a03001, // mov r3, #1
@@ -82,9 +82,9 @@ static void TestCommittedMemory()
     XSFLIB_CHECK(CommittedMemory(0x3001, kBss) == 0x106000);
 }
 
-// Runs a program whose main thread starts a second thread at its own priority, then yields until the second one has set
-// a flag, and returns true if it got to the end. The main thread yields with svcSleepThread(0), or with the YIELD hint
-// if `hint` is true.
+// Runs a program whose main thread starts a second thread at the main thread's priority and yields until the second one
+// has set a flag. Returns true if the program got to the end. The main thread yields with svcSleepThread(0), or with
+// the YIELD hint if `hint` is true.
 static bool YieldLetsTheOtherThreadRun(bool hint)
 {
     constexpr uint32_t kFlag = 0x101000;

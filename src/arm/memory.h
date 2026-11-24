@@ -180,7 +180,7 @@ private:
     // A write to a watched page (see WatchWrites) or an unmapped one.
     void WriteSlow8(uint32_t a, uint8_t v);
 
-    // Calls fn(host, offset, chunk) for each piece of [vaddr, vaddr + size) that lies in one page, up to the first
+    // Calls fn(host, offset, chunk) for each piece of [vaddr, vaddr + size) that is in one page, up to the first
     // unmapped page. host is the address of the piece in host memory, offset the number of bytes before the piece and
     // chunk the size of the piece.
     template <typename Fn>
@@ -208,14 +208,14 @@ private:
     bool fault_write_ = false;
     std::unique_ptr<uint8_t*[]> pages_;
 
-    // The same pages for writing, except that watched pages are missing, so that their writes take the slow path.
+    // The same pages for writing, without the watched pages. A write to a watched page then takes the slow path.
     std::unique_ptr<uint8_t*[]> write_pages_;
 
     const uint8_t* watch_start_ = nullptr;
     const uint8_t* watch_end_ = nullptr;
     std::function<void()> on_watched_write_;
 
-    // Mapping generation. Map and Unmap assign a new number, so snapshots with the same number share the same mapping.
+    // The mapping's generation. Map and Unmap assign a new number. Snapshots with the same number share one mapping.
     uint64_t generation_ = 0;
     uint64_t next_generation_ = 1;
 };
